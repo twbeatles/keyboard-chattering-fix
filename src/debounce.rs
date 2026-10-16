@@ -17,6 +17,11 @@ pub enum MeasureFrom {
 }
 
 /// A recorded key event for real-time telemetry and logging.
+///
+/// The buffer is bounded and written on every decision, but no surface reads
+/// the fields back yet; the allowance documents that intent instead of
+/// letting the fields look accidentally unused.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct LogEvent {
     pub time: Duration,
@@ -82,6 +87,10 @@ impl Debouncer {
 
     pub fn threshold_ms(&self) -> u64 {
         self.global_threshold.as_millis() as u64
+    }
+
+    pub fn min_chatter_ms(&self) -> u64 {
+        self.min_chatter.as_millis() as u64
     }
 
     /// Per-key override (`None` removes it, falling back to global).
@@ -194,14 +203,6 @@ impl Debouncer {
                 }
                 true
             }
-        }
-    }
-
-    pub fn chatter_ratio(&self) -> f64 {
-        if self.total_presses == 0 {
-            0.0
-        } else {
-            self.blocked_presses as f64 * 100.0 / self.total_presses as f64
         }
     }
 
@@ -355,6 +356,14 @@ mod tests {
     }
 
     #[test]
+    fn min_chatter_getter_round_trips() {
+        let mut d = Debouncer::new(50);
+        assert_eq!(d.min_chatter_ms(), 0);
+        d.set_min_chatter_ms(2000);
+        assert_eq!(d.min_chatter_ms(), 1000);
+    }
+
+    #[test]
     fn log_buffer_stays_bounded() {
         let mut d = Debouncer::new(50);
         d.record_all_keys = true;
@@ -363,7 +372,10 @@ mod tests {
             assert!(d.decide(0x41, KeyEventKind::Down, ms(t * 100)));
             assert!(d.decide(0x41, KeyEventKind::Up, ms(t * 100 + 50)));
         }
-        assert!(d.log_events.len() <= 11);
+        // 50 recorded presses against a cap of 10: the buffer must hold
+        // exactly the 10 most recent events, no more and no fewer.
+        assert_eq!(d.log_events.len(), 10);
+        assert_eq!(d.log_events.back().unwrap().time, ms(4900));
     }
 
     #[test]

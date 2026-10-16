@@ -76,16 +76,19 @@ Featuring a native Windows 11 Fluent Card interface, real-time diagnostic teleme
 keyboard-chattering-fix/
 ├── Cargo.toml                  # Workspace & release manifest
 ├── src/
-│   ├── main.rs                 # Low-level hook callback, 1ms timer & message pump
+│   ├── main.rs                 # Bootstrap only (CLI → bootstrap::run)
+│   ├── app/                    # Startup, CLI, single-instance guard, shared state
+│   ├── input/                  # Keyboard hook (zero-alloc) & cached sound playback
 │   ├── debounce.rs             # Core state machine, per-key stats & cleaning mode
-│   ├── ui.rs                   # Windows 11 Fluent UI, cards & double-buffered paint
-│   ├── config.rs               # INI settings persistence & Windows autostart registry
-│   ├── i18n.rs                 # Bilingual string tables (English / Korean)
+│   ├── config/                 # Settings model, atomic INI storage, autostart, sound
+│   ├── i18n/                   # Bilingual string tables (English / Korean)
+│   ├── ui/                     # Window, snapshot-diff stats, tray, paint, settings form
 │   └── updater/                # Ed25519 verification, HTTP staging & update logic
 ├── crates/
 │   └── kcfix-updater/          # Standalone update helper for safe in-place replacement
 ├── tests/
-│   └── version_sync.rs         # Automated guard against version and pipeline drift
+│   ├── version_sync.rs         # Automated guard against version and pipeline drift
+│   └── exe_smoke.rs            # Real-binary --version/-V launch smoke test
 └── docs/
     └── UPDATE.md               # Detailed update pipeline & signing documentation
 ```
@@ -129,7 +132,7 @@ key.20=80              # Custom 80ms threshold for Spacebar (0x20)
 git clone https://github.com/twbeatles/keyboard-chattering-fix.git
 cd keyboard-chattering-fix
 
-# Run automated test suite (50 unit & integration tests)
+# Run automated test suite (65 unit & integration tests)
 cargo test
 
 # Build optimized release binary (LTO + strip enabled)
@@ -202,16 +205,19 @@ The compiled binary will be placed at `target/release/keyboard-chattering-fix.ex
 keyboard-chattering-fix/
 ├── Cargo.toml                  # 프로젝트 및 릴리스 프로파일 명세
 ├── src/
-│   ├── main.rs                 # 저수준 훅 콜백, 1ms 멀티미디어 타이머 및 메시지 루프
+│   ├── main.rs                 # 부트스트랩 전용 (CLI → bootstrap::run)
+│   ├── app/                    # 기동 순서, CLI, 단일 인스턴스 가드, 공유 상태
+│   ├── input/                  # 키보드 훅(무할당) 및 캐시된 사운드 재생
 │   ├── debounce.rs             # 디바운서 상태 머신, 키별 누적 통계 및 청소 모드
-│   ├── ui.rs                   # Windows 11 Fluent UI, 카드 대시보드 및 더블 버퍼링 페인팅
-│   ├── config.rs               # INI 설정 파일 입출력 및 Windows 시작프로그램 레지스트리 관리
-│   ├── i18n.rs                 # 한국어 및 영어 동적 다국어 문자열 테이블
+│   ├── config/                 # 설정 모델, 원자적 INI 저장, 자동실행, 사운드 검증
+│   ├── i18n/                   # 한국어 및 영어 동적 다국어 문자열 테이블
+│   ├── ui/                     # 창, 스냅샷-디프 통계, 트레이, 페인트, 설정 폼
 │   └── updater/                # Ed25519 서명 검증, 다운로드 스테이징 및 버전 확인 로직
 ├── crates/
 │   └── kcfix-updater/          # 프로세스 안전 교체 및 자동 롤백을 수행하는 독립 헬퍼 바이너리
 ├── tests/
-│   └── version_sync.rs         # 빌드 및 릴리스 파이프라인 버전 불일치 방지 회귀 테스트
+│   ├── version_sync.rs         # 빌드 및 릴리스 파이프라인 버전 불일치 방지 회귀 테스트
+│   └── exe_smoke.rs            # 실제 바이너리 --version/-V 실행 스모크 테스트
 └── docs/
     └── UPDATE.md               # 업데이트 배포 파이프라인 및 서명 키 관리 기술 문서
 ```
