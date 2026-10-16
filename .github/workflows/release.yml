@@ -1,0 +1,68 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.15"
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install "cryptography>=50"
+      - name: Verify tag matches application version
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path src/config.rs -Pattern 'pub const VERSION: &str = "([^"]+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag $env:GITHUB_REF_NAME must match application version v$version" }
+      - name: Test workspace gate
+        # A tagged release must never ship code that fails the
+        # contract/sync suite. windows-ci already runs this per-PR; the
+        # tag pipeline re-runs it so a tag on an untested commit is blocked.
+        run: cargo test --workspace
+      - name: Build release executables
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\build_release.ps1 -NoSign
+      - name: Create signed update manifest
+        shell: pwsh
+        env:
+          KCFIX_UPDATE_PRIVATE_KEY_B64: ${{ secrets.KCFIX_UPDATE_PRIVATE_KEY_B64 }}
+        run: |
+          python scripts/build_update_manifest.py `
+            --version $env:GITHUB_REF_NAME `
+            --tag $env:GITHUB_REF_NAME `
+            --artifact dist/KeyboardChatteringFix.exe `
+            --artifact-url "https://github.com/${{ github.repository }}/releases/download/$env:GITHUB_REF_NAME/KeyboardChatteringFix.exe" `
+            --output dist/update.json
+      - name: Publish GitHub Release assets idempotently
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:GITHUB_REF_NAME 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:GITHUB_REF_NAME --generate-notes --title $env:GITHUB_REF_NAME
+          }
+          gh release upload $env:GITHUB_REF_NAME dist/KeyboardChatteringFix.exe dist/kcfix-updater.exe dist/KeyboardChatteringFix.zip dist/update.json --clobber
+      - name: Verify published manifest asset
+        shell: pwsh
+        run: |
+          $url = "https://github.com/${{ github.repository }}/releases/download/$env:GITHUB_REF_NAME/update.json"
+          Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile published-update.json
+          python scripts/verify_update_manifest.py --manifest published-update.json
+          python -c "import json; d=json.load(open('published-update.json', encoding='utf-8')); assert d['payload']['tag']=='${{ github.ref_name }}'; assert d['payload']['artifact_url'].endswith('/${{ github.ref_name }}/KeyboardChatteringFix.exe')"

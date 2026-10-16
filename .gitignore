@@ -1,0 +1,16 @@
+/target/
+/dist/
+/build/
+*.old
+**/*.rs.bk
+published-update.json
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# CodeGraph & Local Agent Cache
+.codegraph/
+.system_generated/

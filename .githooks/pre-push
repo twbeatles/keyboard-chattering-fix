@@ -1,0 +1,28 @@
+﻿#!/bin/sh
+# Pre-push gate: fmt + clippy + check must pass before push proceeds.
+# Activated via: git config core.hooksPath .githooks
+# (or run scripts/setup_githooks.ps1 once).
+echo "=== [Pre-push] Rust 코드 검사 시작 ==="
+
+echo "1. cargo fmt 검사 중..."
+cargo fmt --all -- --check
+if [ $? -ne 0 ]; then
+    echo "❌ cargo fmt 실패. 'cargo fmt --all'을 실행한 뒤 다시 푸시하세요."
+    exit 1
+fi
+
+echo "2. cargo clippy 검사 중..."
+cargo clippy --all-targets --all-features -- -D warnings
+if [ $? -ne 0 ]; then
+    echo "❌ cargo clippy 실패. 경고를 수정한 뒤 다시 푸시하세요."
+    exit 1
+fi
+
+echo "3. cargo check 실행 중..."
+cargo check --workspace --all-targets
+if [ $? -ne 0 ]; then
+    echo "❌ cargo check 실패. 컴파일 오류를 수정한 뒤 다시 푸시하세요."
+    exit 1
+fi
+
+echo "✅ 모든 검사 통과! 원격 저장소로 푸시를 진행합니다."

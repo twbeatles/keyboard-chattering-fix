@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="100%" height="100%">
+  <defs>
+    <!-- Background Shadow Filter -->
+    <filter id="drop-shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <filter id="badge-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-color="#000000" flood-opacity="0.4"/>
+    </filter>
+
+    <!-- Gradients -->
+    <linearGradient id="bodyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2D3548"/>
+      <stop offset="100%" stop-color="#1B202D"/>
+    </linearGradient>
+
+    <linearGradient id="plateGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#131620"/>
+      <stop offset="100%" stop-color="#191E2A"/>
+    </linearGradient>
+
+    <linearGradient id="keyWhiteTop" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#EBF0F7"/>
+    </linearGradient>
+
+    <linearGradient id="keyModTop" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#55627D"/>
+      <stop offset="100%" stop-color="#3F495E"/>
+    </linearGradient>
+
+    <linearGradient id="keyAccentTop" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#0284C7"/>
+    </linearGradient>
+
+    <linearGradient id="badgeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#059669"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Keyboard Housing -->
+  <rect x="20" y="44" width="216" height="164" rx="24" fill="url(#bodyGrad)" stroke="#4A5568" stroke-width="2.5" filter="url(#drop-shadow)"/>
+  <rect x="22" y="46" width="212" height="160" rx="22" fill="none" stroke="#64748B" stroke-width="1" opacity="0.4"/>
+
+  <!-- Keyboard Plate (Recessed Area) -->
+  <rect x="31" y="59" width="194" height="136" rx="14" fill="url(#plateGrad)" stroke="#2D3748" stroke-width="2"/>
+
+  <!-- Row 1 Keys -->
+  <!-- ESC (Accent) -->
+  <rect x="40" y="72" width="25" height="30" rx="6" fill="#0369A1"/>
+  <rect x="40" y="69" width="25" height="30" rx="6" fill="url(#keyAccentTop)"/>
+
+  <!-- Keys 1..4 -->
+  <rect x="70" y="72" width="25" height="30" rx="6" fill="#CBD5E1"/>
+  <rect x="70" y="69" width="25" height="30" rx="6" fill="url(#keyWhiteTop)"/>
+
+  <rect x="100" y="72" width="25" height="30" rx="6" fill="#CBD5E1"/>
+  <rect x="100" y="69" width="25" height="30" rx="6" fill="url(#keyWhiteTop)"/>
+
+  <rect x="130" y="72" width="25" height="30" rx="6" fill="#CBD5E1"/>
+  <rect x="130" y="69" width="25" height="30" rx="6" fill="url(#keyWhiteTop)"/>
+
+  <rect x="160" y="72" width="25" height="30" rx="6" fill="#CBD5E1"/>
+  <rect x="160" y="69" width="25" height="30" rx="6" fill="url(#keyWhiteTop)"/>
+
+  <!-- Backspace (Mod) -->
+  <rect x="190" y="72" width="26" height="30" rx="6" fill="#29303D"/>
+  <rect x="190" y="69" width="26" height="30" rx="6" fill="url(#keyModTop)"/>
+
+  <!-- Row 2 Keys -->
+  <!-- Tab (Mod) -->
+  <rect x="40" y="112" width="31" height="30" rx="6" fill="#29303D"/>
+  <rect x="40" y="109" width="31" height="30" rx="6" fill="url(#keyModTop)"/>
+
+  <!-- Keys Q..E -->
+  <rect x="76" y="112" width="30" height="30" rx="6" fill="#CBD5E1"/>
+  <rect x="76" y="109" width="30" height="30" rx="6" fill="url(#keyWhiteTop)"/>
+
+  <rect x="111" y="112" width="30" height="30" rx="6" fill="#CBD5E1"/>
+  <rect x="111" y="109" width="30" height="30" rx="6" fill="url(#keyWhiteTop)"/>
+
+  <rect x="146" y="112" width="30" height="30" rx="6" fill="#CBD5E1"/>
+  <rect x="146" y="109" width="30" height="30" rx="6" fill="url(#keyWhiteTop)"/>
+
+  <!-- Enter (Mod) -->
+  <rect x="181" y="112" width="35" height="30" rx="6" fill="#29303D"/>
+  <rect x="181" y="109" width="35" height="30" rx="6" fill="url(#keyModTop)"/>
+
+  <!-- Row 3 Keys -->
+  <!-- Ctrl (Mod) -->
+  <rect x="40" y="152" width="31" height="30" rx="6" fill="#29303D"/>
+  <rect x="40" y="149" width="31" height="30" rx="6" fill="url(#keyModTop)"/>
+
+  <!-- SPACEBAR (Wide Accent/White Key) -->
+  <rect x="76" y="152" width="102" height="30" rx="6" fill="#CBD5E1"/>
+  <rect x="76" y="149" width="102" height="30" rx="6" fill="url(#keyWhiteTop)"/>
+
+  <!-- Alt (Mod) -->
+  <rect x="183" y="152" width="33" height="30" rx="6" fill="#29303D"/>
+  <rect x="183" y="149" width="33" height="30" rx="6" fill="url(#keyModTop)"/>
+
+  <!-- Fix / Shield Badge (Right Bottom) -->
+  <g filter="url(#badge-shadow)">
+    <circle cx="205" cy="193" r="32" fill="url(#badgeGrad)" stroke="#FFFFFF" stroke-width="4"/>
+    <circle cx="205" cy="193" r="29" fill="none" stroke="#A7F3D0" stroke-width="1.5" opacity="0.6"/>
+    <!-- Checkmark Path -->
+    <path d="M192 192 L201 202 L219 183" fill="none" stroke="#FFFFFF" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

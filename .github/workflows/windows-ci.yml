@@ -1,0 +1,75 @@
+name: windows-ci
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".gitignore"
+      - "LICENSE"
+  pull_request:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".gitignore"
+      - "LICENSE"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Release Build
+        run: cargo build --release -p keyboard-chattering-fix -p kcfix-updater
+
+      - name: Copy Release Artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Force .\target\release\keyboard-chattering-fix.exe .\dist\KeyboardChatteringFix.exe
+          Copy-Item -Force .\target\release\kcfix-updater.exe .\dist\kcfix-updater.exe
+
+      - name: Packaged Smoke Check
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath .\dist\KeyboardChatteringFix.exe -ArgumentList @("--version") -PassThru -WindowStyle Hidden
+          if (-not $proc.WaitForExit(60000)) { throw "packaged --version timed out" }
+          if ($proc.ExitCode -ne 0) { throw "packaged --version failed with exit code $($proc.ExitCode)" }
+
+      - name: Pack Release Zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Force -Path .\dist\KeyboardChatteringFix.exe,.\dist\kcfix-updater.exe -DestinationPath .\dist\KeyboardChatteringFix.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: KeyboardChatteringFix
+          path: |
+            dist/KeyboardChatteringFix.exe
+            dist/kcfix-updater.exe
+            dist/KeyboardChatteringFix.zip

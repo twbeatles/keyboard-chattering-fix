@@ -1,0 +1,4 @@
+# Keep shell hooks LF-only so Git Bash can execute them.
+.githooks/* text eol=lf
+*.ico binary
+*.png binary
