@@ -1,7 +1,6 @@
-﻿#!/bin/sh
+#!/bin/sh
 # Pre-push gate: fmt + clippy + check must pass before push proceeds.
-# Activated via: git config core.hooksPath .githooks
-# (or run scripts/setup_githooks.ps1 once).
+# Activated once per clone via scripts/setup_githooks.ps1.
 echo "=== [Pre-push] Rust 코드 검사 시작 ==="
 
 echo "1. cargo fmt 검사 중..."
