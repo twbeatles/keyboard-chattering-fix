@@ -120,3 +120,19 @@ fn updater_artifact_name_matches_release_pipeline() {
         );
     }
 }
+
+#[test]
+fn release_verification_checks_binary_hash() {
+    // R-001: the post-publish gate must compare the published EXE bytes
+    // against the manifest hash/size, not just verify update.json.
+    let release_yml = read(".github/workflows/release.yml");
+    assert!(
+        release_yml.contains("--expect-asset"),
+        "release.yml must cross-check the published binary (R-001)"
+    );
+    let verifier = read("scripts/verify_update_manifest.py");
+    assert!(
+        verifier.contains("def check_asset"),
+        "verify_update_manifest.py must implement the asset cross-check"
+    );
+}

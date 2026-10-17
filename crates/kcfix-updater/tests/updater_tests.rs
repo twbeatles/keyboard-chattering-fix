@@ -157,7 +157,10 @@ fn readiness_failure_rolls_back_and_success_releases_backup() {
         if mode == "ack" {
             assert!(result.is_ok(), "{result:?}");
         } else {
-            assert!(matches!(result, Err(HelperError::RelaunchFailed(_))));
+            assert!(
+                matches!(result, Err(HelperError::RelaunchFailed(_))),
+                "mode={mode} result={result:?}"
+            );
             assert_eq!(fs::read(&current).unwrap(), b"previous-version");
         }
         assert!(!current.with_extension("exe.old").exists());

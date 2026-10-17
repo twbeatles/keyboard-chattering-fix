@@ -21,7 +21,9 @@ use windows::{
 use super::{
     controls::child,
     ids::*,
-    paint::{apply_window_chrome, draw_rounded_card, get_fonts, theme_is_dark, ThemeColors},
+    paint::{
+        apply_window_chrome, cached_brush, draw_rounded_card, get_fonts, theme_is_dark, ThemeColors,
+    },
     settings_form::on_save,
     state::{LANG, SAVED},
     stats::update_stats,
@@ -816,11 +818,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             match id {
                 ID_CLEAN_BANNER => {
                     let _ = SetTextColor(hdc, colors.cleaning_banner_fg);
-                    LRESULT(CreateSolidBrush(colors.cleaning_banner_bg).0 as isize)
+                    LRESULT(cached_brush(colors.cleaning_banner_bg).0 as isize)
                 }
                 ID_HEADER_TITLE => {
                     let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
                 ID_HEADER_SUB
                 | ID_STAT_TOTAL_LABEL
@@ -835,7 +837,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 | ID_LABEL_LOG_LIMIT
                 | ID_LABEL_LOG_UNIT => {
                     let _ = SetTextColor(hdc, colors.text_secondary);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
                 ID_HEADER_BADGE => {
                     let enabled = SHARED
@@ -848,31 +850,31 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                         (colors.status_paused_fg, colors.status_paused_bg)
                     };
                     let _ = SetTextColor(hdc, fg);
-                    LRESULT(CreateSolidBrush(bg).0 as isize)
+                    LRESULT(cached_brush(bg).0 as isize)
                 }
                 ID_CARD1_TITLE | ID_CARD2_TITLE | ID_CARD3_TITLE | ID_CARD4_TITLE => {
                     let _ = SetTextColor(hdc, colors.accent);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
                 ID_STAT_TOTAL_VAL | ID_STAT_CHATTER_VAL => {
                     let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
                 ID_STAT_RATIO_LABEL => {
                     let _ = SetTextColor(hdc, colors.text_secondary);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
                 ID_STAT_RATIO_VAL => {
                     let _ = SetTextColor(hdc, colors.accent);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
                 ID_STATIC_LAST | ID_STATIC_TOP_CHATTER => {
                     let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
                 ID_STATIC_HINT => {
                     let _ = SetTextColor(hdc, colors.text_secondary);
-                    LRESULT(CreateSolidBrush(colors.bg).0 as isize)
+                    LRESULT(cached_brush(colors.bg).0 as isize)
                 }
                 ID_CHECK_ENABLE
                 | ID_CHECK_SOUND
@@ -882,11 +884,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 | ID_CHECK_EXCLUDE_INJECTED
                 | ID_CHECK_RECORD_ALL => {
                     let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
                 _ => {
                     let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+                    LRESULT(cached_brush(colors.card_bg).0 as isize)
                 }
             }
         }
@@ -896,12 +898,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let colors = ThemeColors::new(is_dark);
             let _ = SetTextColor(hdc, colors.text_primary);
             let _ = SetBkColor(hdc, colors.edit_bg);
-            LRESULT(CreateSolidBrush(colors.edit_bg).0 as isize)
+            LRESULT(cached_brush(colors.edit_bg).0 as isize)
         }
         WM_CTLCOLORBTN => {
             let is_dark = theme_is_dark();
             let colors = ThemeColors::new(is_dark);
-            LRESULT(CreateSolidBrush(colors.card_bg).0 as isize)
+            LRESULT(cached_brush(colors.card_bg).0 as isize)
         }
         WM_SETTINGCHANGE => {
             apply_window_chrome(hwnd);
@@ -974,6 +976,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     let g = shared.lock().unwrap();
                     s.total_presses = g.debouncer.total_presses;
                     s.blocked_presses = g.debouncer.blocked_presses;
+                    s.per_key_presses = g.debouncer.per_key_presses;
+                    s.per_key_blocked = g.debouncer.per_key_blocked;
                 }
                 config::save(&s);
             }

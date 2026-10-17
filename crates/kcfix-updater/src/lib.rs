@@ -121,6 +121,38 @@ pub fn relaunch_previous(current: &Path, args: &[String]) -> bool {
     }
 }
 
+/// Restore `backup` over `current` after a failed swap. The failed `current`
+/// is removed first so the rename lands on a free path (a partial copy may
+/// otherwise block the rollback). A failed rollback leaves the user with no
+/// executable, so it must never be silent (ISSUE-001).
+fn rollback_swap(current: &Path, backup: &Path) -> Result<(), String> {
+    // Retry loop (ISSUE-001): freshly swapped executables are routinely
+    // held briefly by antivirus/temp-dir scanners, so a single rename
+    // attempt can fail with a transient Access Denied right after the
+    // child was reaped. Retries are bounded and only run on this failure
+    // path, never on success.
+    const ROLLBACK_ATTEMPTS: u32 = 4;
+    const ROLLBACK_RETRY_WAIT: Duration = Duration::from_millis(150);
+    if let Err(err) = std::fs::remove_file(current) {
+        warn!(current = %current.display(), %err, "rollback could not remove failed replacement");
+    }
+    let mut attempt = 0;
+    loop {
+        match std::fs::rename(backup, current) {
+            Ok(()) => return Ok(()),
+            Err(err) if attempt + 1 < ROLLBACK_ATTEMPTS => {
+                attempt += 1;
+                warn!(%err, attempt, "rollback rename blocked; retrying");
+                std::thread::sleep(ROLLBACK_RETRY_WAIT);
+            }
+            Err(err) => {
+                error!(%err, "catastrophic: rollback failed");
+                return Err(err.to_string());
+            }
+        }
+    }
+}
+
 /// Remove a staged replacement that will not be installed.
 pub fn discard_replacement(replacement: &Path) {
     if replacement.is_file() {
@@ -193,7 +225,9 @@ pub fn update_executable_with(
     // 3. Prepare backup path
     let backup = current.with_extension("exe.old");
     if backup.exists() {
-        let _ = std::fs::remove_file(&backup);
+        if let Err(err) = std::fs::remove_file(&backup) {
+            warn!(%err, "could not remove stale update backup");
+        }
     }
 
     // 4. Rename current -> current.exe.old
@@ -222,8 +256,8 @@ pub fn update_executable_with(
     if let Err(replace_err) = replace_res {
         // Rollback backup -> current
         warn!("attempting rollback after replacement failure");
-        if let Err(rb_err) = std::fs::rename(&backup, current) {
-            error!(%rb_err, "catastrophic: rollback failed");
+        if let Err(rb_err) = rollback_swap(current, &backup) {
+            // Failure is logged inside rollback_swap; keep the context chain.
             return Err(HelperError::RollbackFailed(format!(
                 "{replace_err}; rollback error: {rb_err}"
             )));
@@ -242,15 +276,18 @@ pub fn update_executable_with(
             error!(%err, "new app did not become ready; rolling back");
             // launch_verified reaps our child before returning an error, so
             // Windows no longer has its image locked during rollback.
-            let _ = std::fs::remove_file(current);
-            std::fs::rename(&backup, current)
-                .map_err(|rb| HelperError::RollbackFailed(format!("{err}; {rb}")))?;
+            // Removal of the failed image happens inside rollback_swap.
+            if let Err(rb) = rollback_swap(current, &backup) {
+                return Err(HelperError::RollbackFailed(format!("{err}; {rb}")));
+            }
             return Err(HelperError::RelaunchFailed(err));
         }
     }
 
     // 7. Cleanup backup if possible
-    let _ = std::fs::remove_file(&backup);
+    if let Err(err) = std::fs::remove_file(&backup) {
+        warn!(%err, "could not remove update backup; the next run removes stale backups");
+    }
     info!("self-update completed successfully");
     Ok(())
 }
@@ -305,4 +342,43 @@ fn launch_verified(cmd: &mut Command, timeout: Option<Duration>) -> Result<(), S
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_dir(&dir);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let n = SCRATCH_SEQ.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("kcfix_libtest_{}_{}_{tag}", std::process::id(), n))
+    }
+
+    #[test]
+    fn rollback_swap_restores_backup_over_failed_replacement() {
+        let dir = scratch_dir("rollback");
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("app.exe");
+        let backup = dir.join("app.exe.old");
+        std::fs::write(&current, b"BROKEN").unwrap();
+        std::fs::write(&backup, b"PREVIOUS").unwrap();
+        assert!(rollback_swap(&current, &backup).is_ok());
+        assert_eq!(std::fs::read(&current).unwrap(), b"PREVIOUS");
+        assert!(!backup.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rollback_swap_reports_missing_backup() {
+        let dir = scratch_dir("rollback-missing");
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("app.exe");
+        let backup = dir.join("missing.old");
+        std::fs::write(&current, b"BROKEN").unwrap();
+        let err = rollback_swap(&current, &backup).unwrap_err();
+        assert!(!err.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -71,7 +71,7 @@ fn parse(text: &str) -> Settings {
         s.enabled = v != "0";
     }
     if let Some(v) = map.get("bPlaySound") {
-        s.play_sound = v == "1";
+        s.play_sound = v != "0";
     }
     if let Some(v) = map.get("lpSoundFile") {
         let trimmed = v.trim();
@@ -89,7 +89,7 @@ fn parse(text: &str) -> Settings {
         s.close_to_tray = v != "0";
     }
     if let Some(v) = map.get("bRecordAllKeypress") {
-        s.record_all_keys = v == "1";
+        s.record_all_keys = v != "0";
     }
     if let Some(v) = map.get("iLogLimit") {
         if let Ok(n) = v.parse::<usize>() {
@@ -124,6 +124,20 @@ fn parse(text: &str) -> Settings {
             s.blocked_presses = n;
         }
     }
+    // Per-key cumulative counters: stat.<hex vk>=<presses>,<blocked>.
+    // Only non-zero entries are written, so absence means zero.
+    for (k, v) in &map {
+        if let Some(hex) = k.strip_prefix("stat.") {
+            if let Ok(vk) = u8::from_str_radix(hex, 16) {
+                if let Some((presses, blocked)) = v.split_once(',') {
+                    if let (Ok(p), Ok(b)) = (presses.parse::<u64>(), blocked.parse::<u64>()) {
+                        s.per_key_presses[vk as usize] = p;
+                        s.per_key_blocked[vk as usize] = b;
+                    }
+                }
+            }
+        }
+    }
     // Per-key overrides: key.<2-digit hex virtual-key code>=<ms>.
     for (k, v) in &map {
         if let Some(hex) = k.strip_prefix("key.") {
@@ -135,7 +149,10 @@ fn parse(text: &str) -> Settings {
     s
 }
 
-pub fn save(s: &Settings) {
+/// Persist settings atomically (temp file + `.bak` + rename).
+/// Returns whether the settings reached disk; callers must surface `false`
+/// instead of silently showing unsaved state as saved (ISSUE-004).
+pub fn save(s: &Settings) -> bool {
     let path = config_path();
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
@@ -165,17 +182,27 @@ pub fn save(s: &Settings) {
             text.push_str(&format!("key.{vk:02X}={ms}\n"));
         }
     }
+    for (vk, (&presses, &blocked)) in s
+        .per_key_presses
+        .iter()
+        .zip(s.per_key_blocked.iter())
+        .enumerate()
+    {
+        if presses > 0 || blocked > 0 {
+            text.push_str(&format!("stat.{vk:02X}={presses},{blocked}\n"));
+        }
+    }
     // Atomic write: stage to a temp file in the same directory, keep the
     // previous generation as .bak, then rename over the main file, so a
     // crash can never leave a torn settings.ini (ISSUE-004).
     let tmp = path.with_extension("ini.tmp");
     if fs::write(&tmp, &text).is_err() {
-        return;
+        return false;
     }
     if path.exists() {
         let _ = fs::copy(&path, backup_path(&path));
     }
-    let _ = fs::rename(&tmp, &path);
+    fs::rename(&tmp, &path).is_ok()
 }
 
 #[cfg(test)]
@@ -261,8 +288,18 @@ mod tests {
                 log_limit: 250,
                 total_presses: 1234,
                 blocked_presses: 56,
+                per_key_presses: {
+                    let mut counts = [0u64; 256];
+                    counts[0x20] = 100;
+                    counts
+                },
+                per_key_blocked: {
+                    let mut counts = [0u64; 256];
+                    counts[0x20] = 40;
+                    counts
+                },
             };
-            save(&s);
+            assert!(save(&s));
             // No staging file may be left behind by the atomic write.
             assert!(!dir
                 .join("KeyboardChatteringFix")
@@ -283,6 +320,14 @@ mod tests {
             assert!(back.record_all_keys);
             assert_eq!(back.log_limit, 250);
             assert_eq!((back.total_presses, back.blocked_presses), (1234, 56));
+            assert_eq!(
+                (back.per_key_presses[0x20], back.per_key_blocked[0x20]),
+                (100, 40)
+            );
+            assert_eq!(
+                (back.per_key_presses[0x41], back.per_key_blocked[0x41]),
+                (0, 0)
+            );
         });
     }
 
@@ -293,18 +338,84 @@ mod tests {
                 threshold_ms: 111,
                 ..Default::default()
             };
-            save(&first);
+            assert!(save(&first));
             let second = Settings {
                 threshold_ms: 222,
                 ..Default::default()
             };
-            save(&second);
+            assert!(save(&second));
             assert_eq!(load().threshold_ms, 222);
             // Simulate a crash mid-write: truncated main file.
             let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
             std::fs::write(&ini, "").unwrap();
             // Previous generation (111) is recovered, not defaults (50).
             assert_eq!(load().threshold_ms, 111);
+        });
+    }
+
+    #[test]
+    fn save_reports_failure_when_appdata_is_unusable() {
+        // APPDATA pointing at a regular file: every directory creation and
+        // write lands on an unusable path, so save must report false
+        // instead of pretending success (ISSUE-004).
+        let _lock = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("APPDATA");
+        let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let blocker =
+            std::env::temp_dir().join(format!("kcfix_cfgblock_{}_{seq}", std::process::id()));
+        std::fs::write(&blocker, b"not-a-directory").unwrap();
+        std::env::set_var("APPDATA", &blocker);
+        assert!(!save(&Settings::default()));
+        match previous {
+            Some(v) => std::env::set_var("APPDATA", v),
+            None => std::env::remove_var("APPDATA"),
+        }
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    #[test]
+    fn load_treats_any_nonzero_boolean_as_true() {
+        // All boolean flags share one rule: only "0" is false. A stray value
+        // must never silently flip a protection-relevant flag off.
+        with_isolated_appdata(|dir| {
+            let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+            std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+            std::fs::write(
+                &ini,
+                "[KeyboardChatteringFix]\nbPlaySound=2\nbRecordAllKeypress=yes\nbFilterEnabled=0\n",
+            )
+            .unwrap();
+            let s = load();
+            assert!(s.play_sound);
+            assert!(s.record_all_keys);
+            assert!(!s.enabled);
+        });
+    }
+
+    #[test]
+    fn per_key_stats_round_trip() {
+        // Non-zero per-key counters survive save/load so the top-chatter
+        // diagnosis does not reset every restart; zero entries stay absent.
+        with_isolated_appdata(|_| {
+            let mut presses = [0u64; 256];
+            let mut blocked = [0u64; 256];
+            presses[0x41] = 30;
+            blocked[0x41] = 7;
+            let s = Settings {
+                per_key_presses: presses,
+                per_key_blocked: blocked,
+                ..Default::default()
+            };
+            assert!(save(&s));
+            let back = load();
+            assert_eq!(
+                (back.per_key_presses[0x41], back.per_key_blocked[0x41]),
+                (30, 7)
+            );
+            assert_eq!(
+                (back.per_key_presses[0x42], back.per_key_blocked[0x42]),
+                (0, 0)
+            );
         });
     }
 }

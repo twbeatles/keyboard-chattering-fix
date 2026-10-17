@@ -1,0 +1,5 @@
+# Python dependencies for the release/packaging scripts.
+# Install once: pip install -r scripts/requirements.txt
+cryptography>=50  # update-manifest signing and verification
+pytest  # scripts/test_update_manifest.py
+Pillow  # scripts/generate_icons.py (dev-time asset generation only)

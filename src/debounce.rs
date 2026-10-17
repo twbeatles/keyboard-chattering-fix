@@ -392,4 +392,21 @@ mod tests {
         // After exiting, keys work normally
         assert!(d.decide(0x41, KeyEventKind::Down, ms(40)));
     }
+
+    #[test]
+    fn min_chatter_boundary_is_exclusive() {
+        // gap == min_chatter is NOT treated as a glitch: it falls through to
+        // the threshold check. Only strictly smaller gaps bypass filtering.
+        let mut d = Debouncer::new(50);
+        d.set_min_chatter_ms(10);
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(10)));
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(20)));
+        // 9 ms < 10 ms min_chatter: forwarded as bugged input, not chatter.
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(29)));
+        assert_eq!(d.blocked_presses, 0);
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(30)));
+        // Exactly 10 ms: not a glitch, and inside the 50 ms threshold: blocked.
+        assert!(!d.decide(0x41, KeyEventKind::Down, ms(40)));
+        assert_eq!(d.blocked_presses, 1);
+    }
 }

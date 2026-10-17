@@ -32,7 +32,8 @@ pipeline. Single binary + `kcfix-updater` helper (Cargo workspace). Reply in Kor
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo check --workspace --all-targets
+# Full test suite runs in CI (windows-ci)
 ```
 
 (`.githooks/pre-push` runs the same three gates.)
@@ -49,7 +50,7 @@ cargo test --workspace
 
 - Past report: GUI "not responding" right after launch (timer-tick
   `SetWindowTextW` path suspected). Recent changes shrink that surface
-  (no Win32 under lock, diffed updates) but the root cause is unconfirmed.
+  (no Win32 under lock, diffed updates, tick re-entry guard, slow-tick logging) but the root cause is unconfirmed.
 - `second_acquisition_fails_while_first_held` fails next to a live tray app.
 - Per-key thresholds (`key.XX`) are config-file only; the event log buffer
   is recorded but not displayed.

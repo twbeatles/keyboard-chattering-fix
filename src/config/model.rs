@@ -23,6 +23,10 @@ pub struct Settings {
     pub log_limit: usize,
     pub total_presses: u64,
     pub blocked_presses: u64,
+    /// Per-key cumulative counters, indexed by virtual-key code. Persisted
+    /// alongside the totals so the top-chatter diagnosis survives restarts.
+    pub per_key_presses: [u64; 256],
+    pub per_key_blocked: [u64; 256],
 }
 
 impl Default for Settings {
@@ -43,6 +47,8 @@ impl Default for Settings {
             log_limit: 100,
             total_presses: 0,
             blocked_presses: 0,
+            per_key_presses: [0; 256],
+            per_key_blocked: [0; 256],
         }
     }
 }

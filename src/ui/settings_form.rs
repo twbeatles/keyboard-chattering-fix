@@ -131,9 +131,21 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
         g.sound_file = config::resolve_sound_file(sound_file.as_deref());
         new_settings.total_presses = g.debouncer.total_presses;
         new_settings.blocked_presses = g.debouncer.blocked_presses;
+        new_settings.per_key_presses = g.debouncer.per_key_presses;
+        new_settings.per_key_blocked = g.debouncer.per_key_blocked;
     }
     LANG.store(if lang == Language::En { 1 } else { 0 }, Ordering::Relaxed);
-    config::save(&new_settings);
+    if !config::save(&new_settings) {
+        // The dialog still shows the applied in-memory values, so tell the
+        // user they did not reach disk (ISSUE-004).
+        let failed = crate::i18n::strings(lang);
+        super::dialog::msg_box(
+            hwnd,
+            failed.title,
+            failed.save_failed,
+            MB_OK | MB_ICONWARNING,
+        );
+    }
     if let Some(saved) = SAVED.get() {
         *saved.lock().unwrap() = new_settings;
     }

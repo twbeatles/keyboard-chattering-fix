@@ -3,7 +3,7 @@
 
 use std::sync::{
     atomic::{AtomicU8, Ordering},
-    OnceLock,
+    Mutex, OnceLock,
 };
 
 use windows::{
@@ -96,6 +96,42 @@ static THEME_DARK: AtomicU8 = AtomicU8::new(2);
 /// `WM_SETTINGCHANGE`; painting paths must use [`theme_is_dark`] instead.
 pub(crate) fn refresh_theme() {
     THEME_DARK.store(read_system_dark_mode() as u8, Ordering::Relaxed);
+}
+
+/// Cached background brushes for `WM_CTLCOLOR*` handlers, keyed by color.
+/// Windows never deletes the brush such a handler returns, so creating one
+/// per message leaks GDI handles over long sessions (ISSUE-002). Entries are
+/// only ever touched on the UI thread; the `Send`/`Sync` impls document that.
+struct BrushEntry(u32, HBRUSH);
+unsafe impl Send for BrushEntry {}
+unsafe impl Sync for BrushEntry {}
+
+static BRUSH_CACHE: OnceLock<Mutex<Vec<BrushEntry>>> = OnceLock::new();
+
+/// Return a cached brush for `color`, creating it on first use. Replaces the
+/// previous per-message `CreateSolidBrush` in every `WM_CTLCOLOR*` handler.
+pub(crate) unsafe fn cached_brush(color: COLORREF) -> HBRUSH {
+    let mut cache = BRUSH_CACHE
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .unwrap();
+    if let Some(entry) = cache.iter().find(|entry| entry.0 == color.0) {
+        return entry.1;
+    }
+    let brush = CreateSolidBrush(color);
+    cache.push(BrushEntry(color.0, brush));
+    brush
+}
+
+/// Delete all cached brushes. Called whenever the theme may have changed so
+/// stale colors are never reused (and their handles are released).
+pub(crate) unsafe fn clear_brush_cache() {
+    if let Some(cache) = BRUSH_CACHE.get() {
+        let mut cache = cache.lock().unwrap();
+        for entry in cache.drain(..) {
+            let _ = DeleteObject(entry.1.into());
+        }
+    }
 }
 
 /// Cached system-theme lookup for paint paths: no registry I/O.
@@ -233,6 +269,8 @@ pub(crate) unsafe fn draw_rounded_card(
 
 /// Apply the Windows 11 dark title bar and rounded corners to a new window.
 pub(crate) unsafe fn apply_window_chrome(hwnd: HWND) {
+    // The theme may have changed: drop cached brushes with it.
+    clear_brush_cache();
     refresh_theme();
     let is_dark = theme_is_dark();
     let dark_attr: i32 = if is_dark { 1 } else { 0 };
@@ -256,6 +294,24 @@ pub(crate) unsafe fn apply_window_chrome(hwnd: HWND) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctlcolor_brushes_are_cached_per_color() {
+        unsafe {
+            // Same color: the same handle, no new GDI object (ISSUE-002).
+            let a = cached_brush(rgb(11, 22, 33));
+            let b = cached_brush(rgb(11, 22, 33));
+            assert!(!a.is_invalid());
+            assert_eq!(a.0, b.0);
+            // Different color: a different live handle.
+            let c = cached_brush(rgb(44, 55, 66));
+            assert_ne!(a.0, c.0);
+            // Clearing drops the cache; fetching again still yields a brush.
+            clear_brush_cache();
+            assert!(!cached_brush(rgb(11, 22, 33)).is_invalid());
+            clear_brush_cache();
+        }
+    }
 
     #[test]
     fn dark_and_light_themes_differ() {

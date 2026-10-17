@@ -3,7 +3,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::Engine as _;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::Value;
-use tracing::warn;
 
 use super::canonical::canonical_payload_python;
 use super::error::UpdateError;
@@ -113,23 +112,8 @@ pub fn parse_and_verify_manifest(
             "업데이트 파일 크기가 허용 범위를 벗어났습니다.".into(),
         ));
     }
-    if let Some(expires_at_str) = payload.get("expires_at").and_then(Value::as_str) {
-        if let Some(exp_ts) = parse_rfc3339_timestamp(expires_at_str) {
-            let now_ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if exp_ts <= now_ts {
-                return Err(UpdateError::Message(
-                    "업데이트 매니페스트가 만료되었습니다.".into(),
-                ));
-            }
-        } else {
-            // Fail open (the signature is valid; only our builder mints these),
-            // but say so: an unparseable timestamp means the builder changed.
-            warn!("update manifest expires_at is not RFC3339; accepting on signature");
-        }
-    }
+    check_expiry(&payload)?;
+
     if !is_newer(&version, current_version)? {
         return Err(UpdateError::NoUpdate);
     }
@@ -140,6 +124,31 @@ pub fn parse_and_verify_manifest(
         sha256,
         size,
     })
+}
+
+/// Enforce the manifest freshness window. A missing timestamp is accepted
+/// (older manifests predate it); an unparseable or past timestamp is rejected:
+/// silently dropping expiry enforcement would let a stale signed manifest
+/// linger forever.
+fn check_expiry(payload: &Value) -> Result<(), UpdateError> {
+    let Some(expires_at_str) = payload.get("expires_at").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let Some(exp_ts) = parse_rfc3339_timestamp(expires_at_str) else {
+        return Err(UpdateError::Message(
+            "업데이트 매니페스트의 유효기간 형식이 올바르지 않습니다.".into(),
+        ));
+    };
+    let now_ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if exp_ts <= now_ts {
+        return Err(UpdateError::Message(
+            "업데이트 매니페스트가 만료되었습니다.".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn parse_rfc3339_timestamp(s: &str) -> Option<u64> {
@@ -232,9 +241,24 @@ mod tests {
     }
 
     #[test]
-    fn expiry_timestamp_parsing_documents_fail_open() {
+    fn expiry_timestamp_parsing() {
         assert!(parse_rfc3339_timestamp("2027-09-02T13:41:52Z").is_some());
         assert!(parse_rfc3339_timestamp("not-a-timestamp").is_none());
         assert!(parse_rfc3339_timestamp("2027-13-99T99:99:99Z").is_none());
+    }
+
+    #[test]
+    fn check_expiry_rejects_bad_and_past_timestamps() {
+        use serde_json::json;
+        // Missing timestamp predates the field: accepted.
+        assert!(check_expiry(&json!({"version": "1.0.0"})).is_ok());
+        // Well-formed future timestamp: accepted.
+        assert!(check_expiry(&json!({"expires_at": "2036-10-13T07:13:12Z"})).is_ok());
+        // Past timestamp: expired.
+        let err = check_expiry(&json!({"expires_at": "2000-01-01T00:00:00Z"})).unwrap_err();
+        assert!(err.to_string().contains("만료"), "{err}");
+        // Unparseable timestamp: fail closed, no silent acceptance.
+        let err = check_expiry(&json!({"expires_at": "soon"})).unwrap_err();
+        assert!(err.to_string().contains("형식"), "{err}");
     }
 }

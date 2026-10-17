@@ -33,7 +33,8 @@
    git push origin v0.2.0
    ```
    태그는 반드시 `v{VERSION}`이어야 합니다. `release.yml`이 이를 검증하고,
-   불일치하면 릴리즈가 중단됩니다.
+   불일치하면 릴리즈가 중단됩니다. 워크플로는 `vX.Y.Z` 형태의 태그에만
+   반응하므로(`v*` 오타 태그는 실행되지 않음), 태그 이름 오타에 주의하세요.
 3. GitHub Actions(`release`)가 자동으로 테스트 → 빌드 → 서명된 `update.json`
    생성 → Release 에셋 업로드(`KeyboardChatteringFix.exe`,
    `kcfix-updater.exe`, `KeyboardChatteringFix.zip`, `update.json`) →
@@ -54,6 +55,17 @@
 
 비공개키는 저장소에 절대 커밋하지 마세요.
 (`scripts/build_update_manifest.py`는 환경변수에서만 읽습니다.)
+
+## 코드 사이닝 (선택, Authenticode)
+
+릴리스 바이너리의 Authenticode 서명은 선택 사항입니다. 무결성은 Ed25519
+매니페스트가 담당하므로, 서명이 없어도 업데이트 검증에는 지장이 없습니다
+(SmartScreen 평판에만 영향). 서명하려면 다음 중 하나를 Actions secret으로
+등록하세요. 둘 다 없으면 릴리스는 기존처럼 미서명으로 게시됩니다.
+
+- PFX 파일 방식: `SIGN_PFX_PATH` (파일 경로), `SIGN_PFX_PASSWORD` (선택)
+- 인증서 저장소 방식: `SIGN_CERT_SHA1` (지문), `SIGN_CERT_STORE`·`SIGN_CERT_SUBJECT` (선택)
+- 타임스탬프 서버 변경 시: `SIGN_TIMESTAMP_URL` (기본값 `http://timestamp.digicert.com`)
 
 ## 키 교체 시
 

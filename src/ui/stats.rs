@@ -7,7 +7,10 @@
 //! every tick, while holding the shared lock).
 
 use std::{
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::Duration,
 };
 
@@ -172,7 +175,46 @@ fn vk_name(vk: u8) -> String {
     }
 }
 
+/// Reentrancy guard for the 500 ms stats tick (ISSUE-003). Modal dialogs pump
+/// nested messages, so `WM_TIMER` can re-enter `update_stats`; the nested tick
+/// is dropped instead of piling up `SetWindowTextW` calls. On drop, ticks
+/// slower than the budget are logged to aid hang diagnosis.
+static STATS_TICK_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// Ticks slower than this are reported; the timer fires every 500 ms.
+const SLOW_TICK_MS: u128 = 250;
+
+struct StatsTickGuard {
+    started: std::time::Instant,
+}
+impl StatsTickGuard {
+    fn enter() -> Option<StatsTickGuard> {
+        if STATS_TICK_ACTIVE.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(StatsTickGuard {
+                started: std::time::Instant::now(),
+            })
+        }
+    }
+}
+impl Drop for StatsTickGuard {
+    fn drop(&mut self) {
+        STATS_TICK_ACTIVE.store(false, Ordering::SeqCst);
+        let elapsed_ms = self.started.elapsed().as_millis();
+        if elapsed_ms > SLOW_TICK_MS {
+            tracing::warn!(
+                elapsed_ms = elapsed_ms,
+                "slow stats tick; investigate for UI hang (ISSUE-003)"
+            );
+        }
+    }
+}
+
 pub(crate) unsafe fn update_stats(hwnd: HWND) {
+    let Some(_tick) = StatsTickGuard::enter() else {
+        tracing::debug!("stats tick re-entered; dropping nested tick");
+        return;
+    };
     // 1. Snapshot under one short lock; the guard is dropped before any
     // Win32 call, so the hook thread can never wait on a blocked UI call.
     let snapshot = SHARED.get().map(|shared| {
@@ -297,6 +339,16 @@ mod tests {
     }
 
     #[test]
+    fn stats_tick_guard_drops_nested_entry() {
+        let first = StatsTickGuard::enter();
+        assert!(first.is_some());
+        // A nested timer tick (e.g. from a modal dialog pump) is dropped.
+        assert!(StatsTickGuard::enter().is_none());
+        drop(first);
+        assert!(StatsTickGuard::enter().is_some());
+    }
+
+    #[test]
     fn diff_identical_frames_update_nothing() {
         let r = render_stats(&strings(Language::Ko), &idle_snapshot());
         assert_eq!(diff_stats(&r, &r), [false; 7]);
@@ -328,5 +380,22 @@ mod tests {
         let changed = diff_stats(&prev, &next);
         assert!(changed[0]);
         assert_eq!(&changed[1..], &[false; 6]);
+    }
+
+    #[test]
+    fn render_and_diff_sustained_tick_load() {
+        // The 500 ms timer path must stay cheap: 10k render+diff cycles must
+        // finish far inside one tick budget (ISSUE-003 regression guard).
+        let rendered = render_stats(&strings(Language::Ko), &idle_snapshot());
+        let started = std::time::Instant::now();
+        for _ in 0..10_000 {
+            let next = render_stats(&strings(Language::Ko), &idle_snapshot());
+            assert_eq!(diff_stats(&rendered, &next), [false; 7]);
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "render+diff too slow: {:?}",
+            started.elapsed()
+        );
     }
 }

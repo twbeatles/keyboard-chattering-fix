@@ -25,7 +25,8 @@ Windows 저수준 키보드 훅(`WH_KEYBOARD_LL`) 기반 채터링 방지 상주
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo check --workspace --all-targets
+# 전체 테스트 스위트는 CI(windows-ci)에서 실행
 ```
 
 ## 철칙
@@ -38,7 +39,7 @@ cargo test --workspace
 
 ## 알려진 주의점
 
-- GUI 기동 직후 응답없음 리포트 이력 있음 — 타이머 `SetWindowTextW` 경로 의심. 현재 변경분(락 밖 Win32 호출·diff 갱신)이 노출 면적을 줄였으나 원인 확정 전.
+- GUI 기동 직후 응답없음 리포트 이력 있음 — 타이머 `SetWindowTextW` 경로 의심. 현재 변경분(락 밖 Win32 호출·diff 갱신·틱 재진입 가드·느린 틱 로깅)이 노출 면적을 줄였으나 원인 확정 전.
 - `second_acquisition_fails_while_first_held` 테스트는 실제 트레이 앱 옆에서 실패 — CI에서만 실행.
 - 키별 임계값(`key.XX`)은 설정 파일 전용, UI 없음.
 - `LogEvent` 버퍼는 기록만 되고 화면에 미표시 (`#[allow(dead_code)]`에 사유 명시).

@@ -132,8 +132,15 @@ key.20=80              # Custom 80ms threshold for Spacebar (0x20)
 git clone https://github.com/twbeatles/keyboard-chattering-fix.git
 cd keyboard-chattering-fix
 
-# Run automated test suite (65 unit & integration tests)
-cargo test
+# Run automated test suite (79 Rust tests)
+cargo test --workspace
+
+# Release-script tests (needs Python, once per machine)
+pip install -r scripts/requirements.txt
+python -m pytest scripts/
+
+# Enable the pre-push gate (once per clone)
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_githooks.ps1
 
 # Build optimized release binary (LTO + strip enabled)
 cargo build --release
@@ -261,8 +268,15 @@ key.20=80              # 스페이스바(0x20)에만 80ms 적용
 git clone https://github.com/twbeatles/keyboard-chattering-fix.git
 cd keyboard-chattering-fix
 
-# 단위 및 통합 테스트 실행 (50개 테스트 100% 검증)
-cargo test
+# 단위 및 통합 테스트 실행 (79개 Rust 테스트 검증)
+cargo test --workspace
+
+# 릴리스 스크립트 테스트 (Python 필요, 머신당 1회)
+pip install -r scripts/requirements.txt
+python -m pytest scripts/
+
+# pre-push 게이트 활성화 (클론당 1회)
+powershell -ExecutionPolicy Bypass -File .\scripts\setup_githooks.ps1
 
 # 고도로 최적화된 단일 바이너리 빌드 (LTO + strip 활성화)
 cargo build --release

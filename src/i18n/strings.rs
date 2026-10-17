@@ -41,6 +41,7 @@ pub struct Strings {
     pub measure_press: &'static str,
     pub language_label: &'static str,
     pub save: &'static str,
+    pub save_failed: &'static str,
     pub tray_hint: &'static str,
     pub tray_tip: &'static str,
     pub menu_show: &'static str,
@@ -99,6 +100,7 @@ pub fn strings(lang: Language) -> Strings {
             measure_press: "프레스 기준 (Down→Down)",
             language_label: "인터페이스 언어:",
             save: "설정 저장 및 적용",
+            save_failed: "설정을 파일에 저장하지 못했습니다. 디스크 여유 공간과 파일 권한을 확인한 뒤 다시 시도하세요.",
             tray_hint: "창을 닫아도 시스템 트레이에서 계속 보호됩니다.",
             tray_tip: "Keyboard Chatter Fix (동작 중)",
             menu_show: "창 열기",
@@ -154,6 +156,7 @@ pub fn strings(lang: Language) -> Strings {
             measure_press: "Press-based (Down→Down)",
             language_label: "Interface Language:",
             save: "Apply & Save Settings",
+            save_failed: "Could not save settings to disk. Check free space and file permissions, then try again.",
             tray_hint: "Keeps running in system tray when closed.",
             tray_tip: "Keyboard Chatter Fix (Active)",
             menu_show: "Open",
@@ -191,6 +194,7 @@ mod tests {
                 s.log_limit_label,
                 s.log_limit_unit,
                 s.record_all_keys,
+                s.save_failed,
             ] {
                 assert!(!label.trim().is_empty(), "empty label for {lang:?}");
             }

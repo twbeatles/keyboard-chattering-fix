@@ -37,6 +37,8 @@ fn init_shared(settings: &config::Settings) {
     debouncer.set_min_chatter_ms(settings.min_chatter_ms);
     debouncer.total_presses = settings.total_presses;
     debouncer.blocked_presses = settings.blocked_presses;
+    debouncer.per_key_presses = settings.per_key_presses;
+    debouncer.per_key_blocked = settings.per_key_blocked;
     debouncer.record_all_keys = settings.record_all_keys;
     debouncer.log_limit = settings.log_limit;
 
@@ -67,6 +69,14 @@ fn acknowledge_update_handshake() {
 }
 
 pub(crate) fn run(settings: config::Settings) {
+    // Subscriber for slow-tick and update-path diagnostics (ISSUE-001/003).
+    // Best effort: a second init (tests) or no console (GUI) must not fail startup.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
     init_shared(&settings);
 
     #[cfg(windows)]
