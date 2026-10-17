@@ -33,6 +33,18 @@ fn classify_update_result(
     }
 }
 
+/// The package manager that installed `exe`, with its update command.
+fn package_manager(exe: &std::path::Path) -> Option<(&'static str, &'static str)> {
+    let path = exe.to_string_lossy().to_lowercase().replace('/', "\\");
+    if path.contains("\\scoop\\apps\\") {
+        Some(("Scoop", "scoop update keyboard-chattering-fix"))
+    } else if path.contains("\\winget\\packages\\") || path.contains("\\winget\\links\\") {
+        Some(("winget", "winget upgrade twbeatles.KeyboardChatteringFix"))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn spawn_update_check(hwnd: HWND) {
     let raw_hwnd = hwnd.0 as usize;
     std::thread::spawn(move || {
@@ -69,6 +81,20 @@ pub(crate) fn spawn_update_check(hwnd: HWND) {
             }
             UpdatePrompt::Available(manifest) => manifest,
         };
+        // Installed by a package manager: let it do the update, so its
+        // records stay right.
+        if let Some((manager, command)) = std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(package_manager)
+        {
+            crate::updater::end_update();
+            let text = fill(s.update_managed_fmt, &[&manifest.version, manager, command]);
+            unsafe {
+                msg_box(hwnd, s.update_title, &text, MB_OK | MB_ICONINFORMATION);
+            }
+            return;
+        }
         // The only confirmation: it also says the program restarts, so
         // nothing modal sits between launching the helper and exiting.
         let text = fill(
@@ -116,6 +142,23 @@ mod tests {
             sha256: "0".repeat(64),
             size: 1024,
         }
+    }
+
+    #[test]
+    fn package_manager_installs_are_recognized() {
+        use std::path::Path;
+        let scoop = Path::new(
+            r"C:\Users\kim\scoop\apps\keyboard-chattering-fix\current\KeyboardChatteringFix.exe",
+        );
+        assert_eq!(package_manager(scoop).unwrap().0, "Scoop");
+        let winget = Path::new(
+            r"C:\Users\kim\AppData\Local\Microsoft\WinGet\Packages\twbeatles.KeyboardChatteringFix_x\KeyboardChatteringFix.exe",
+        );
+        assert_eq!(package_manager(winget).unwrap().0, "winget");
+        assert_eq!(
+            package_manager(Path::new(r"D:\Tools\KeyboardChatteringFix.exe")),
+            None
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@ use windows::{
     },
 };
 
-use super::{history, ids::*, layout::SPECS, menu, state::current_lang, stats, tray};
+use super::{history, ids::*, keys_page, layout::SPECS, menu, state::current_lang, stats, tray};
 use crate::{
     config,
     i18n::{fill, strings, Language},
@@ -110,6 +110,9 @@ pub(crate) unsafe fn apply_language(hwnd: HWND) {
     options.extend(Language::ALL.iter().map(|l| l.native_name()));
     fill_combo(hwnd, ID_COMBO_LANG, &options, lang);
     set_cue(hwnd, ID_EDIT_SOUND_FILE, s.sound_file_cue);
+    set_cue(hwnd, ID_EDIT_AUTO_APPS, s.auto_apps_cue);
+    set_cue(hwnd, ID_EDIT_HOTKEY_TOGGLE, s.hotkey_toggle_cue);
+    set_cue(hwnd, ID_EDIT_HOTKEY_CLEAN, s.hotkey_clean_cue);
 
     let close_to_tray = super::state::SAVED
         .get()
@@ -119,6 +122,7 @@ pub(crate) unsafe fn apply_language(hwnd: HWND) {
 
     menu::install(hwnd);
     history::apply_language(hwnd);
+    keys_page::apply_language(hwnd);
     stats::invalidate();
     stats::update_stats(hwnd);
     tray::refresh_tip(hwnd);

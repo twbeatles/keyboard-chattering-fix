@@ -45,10 +45,30 @@
    중에 업데이트를 확인한 사용자가 "게시된 업데이트 없음"을 보지 않습니다.
    같은 태그로 다시 실행해도 안전합니다(남은 초안은 교체, 공개된 릴리스는 에셋만 갱신).
 4. 릴리스 전 수동 점검(Actions → `e2e` → Run workflow, 또는 로컬 `scripts/e2e`):
-   훅·UI 정지·세션 종료 저장, 헬퍼 연속 교체(직전에 게시된 헬퍼 포함).
+   훅·UI 정지·세션 종료 저장, 떼기 확인·마우스·단축키·자동 일시 중지(`features_e2e`),
+   헬퍼 연속 교체(직전에 게시된 헬퍼 포함).
+5. 릴리스가 공개되면 패키지 매니페스트의 해시를 갱신합니다(아래 "패키지 관리자").
 
 사용자는 설치 폴더에 두 EXE를 함께 두기만 하면 됩니다.
 헬퍼가 없으면 업데이트 확인 시 그 취지의 안내가 나옵니다.
+
+## 패키지 관리자 (Scoop / winget)
+
+- **Scoop**: 이 저장소 자체가 버킷입니다(`bucket/keyboard-chattering-fix.json`).
+  사용자는 `scoop bucket add kcfix https://github.com/twbeatles/keyboard-chattering-fix`
+  후 `scoop install kcfix/keyboard-chattering-fix`로 설치합니다.
+  릴리스마다 `version`, `url`, `hash`(릴리스 zip의 SHA-256)를 갱신해 커밋하세요:
+  ```powershell
+  gh release download vX.Y.Z -p KeyboardChatteringFix.zip -D $env:TEMP\kcfix_rel
+  (Get-FileHash $env:TEMP\kcfix_rel\KeyboardChatteringFix.zip -Algorithm SHA256).Hash.ToLower()
+  ```
+  매니페스트의 `checkver`/`autoupdate`가 있어 `scoop`의 자동 갱신 도구로도 맞출 수 있습니다.
+- **winget**: `packaging/winget/`에 zip(포터블) 설치 매니페스트 3종이 있습니다. 같은 방식으로
+  버전·URL·`InstallerSha256`(대문자 hex)을 갱신한 뒤 `winget validate`로 확인하고,
+  `microsoft/winget-pkgs` 저장소에 PR로 제출합니다(외부 저장소라 자동 제출하지 않음).
+- 패키지 관리자로 설치된 사본(경로에 `\scoop\apps\` 또는 `\WinGet\`)은 인앱 업데이트가
+  파일을 바꾸지 않고 해당 명령(`scoop update …` / `winget upgrade …`)을 안내합니다
+  (`src/ui/update.rs`의 `package_manager`). 패키지 관리자의 기록과 실제 파일이 어긋나지 않게 하려는 것입니다.
 
 ## 헬퍼 호환성 정책
 
@@ -80,6 +100,16 @@
 비공개키는 저장소에 절대 커밋하지 마세요.
 (`scripts/build_update_manifest.py`는 환경변수에서만 읽습니다.)
 
+## 실행 인자 (앱)
+
+헬퍼 CLI와 달리 앱 자신의 인자는 다음과 같습니다(모두 추가만 가능):
+
+- `--autostart`: 자동 실행 항목(Run 레지스트리, 관리자 권한 작업)이 붙입니다. 이미 실행 중이면
+  "이미 실행 중" 대화상자 없이 조용히 종료합니다. 이 실행 파일을 가리키는 기존 Run 항목은
+  기동 시 자동으로 이 인자를 붙여 갱신합니다(다른 경로를 가리키는 항목은 건드리지 않음).
+- `--after-pid <pid>`: "관리자 권한으로 다시 실행"이 넘깁니다. 이전 프로세스가 끝날 때까지
+  (최대 10초) 기다린 뒤 단일 인스턴스 뮤텍스를 잡습니다.
+
 ## 코드 사이닝 (선택, Authenticode)
 
 릴리스 바이너리의 Authenticode 서명은 선택 사항입니다. 무결성은 Ed25519
@@ -90,6 +120,9 @@
 - PFX 파일 방식: `SIGN_PFX_PATH` (파일 경로), `SIGN_PFX_PASSWORD` (선택)
 - 인증서 저장소 방식: `SIGN_CERT_SHA1` (지문), `SIGN_CERT_STORE`·`SIGN_CERT_SUBJECT` (선택)
 - 타임스탬프 서버 변경 시: `SIGN_TIMESTAMP_URL` (기본값 `http://timestamp.digicert.com`)
+
+인증서가 없다면 오픈소스 무료 서명 프로그램(예: SignPath Foundation)을 신청할 수 있습니다.
+미서명 바이너리는 내려받을 때 SmartScreen 경고가 나오고, 이는 사용자 이탈의 큰 원인입니다.
 
 ## 키 교체 시
 

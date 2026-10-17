@@ -23,6 +23,20 @@ pub struct Settings {
     pub measure_from: MeasureFrom,
     pub min_chatter_ms: u64,
     pub exclude_injected: bool,
+    /// Also filter mouse button chatter (a click registering twice).
+    pub filter_mouse: bool,
+    /// Hold each release of a held key back this long, 0 = off.
+    pub release_defer_ms: u64,
+    /// Executables that pause protection while in front, as typed
+    /// (`game.exe; other`); see `ui::foreground::parse_app_list`.
+    pub auto_disable_apps: String,
+    /// Pause protection while a full-screen app is in front.
+    pub auto_disable_fullscreen: bool,
+    /// Global hotkeys as typed (`Ctrl+Alt+F12`); empty = none.
+    pub hotkey_toggle: String,
+    pub hotkey_cleaning: String,
+    /// Cleaning mode ends by itself after this many minutes, 0 = never.
+    pub cleaning_timeout_min: u64,
     pub record_all_keys: bool,
     pub log_limit: usize,
     pub total_presses: u64,
@@ -39,11 +53,13 @@ impl Settings {
         self.language.resolve(system_language())
     }
 
-    /// Take the file-only fields from `disk`, the settings file as it is
-    /// now. Per-key thresholds (`key.XX`) have no UI and are edited in the
-    /// file while the app runs; writing the in-memory copy without this
-    /// would silently revert those edits on exit (ISSUE-005). Every other
-    /// field is owned by the UI or the live filter and keeps its value.
+    /// Take the file-owned fields from `disk`, the settings file as it is
+    /// now. Per-key thresholds (`key.XX`) can be edited in the file while
+    /// the app runs; the Keys tab writes its changes to the file at once,
+    /// so the file is always their source of truth. Writing the in-memory
+    /// copy without this would silently revert file edits on exit
+    /// (ISSUE-005). Every other field is owned by the UI or the live filter
+    /// and keeps its value.
     pub fn adopt_file_only_fields(&mut self, disk: &Settings) {
         self.per_key_ms = disk.per_key_ms;
     }
@@ -63,6 +79,13 @@ impl Default for Settings {
             measure_from: MeasureFrom::Release,
             min_chatter_ms: 0,
             exclude_injected: true,
+            filter_mouse: false,
+            release_defer_ms: 0,
+            auto_disable_apps: String::new(),
+            auto_disable_fullscreen: false,
+            hotkey_toggle: String::new(),
+            hotkey_cleaning: String::new(),
+            cleaning_timeout_min: 5,
             record_all_keys: false,
             log_limit: 100,
             total_presses: 0,

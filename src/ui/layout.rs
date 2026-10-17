@@ -13,7 +13,7 @@ use crate::i18n::Strings;
 
 /// Logical client size of the main window (scaled by DPI at creation).
 pub(crate) const CLIENT_W: i32 = 480;
-pub(crate) const CLIENT_H: i32 = 618;
+pub(crate) const CLIENT_H: i32 = 690;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Page {
@@ -21,10 +21,17 @@ pub(crate) enum Page {
     History = 1,
     Settings = 2,
     Advanced = 3,
+    Keys = 4,
 }
 
 impl Page {
-    pub(crate) const ALL: [Page; 4] = [Page::Home, Page::History, Page::Settings, Page::Advanced];
+    pub(crate) const ALL: [Page; 5] = [
+        Page::Home,
+        Page::History,
+        Page::Settings,
+        Page::Advanced,
+        Page::Keys,
+    ];
 
     fn bit(self) -> u8 {
         1 << (self as u8)
@@ -35,11 +42,13 @@ impl Page {
             1 => Page::History,
             2 => Page::Settings,
             3 => Page::Advanced,
+            4 => Page::Keys,
             _ => Page::Home,
         }
     }
 
-    /// The tab button that selects this page.
+    /// The tab button that selects this page (the ids follow the page
+    /// order, not the on-screen order of the tabs).
     pub(crate) fn tab_id(self) -> i32 {
         ID_TAB_HOME + self as i32
     }
@@ -55,9 +64,10 @@ pub(crate) const HOME: u8 = 1;
 pub(crate) const HISTORY: u8 = 2;
 pub(crate) const SETTINGS: u8 = 4;
 pub(crate) const ADVANCED: u8 = 8;
-pub(crate) const CLEANING: u8 = 16;
+pub(crate) const KEYS: u8 = 16;
+pub(crate) const CLEANING: u8 = 32;
 /// Every page, hidden while cleaning (tabs).
-pub(crate) const PAGES: u8 = HOME | HISTORY | SETTINGS | ADVANCED;
+pub(crate) const PAGES: u8 = HOME | HISTORY | SETTINGS | ADVANCED | KEYS;
 /// Always visible (header, footer).
 pub(crate) const EVERY: u8 = PAGES | CLEANING;
 
@@ -198,28 +208,35 @@ pub(crate) static SPECS: &[Spec] = &[
         ID_TAB_HOME,
         Kind::Tab,
         PAGES,
-        (20, 72, 110, 30),
+        (20, 72, 88, 30),
         Some(|s| s.tab_home),
     ),
     w(
         ID_TAB_HISTORY,
         Kind::Tab,
         PAGES,
-        (130, 72, 110, 30),
+        (108, 72, 88, 30),
         Some(|s| s.tab_history),
+    ),
+    w(
+        ID_TAB_KEYS,
+        Kind::Tab,
+        PAGES,
+        (196, 72, 88, 30),
+        Some(|s| s.tab_keys),
     ),
     w(
         ID_TAB_SETTINGS,
         Kind::Tab,
         PAGES,
-        (240, 72, 110, 30),
+        (284, 72, 88, 30),
         Some(|s| s.tab_settings),
     ),
     w(
         ID_TAB_ADVANCED,
         Kind::Tab,
         PAGES,
-        (350, 72, 110, 30),
+        (372, 72, 88, 30),
         Some(|s| s.tab_advanced),
     ),
     // Home: protection card
@@ -325,6 +342,7 @@ pub(crate) static SPECS: &[Spec] = &[
         (24, 480, 432, 36),
         Some(|s| s.home_tip),
     ),
+    w(ID_HOME_NOTE, Kind::Hint, HOME, (24, 524, 432, 52), None),
     // Cleaning overlay
     c(
         ID_CLEAN_TITLE,
@@ -369,8 +387,8 @@ pub(crate) static SPECS: &[Spec] = &[
         (362, 116, 102, 29),
         Some(|s| s.history_clear_btn),
     ),
-    w(ID_HIST_LIST, Kind::List, HISTORY, (16, 152, 448, 388), None),
-    w(ID_HIST_INFO, Kind::Hint, HISTORY, (16, 548, 448, 36), None),
+    w(ID_HIST_LIST, Kind::List, HISTORY, (16, 152, 448, 460), None),
+    w(ID_HIST_INFO, Kind::Hint, HISTORY, (16, 620, 448, 36), None),
     // Settings: sensitivity card
     c(
         ID_THRESH_TITLE,
@@ -486,6 +504,28 @@ pub(crate) static SPECS: &[Spec] = &[
         (166, 497, 160, 240),
         None,
     ),
+    // Settings: automatic pause card
+    c(
+        ID_LABEL_AUTO_APPS,
+        Kind::Label,
+        SETTINGS,
+        (32, 551, 130, 20),
+        Some(|s| s.auto_apps_label),
+    ),
+    c(
+        ID_EDIT_AUTO_APPS,
+        Kind::Edit,
+        SETTINGS,
+        (166, 548, 282, 25),
+        None,
+    ),
+    c(
+        ID_TOGGLE_AUTO_FULLSCREEN,
+        Kind::Toggle,
+        SETTINGS,
+        (32, 576, 416, 26),
+        Some(|s| s.auto_fullscreen),
+    ),
     // Advanced: detection card
     c(
         ID_DETECT_TITLE,
@@ -586,23 +626,134 @@ pub(crate) static SPECS: &[Spec] = &[
         (32, 424, 416, 36),
         Some(|s| s.log_note),
     ),
+    // Advanced: release delay and hotkeys card
+    c(
+        ID_LABEL_DEFER,
+        Kind::Label,
+        ADVANCED,
+        (32, 489, 130, 20),
+        Some(|s| s.defer_label),
+    ),
+    c(
+        ID_EDIT_DEFER,
+        Kind::NumberEdit,
+        ADVANCED,
+        (166, 486, 64, 25),
+        None,
+    ),
+    c(
+        ID_LABEL_DEFER_UNIT,
+        Kind::Label,
+        ADVANCED,
+        (238, 489, 210, 20),
+        Some(|s| s.defer_unit),
+    ),
+    c(
+        ID_DEFER_HINT,
+        Kind::Hint,
+        ADVANCED,
+        (32, 516, 416, 34),
+        Some(|s| s.defer_hint),
+    ),
+    c(
+        ID_LABEL_HOTKEYS,
+        Kind::Label,
+        ADVANCED,
+        (32, 561, 130, 20),
+        Some(|s| s.hotkeys_label),
+    ),
+    c(
+        ID_EDIT_HOTKEY_TOGGLE,
+        Kind::Edit,
+        ADVANCED,
+        (166, 558, 138, 25),
+        None,
+    ),
+    c(
+        ID_EDIT_HOTKEY_CLEAN,
+        Kind::Edit,
+        ADVANCED,
+        (310, 558, 138, 25),
+        None,
+    ),
+    // Keys & mouse: mouse card
+    c(
+        ID_TOGGLE_MOUSE,
+        Kind::Toggle,
+        KEYS,
+        (32, 128, 416, 26),
+        Some(|s| s.filter_mouse),
+    ),
+    c(
+        ID_MOUSE_HINT,
+        Kind::Hint,
+        KEYS,
+        (32, 158, 416, 46),
+        Some(|s| s.mouse_hint),
+    ),
+    // Keys & mouse: per-key thresholds card
+    c(
+        ID_KEYS_TITLE,
+        Kind::Section,
+        KEYS,
+        (32, 232, 300, 20),
+        Some(|s| s.card_keys),
+    ),
+    c(ID_KEYS_LIST, Kind::List, KEYS, (32, 258, 416, 222), None),
+    c(ID_KEYS_COMBO, Kind::Combo, KEYS, (32, 490, 150, 240), None),
+    c(
+        ID_KEYS_EDIT,
+        Kind::NumberEdit,
+        KEYS,
+        (190, 490, 56, 25),
+        None,
+    ),
+    c(
+        ID_KEYS_UNIT,
+        Kind::Label,
+        KEYS,
+        (252, 493, 26, 20),
+        Some(|s| s.unit_ms),
+    ),
+    c(
+        ID_BTN_KEY_SET,
+        Kind::Button,
+        KEYS,
+        (282, 488, 80, 29),
+        Some(|s| s.key_set_btn),
+    ),
+    c(
+        ID_BTN_KEY_RESET,
+        Kind::Button,
+        KEYS,
+        (368, 488, 80, 29),
+        Some(|s| s.key_reset_btn),
+    ),
+    c(ID_KEYS_ADVICE, Kind::Hint, KEYS, (32, 524, 416, 36), None),
+    c(
+        ID_KEYS_NOTE,
+        Kind::Hint,
+        KEYS,
+        (32, 562, 416, 34),
+        Some(|s| s.keys_note),
+    ),
     // Save row (Settings + Advanced)
     w(
         ID_BTN_SAVE,
         Kind::Primary,
         SETTINGS | ADVANCED,
-        (16, 542, 120, 34),
+        (16, 614, 120, 34),
         Some(|s| s.save),
     ),
     w(
         ID_SAVE_STATUS,
         Kind::Status,
         SETTINGS | ADVANCED,
-        (148, 550, 316, 20),
+        (148, 622, 316, 20),
         None,
     ),
     // Footer
-    w(ID_FOOTER, Kind::Footer, EVERY, (16, 592, 448, 18), None),
+    w(ID_FOOTER, Kind::Footer, EVERY, (16, 664, 448, 18), None),
 ];
 
 /// Rounded track behind the tab buttons.
@@ -620,8 +771,14 @@ pub(crate) fn cards(page: Page, cleaning: bool) -> &'static [(i32, i32, i32, i32
             (16, 118, 448, 136),
             (16, 264, 448, 108),
             (16, 378, 448, 152),
+            (16, 538, 448, 68),
         ],
-        Page::Advanced => &[(16, 118, 448, 190), (16, 318, 448, 150)],
+        Page::Advanced => &[
+            (16, 118, 448, 190),
+            (16, 318, 448, 150),
+            (16, 476, 448, 126),
+        ],
+        Page::Keys => &[(16, 118, 448, 92), (16, 220, 448, 382)],
     }
 }
 
@@ -755,6 +912,8 @@ mod tests {
         assert!(is_visible(save.scope, Page::Advanced, false));
         assert!(!is_visible(save.scope, Page::Home, false));
         assert!(!is_visible(save.scope, Page::History, false));
+        // The Keys tab applies each change on its own button.
+        assert!(!is_visible(save.scope, Page::Keys, false));
         assert!(!is_visible(save.scope, Page::Settings, true));
     }
 
@@ -791,6 +950,22 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn tabs_sit_side_by_side_inside_the_track() {
+        let (tx, ty, tw, th) = TAB_TRACK;
+        let mut tabs: Vec<(i32, i32, i32, i32)> = Page::ALL
+            .iter()
+            .map(|p| spec(p.tab_id()).unwrap().rect)
+            .collect();
+        tabs.sort();
+        for pair in tabs.windows(2) {
+            assert_eq!(pair[0].0 + pair[0].2, pair[1].0, "tabs must touch");
+        }
+        for (x, y, w, h) in tabs {
+            assert!(x >= tx && y >= ty && x + w <= tx + tw && y + h <= ty + th);
         }
     }
 

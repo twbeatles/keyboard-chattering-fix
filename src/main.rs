@@ -11,6 +11,7 @@
 //! - `input`: low-level keyboard hook (`hook`) and audio feedback (`sound`)
 //! - `config`: settings model, atomic persistence, startup entry, sound path
 //! - `debounce`: time-based chatter filter core
+//! - `recommend`: per-key threshold advice from measured gaps
 //! - `i18n`: language selection and localizable strings
 //! - `ui`: native Win32 presentation (window, tray, paint, forms, update flow)
 //! - `updater`: signed release-update client over GitHub Releases
@@ -22,6 +23,7 @@ mod config;
 mod debounce;
 mod i18n;
 mod input;
+mod recommend;
 mod ui;
 mod updater;
 

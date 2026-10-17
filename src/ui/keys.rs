@@ -3,6 +3,12 @@
 /// Human-readable name for a virtual-key code.
 pub(crate) fn vk_name(vk: u8) -> String {
     match vk {
+        // Mouse buttons (only with the mouse filter on).
+        0x01 => "Mouse Left".to_string(),
+        0x02 => "Mouse Right".to_string(),
+        0x04 => "Mouse Middle".to_string(),
+        0x05 => "Mouse Back".to_string(),
+        0x06 => "Mouse Forward".to_string(),
         0x08 => "Backspace".to_string(),
         0x09 => "Tab".to_string(),
         0x0D => "Enter".to_string(),
@@ -80,6 +86,17 @@ pub(crate) fn vk_name(vk: u8) -> String {
     }
 }
 
+/// Keys offered in the Keys tab picker: mouse buttons first, then every
+/// named key the filter can actually see. The generic Shift/Ctrl/Alt codes
+/// are left out (the hook reports the left/right variants) and so are the
+/// IME codes, which are never filtered.
+pub(crate) fn selectable_vks() -> Vec<u8> {
+    (0x01..=0xFEu8)
+        .filter(|&vk| !matches!(vk, 0x10 | 0x11 | 0x12 | 0xE5 | 0xE7))
+        .filter(|&vk| !vk_name(vk).starts_with("0x"))
+        .collect()
+}
+
 /// Case-insensitive substring match of `query` against the key name; an
 /// empty query matches every key.
 pub(crate) fn key_matches(vk: u8, query: &str) -> bool {
@@ -110,6 +127,20 @@ mod tests {
         assert_eq!(vk_name(0xE5), "IME");
         assert!(key_matches(0x15, "hang"));
         assert!(!key_matches(0x15, "0x15"));
+    }
+
+    #[test]
+    fn picker_lists_mouse_buttons_first_and_skips_unseen_codes() {
+        let vks = selectable_vks();
+        assert_eq!(&vks[..5], &[0x01, 0x02, 0x04, 0x05, 0x06]);
+        assert_eq!(vk_name(0x05), "Mouse Back");
+        for skipped in [0x03, 0x10, 0x11, 0x12, 0xE5, 0xE7, 0xFF] {
+            assert!(!vks.contains(&skipped), "0x{skipped:02X}");
+        }
+        for wanted in [0x20, 0x41, 0x5A, 0xA0, 0xA5, 0x87] {
+            assert!(vks.contains(&wanted), "0x{wanted:02X}");
+        }
+        assert!(vks.windows(2).all(|w| w[0] < w[1]));
     }
 
     #[test]

@@ -9,11 +9,29 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use super::model::Settings;
 use crate::{
-    debounce::{MeasureFrom, LOG_LIMIT_MAX, LOG_LIMIT_MIN},
+    debounce::{MeasureFrom, LOG_LIMIT_MAX, LOG_LIMIT_MIN, RELEASE_DEFER_MAX_MS},
     i18n::LanguagePref,
 };
 
+/// Upper bound of `iCleaningTimeoutMin`.
+pub const CLEANING_TIMEOUT_MAX_MIN: u64 = 120;
+
+/// A free-text value on one INI line (a pasted newline would split it).
+fn one_line(v: &str) -> String {
+    v.replace(['\r', '\n'], " ").trim().to_string()
+}
+
+/// `settings.ini` next to the executable, when present: portable mode
+/// (the file may start empty; the first save fills it).
+fn portable_path() -> Option<PathBuf> {
+    let path = std::env::current_exe().ok()?.parent()?.join("settings.ini");
+    path.is_file().then_some(path)
+}
+
 pub fn config_path() -> PathBuf {
+    if let Some(path) = portable_path() {
+        return path;
+    }
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
     let modern = PathBuf::from(&base)
         .join("KeyboardChatteringFix")
@@ -35,6 +53,15 @@ fn backup_path(path: &std::path::Path) -> PathBuf {
 
 pub fn load() -> Settings {
     try_load().unwrap_or_default()
+}
+
+/// Settings from any file (Import). `None` when it cannot be read or does
+/// not look like this program's settings file.
+pub fn load_from(path: &std::path::Path) -> Option<Settings> {
+    let text = fs::read_to_string(path).ok()?;
+    text.lines()
+        .any(|l| l.trim() == "[KeyboardChatteringFix]" || l.trim_start().starts_with("iThreshold="))
+        .then(|| parse(&text))
 }
 
 /// Settings from disk, or `None` when neither the main file nor its backup
@@ -120,6 +147,31 @@ fn parse(text: &str) -> Settings {
     if let Some(v) = map.get("bExcludeInjected") {
         s.exclude_injected = v != "0";
     }
+    if let Some(v) = map.get("bFilterMouse") {
+        s.filter_mouse = v != "0";
+    }
+    if let Some(v) = map.get("iReleaseDeferMs") {
+        if let Ok(n) = v.parse::<u64>() {
+            s.release_defer_ms = n.min(RELEASE_DEFER_MAX_MS);
+        }
+    }
+    if let Some(v) = map.get("sAutoDisableApps") {
+        s.auto_disable_apps = v.clone();
+    }
+    if let Some(v) = map.get("bAutoDisableFullscreen") {
+        s.auto_disable_fullscreen = v != "0";
+    }
+    if let Some(v) = map.get("sHotkeyToggle") {
+        s.hotkey_toggle = v.clone();
+    }
+    if let Some(v) = map.get("sHotkeyCleaning") {
+        s.hotkey_cleaning = v.clone();
+    }
+    if let Some(v) = map.get("iCleaningTimeoutMin") {
+        if let Ok(n) = v.parse::<u64>() {
+            s.cleaning_timeout_min = n.min(CLEANING_TIMEOUT_MAX_MIN);
+        }
+    }
     if let Some(v) = map.get("iTotalPresses") {
         if let Ok(n) = v.parse::<u64>() {
             s.total_presses = n;
@@ -164,7 +216,7 @@ pub fn save(s: &Settings) -> bool {
         let _ = fs::create_dir_all(dir);
     }
     let mut text = format!(
-        "[KeyboardChatteringFix]\niThreshold={}\nbFilterEnabled={}\nbPlaySound={}\nlpSoundFile={}\nbMinimizeOnLaunch={}\nbCloseToTray={}\nbRecordAllKeypress={}\niLogLimit={}\nsLanguage={}\nsMeasureFrom={}\niMinChatterMs={}\nbExcludeInjected={}\niTotalPresses={}\niBlockedPresses={}\n",
+        "[KeyboardChatteringFix]\niThreshold={}\nbFilterEnabled={}\nbPlaySound={}\nlpSoundFile={}\nbMinimizeOnLaunch={}\nbCloseToTray={}\nbRecordAllKeypress={}\niLogLimit={}\nsLanguage={}\nsMeasureFrom={}\niMinChatterMs={}\nbExcludeInjected={}\nbFilterMouse={}\niReleaseDeferMs={}\nsAutoDisableApps={}\nbAutoDisableFullscreen={}\nsHotkeyToggle={}\nsHotkeyCleaning={}\niCleaningTimeoutMin={}\niTotalPresses={}\niBlockedPresses={}\n",
         s.threshold_ms,
         if s.enabled { 1 } else { 0 },
         if s.play_sound { 1 } else { 0 },
@@ -180,6 +232,13 @@ pub fn save(s: &Settings) -> bool {
         },
         s.min_chatter_ms,
         if s.exclude_injected { 1 } else { 0 },
+        if s.filter_mouse { 1 } else { 0 },
+        s.release_defer_ms,
+        one_line(&s.auto_disable_apps),
+        if s.auto_disable_fullscreen { 1 } else { 0 },
+        one_line(&s.hotkey_toggle),
+        one_line(&s.hotkey_cleaning),
+        s.cleaning_timeout_min,
         s.total_presses,
         s.blocked_presses,
     );
@@ -349,6 +408,13 @@ sLanguage={text}
                 measure_from: MeasureFrom::Press,
                 min_chatter_ms: 9,
                 exclude_injected: false,
+                filter_mouse: true,
+                release_defer_ms: 30,
+                auto_disable_apps: "game.exe; other".to_string(),
+                auto_disable_fullscreen: true,
+                hotkey_toggle: "Ctrl+Alt+F12".to_string(),
+                hotkey_cleaning: "Ctrl+Alt+F11".to_string(),
+                cleaning_timeout_min: 0,
                 record_all_keys: true,
                 log_limit: 250,
                 total_presses: 1234,
@@ -382,6 +448,13 @@ sLanguage={text}
             assert_eq!(back.measure_from, MeasureFrom::Press);
             assert_eq!(back.min_chatter_ms, 9);
             assert!(!back.exclude_injected);
+            assert!(back.filter_mouse);
+            assert_eq!(back.release_defer_ms, 30);
+            assert_eq!(back.auto_disable_apps, "game.exe; other");
+            assert!(back.auto_disable_fullscreen);
+            assert_eq!(back.hotkey_toggle, "Ctrl+Alt+F12");
+            assert_eq!(back.hotkey_cleaning, "Ctrl+Alt+F11");
+            assert_eq!(back.cleaning_timeout_min, 0);
             assert!(back.record_all_keys);
             assert_eq!(back.log_limit, 250);
             assert_eq!((back.total_presses, back.blocked_presses), (1234, 56));
@@ -513,6 +586,44 @@ sLanguage={text}
             assert!(try_load().is_none());
             assert!(save(&Settings::default()));
             assert!(try_load().is_some());
+        });
+    }
+
+    #[test]
+    fn new_fields_are_clamped_and_kept_on_one_line() {
+        with_isolated_appdata(|dir| {
+            let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+            std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+            std::fs::write(
+                &ini,
+                "[KeyboardChatteringFix]\niReleaseDeferMs=900\niCleaningTimeoutMin=9999\n",
+            )
+            .unwrap();
+            let mut s = load();
+            assert_eq!(s.release_defer_ms, RELEASE_DEFER_MAX_MS);
+            assert_eq!(s.cleaning_timeout_min, CLEANING_TIMEOUT_MAX_MIN);
+            // A pasted line break must not inject another key.
+            s.auto_disable_apps = "a.exe\niThreshold=1".to_string();
+            assert!(save(&s));
+            let back = load();
+            assert_eq!(back.auto_disable_apps, "a.exe iThreshold=1");
+            assert_eq!(back.threshold_ms, s.threshold_ms);
+            // Defaults when absent.
+            assert_eq!(Settings::default().cleaning_timeout_min, 5);
+        });
+    }
+
+    #[test]
+    fn import_accepts_only_settings_files() {
+        with_isolated_appdata(|dir| {
+            std::fs::create_dir_all(dir).unwrap();
+            let good = dir.join("good.ini");
+            std::fs::write(&good, "[KeyboardChatteringFix]\niThreshold=77\n").unwrap();
+            assert_eq!(load_from(&good).unwrap().threshold_ms, 77);
+            let bad = dir.join("bad.txt");
+            std::fs::write(&bad, "hello\n").unwrap();
+            assert!(load_from(&bad).is_none());
+            assert!(load_from(&dir.join("missing.ini")).is_none());
         });
     }
 

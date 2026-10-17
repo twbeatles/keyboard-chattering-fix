@@ -1,9 +1,10 @@
 //! Settings and Advanced tabs: load into the form, track unsaved edits,
 //! validate, persist, and apply.
 //!
-//! Protection on/off and the language apply immediately (they are not
-//! "settings to review"); everything else is applied by the Save button, and
-//! the status line says when there are unsaved changes.
+//! Protection on/off, the language, and the Keys tab (per-key windows,
+//! mouse filter) apply immediately (they are not "settings to review");
+//! everything else is applied by the Save button, and the status line says
+//! when there are unsaved changes.
 
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -35,7 +36,7 @@ use super::{
 use crate::{
     app::state::SHARED,
     config::{self, Settings},
-    debounce::{MeasureFrom, LOG_LIMIT_MAX, LOG_LIMIT_MIN},
+    debounce::{MeasureFrom, LOG_LIMIT_MAX, LOG_LIMIT_MIN, RELEASE_DEFER_MAX_MS},
     i18n::{strings, system_language, LanguagePref},
     input::sound::{play_notification_sound, play_path_for_preview},
 };
@@ -93,7 +94,16 @@ pub(crate) unsafe fn load_into_form(hwnd: HWND, init: &Settings) {
         ID_EDIT_SOUND_FILE,
         init.sound_file.as_deref().unwrap_or(""),
     );
-    for id in [ID_EDIT_THRESHOLD, ID_EDIT_MIN_CHATTER, ID_EDIT_LOG_LIMIT] {
+    set_field(hwnd, ID_EDIT_DEFER, &init.release_defer_ms.to_string());
+    set_field(hwnd, ID_EDIT_AUTO_APPS, &init.auto_disable_apps);
+    set_field(hwnd, ID_EDIT_HOTKEY_TOGGLE, &init.hotkey_toggle);
+    set_field(hwnd, ID_EDIT_HOTKEY_CLEAN, &init.hotkey_cleaning);
+    for id in [
+        ID_EDIT_THRESHOLD,
+        ID_EDIT_MIN_CHATTER,
+        ID_EDIT_LOG_LIMIT,
+        ID_EDIT_DEFER,
+    ] {
         if let Ok(h) = GetDlgItem(Some(hwnd), id) {
             SendMessageW(
                 h,
@@ -111,6 +121,12 @@ pub(crate) unsafe fn load_into_form(hwnd: HWND, init: &Settings) {
     set_toggle(hwnd, ID_TOGGLE_CLOSE_TO_TRAY, init.close_to_tray);
     set_toggle(hwnd, ID_TOGGLE_EXCLUDE_INJECTED, init.exclude_injected);
     set_toggle(hwnd, ID_TOGGLE_RECORD_ALL, init.record_all_keys);
+    set_toggle(hwnd, ID_TOGGLE_MOUSE, init.filter_mouse);
+    set_toggle(
+        hwnd,
+        ID_TOGGLE_AUTO_FULLSCREEN,
+        init.auto_disable_fullscreen,
+    );
 
     select(
         hwnd,
@@ -215,6 +231,12 @@ fn autosave_due(
 /// File-only fields (`key.XX`) are re-read from disk first, so edits made in
 /// the settings file while the app runs survive (ISSUE-005).
 pub(crate) unsafe fn persist_live() -> bool {
+    persist_with(|_| {})
+}
+
+/// [`persist_live`] with one immediate change applied on top of the file's
+/// current per-key values (the Keys tab: per-key windows, mouse filter).
+fn persist_with(change: impl FnOnce(&mut Settings)) -> bool {
     let Some(saved) = SAVED.get() else {
         return false;
     };
@@ -223,6 +245,7 @@ pub(crate) unsafe fn persist_live() -> bool {
     if let Some(disk) = &disk {
         s.adopt_file_only_fields(disk);
     }
+    change(&mut s);
     let live = SHARED.get().map(|shared| {
         let g = shared.lock().unwrap();
         s.enabled = g.enabled;
@@ -241,6 +264,34 @@ pub(crate) unsafe fn persist_live() -> bool {
         *PERSISTED.lock().unwrap() = live;
     }
     written
+}
+
+/// Set (`Some`) or clear (`None`) one key's block window, apply it to the
+/// live filter, and write it to the settings file right away. The rest of
+/// the file's per-key values are re-read first, so a concurrent edit of the
+/// file is kept. Returns whether the change reached disk.
+pub(crate) fn set_key_override(vk: u8, ms: Option<u64>) -> bool {
+    let ms = ms.map(|m| m.clamp(1, 1000));
+    let mut per_key = None;
+    let written = persist_with(|s| {
+        s.per_key_ms[vk as usize] = ms;
+        per_key = Some(s.per_key_ms);
+    });
+    if let (Some(per_key), Some(shared)) = (per_key, SHARED.get()) {
+        let mut g = shared.lock().unwrap();
+        for (k, ms) in per_key.iter().enumerate() {
+            g.debouncer.set_key_threshold(k as u8, *ms);
+        }
+    }
+    history::invalidate();
+    written
+}
+
+/// Mouse filter switch: applies at once (installs or removes the mouse
+/// hook) and is saved right away, like the protection switch.
+pub(crate) fn set_mouse_filter(on: bool) -> bool {
+    crate::input::hook::set_mouse_filter(on);
+    persist_with(|s| s.filter_mouse = on)
 }
 
 /// Timer tick: persist counters every few minutes when they changed, so a
@@ -356,6 +407,14 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
         LOG_LIMIT_MAX as u64,
     ) as usize;
     let sound_file = Some(get_text(hwnd, ID_EDIT_SOUND_FILE)).filter(|s| !s.is_empty());
+    let defer_fb = SHARED
+        .get()
+        .map_or(0, |g| g.lock().unwrap().debouncer.release_defer_ms());
+    let release_defer = read_bounded_number(hwnd, ID_EDIT_DEFER, defer_fb, 0, RELEASE_DEFER_MAX_MS);
+    let auto_apps = get_text(hwnd, ID_EDIT_AUTO_APPS);
+    let auto_fullscreen = get_toggle(ID_TOGGLE_AUTO_FULLSCREEN);
+    let hotkey_toggle = get_text(hwnd, ID_EDIT_HOTKEY_TOGGLE);
+    let hotkey_cleaning = get_text(hwnd, ID_EDIT_HOTKEY_CLEAN);
 
     let enabled = get_toggle(ID_TOGGLE_ENABLE);
     let sound = get_toggle(ID_TOGGLE_SOUND);
@@ -390,6 +449,12 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
     new_settings.language = LanguagePref::from_combo_index(combo_sel(hwnd, ID_COMBO_LANG));
     new_settings.min_chatter_ms = min_chatter;
     new_settings.exclude_injected = exclude_injected;
+    new_settings.filter_mouse = get_toggle(ID_TOGGLE_MOUSE);
+    new_settings.release_defer_ms = release_defer;
+    new_settings.auto_disable_apps = auto_apps.clone();
+    new_settings.auto_disable_fullscreen = auto_fullscreen;
+    new_settings.hotkey_toggle = hotkey_toggle.clone();
+    new_settings.hotkey_cleaning = hotkey_cleaning.clone();
     new_settings.log_limit = log_limit;
 
     let live = SHARED.get().map(|g| {
@@ -400,6 +465,7 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
         }
         g.debouncer.set_measure_from(measure);
         g.debouncer.set_min_chatter_ms(min_chatter);
+        g.debouncer.set_release_defer_ms(release_defer);
         g.debouncer.record_all_keys = record_all;
         g.debouncer.set_log_limit(log_limit);
         g.enabled = enabled;
@@ -418,6 +484,10 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
     // The hook must never touch the filesystem: validated off-thread, then
     // swapped in under the lock.
     apply_sound_async(sound_file.clone());
+    crate::input::hook::set_mouse_filter(new_settings.filter_mouse);
+    super::foreground::configure(&auto_apps, auto_fullscreen);
+    let hotkey_problems = super::hotkeys::apply(hwnd, &hotkey_toggle, &hotkey_cleaning);
+    super::menu::install(hwnd);
     let written = config::save(&new_settings);
     if written {
         *PERSISTED.lock().unwrap() = live;
@@ -437,7 +507,16 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
     }
     refresh_footer(hwnd, close_to_tray);
     history::invalidate();
+    super::keys_page::invalidate();
     super::stats::update_stats(hwnd);
+    if !hotkey_problems.is_empty() {
+        super::dialog::msg_box(
+            hwnd,
+            s.title,
+            &hotkey_problems.join("\n\n"),
+            MB_OK | MB_ICONWARNING,
+        );
+    }
 }
 
 #[cfg(test)]

@@ -18,6 +18,9 @@ jobs:
       - name: Hook, UI freeze and session-end persistence
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\e2e\hook_session_e2e.ps1
+      - name: Release delay, mouse filter, hotkeys, auto-pause
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\e2e\features_e2e.ps1
       - name: UI language selection
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\e2e\language_e2e.ps1

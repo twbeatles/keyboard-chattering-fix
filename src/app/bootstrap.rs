@@ -5,7 +5,7 @@
 
 use std::{
     path::PathBuf,
-    sync::{atomic::Ordering, Mutex},
+    sync::Mutex,
     time::{Duration, Instant},
 };
 
@@ -19,12 +19,6 @@ use super::{
 };
 use crate::{config, debounce::Debouncer, input};
 
-#[link(name = "winmm")]
-extern "system" {
-    fn timeBeginPeriod(uPeriod: u32) -> u32;
-    fn timeEndPeriod(uPeriod: u32) -> u32;
-}
-
 /// Build the debouncer from persisted settings and publish shared state.
 fn init_shared(settings: &config::Settings) {
     let mut debouncer = Debouncer::new(settings.threshold_ms);
@@ -35,6 +29,7 @@ fn init_shared(settings: &config::Settings) {
     }
     debouncer.set_measure_from(settings.measure_from);
     debouncer.set_min_chatter_ms(settings.min_chatter_ms);
+    debouncer.set_release_defer_ms(settings.release_defer_ms);
     debouncer.total_presses = settings.total_presses;
     debouncer.blocked_presses = settings.blocked_presses;
     debouncer.per_key_presses = settings.per_key_presses;
@@ -48,6 +43,9 @@ fn init_shared(settings: &config::Settings) {
         play_sound: settings.play_sound,
         sound_file: config::resolve_sound_file(settings.sound_file.as_deref()),
         exclude_injected: settings.exclude_injected,
+        suspended: false,
+        pending_scan: [0; crate::debounce::SLOTS],
+        inject: Default::default(),
     }));
     let _ = START.set(Instant::now());
     let _ = START_CLOCK_MS.set(local_time_of_day_ms());
@@ -86,42 +84,52 @@ pub(crate) fn run(settings: config::Settings) {
         .try_init();
     init_shared(&settings);
 
+    // "Run as administrator" relaunch: the previous instance is still
+    // exiting and holds the single-instance mutex for a moment.
+    if let Some(pid) = arg_value("--after-pid").and_then(|v| v.parse::<u32>().ok()) {
+        wait_for_process_exit(pid, Duration::from_secs(10));
+    }
+
     #[cfg(windows)]
     let _instance_guard = match try_acquire_single_instance() {
         Some(guard) => guard,
         None => {
-            bring_existing_to_front();
-            show_already_running(settings.ui_language());
+            // Two autostart entries (Run key + elevated task) may both fire
+            // at sign-in: the second one leaves quietly.
+            if !has_arg(crate::config::AUTOSTART_ARG) {
+                bring_existing_to_front();
+                show_already_running(settings.ui_language());
+            }
             return;
         }
     };
 
     acknowledge_update_handshake();
+    // Startup entries of this executable written before `--autostart`.
+    config::upgrade_autostart_entry();
     // Staging leftovers of earlier updates (G4); disk I/O off the UI thread.
     std::thread::spawn(crate::updater::cleanup_stale_staging);
 
+    // No `timeBeginPeriod(1)`: gaps are measured with `Instant` (QPC), which
+    // does not depend on the system timer resolution, so raising it only
+    // cost power. (`KBDLLHOOKSTRUCT::time` is not used for the same reason:
+    // it is a `GetTickCount` stamp with 10–16 ms resolution.)
     unsafe {
-        // High-precision multimedia timer (1ms resolution)
-        timeBeginPeriod(1);
-
         use windows::Win32::Foundation::HINSTANCE;
         let hmodule = GetModuleHandleW(None).expect("own module handle");
         let hinstance = HINSTANCE(hmodule.0);
         // The hook pumps its own thread (ISSUE-002); this thread only runs
         // UI. Installed before the window so the first frame shows the
         // real protection state.
-        let hook = input::hook::spawn_hook_thread();
-        super::state::HOOK_ACTIVE.store(hook.is_some(), Ordering::Relaxed);
+        input::hook::set_mouse_filter(settings.filter_mouse);
+        let hooked = input::hook::start();
         let hwnd: HWND = crate::ui::create_window(hinstance, &settings);
         if hwnd.is_invalid() {
-            if let Some(hook) = hook {
-                hook.stop();
-            }
-            timeEndPeriod(1);
+            input::hook::stop();
             return;
         }
         crate::ui::show_initial(hwnd, settings.minimize_on_launch);
-        if hook.is_none() {
+        if !hooked {
             // Never let the UI pretend to protect without a hook (G1).
             crate::ui::show_hook_failed(hwnd);
         }
@@ -139,9 +147,33 @@ pub(crate) fn run(settings: config::Settings) {
 
         // The window already flushed settings in WM_DESTROY; unhook last
         // so keystrokes stay filtered until the very end.
-        if let Some(hook) = hook {
-            hook.stop();
+        input::hook::stop();
+    }
+}
+
+fn has_arg(name: &str) -> bool {
+    std::env::args().skip(1).any(|a| a == name)
+}
+
+/// Value after `name` on the command line (`--after-pid 1234`).
+fn arg_value(name: &str) -> Option<String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
+}
+
+/// Wait (bounded) until process `pid` has exited; returns at once when it
+/// is already gone or cannot be opened.
+fn wait_for_process_exit(pid: u32, limit: Duration) {
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+    };
+    unsafe {
+        if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {
+            let _ = WaitForSingleObject(h, limit.as_millis() as u32);
+            let _ = CloseHandle(h);
         }
-        timeEndPeriod(1);
     }
 }

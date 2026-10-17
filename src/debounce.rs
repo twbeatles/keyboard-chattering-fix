@@ -25,6 +25,50 @@ pub struct LogEvent {
     pub gap_ms: Option<u64>,
 }
 
+/// `VK_PACKET`: Unicode text from IMEs, on-screen keyboards and remote
+/// tools. Every character shares this code, so two different characters
+/// typed quickly would look like one key chattering.
+pub const VK_PACKET: usize = 0xE7;
+/// `VK_PROCESSKEY`: a key the IME consumed; distinct physical keys share it.
+pub const VK_PROCESSKEY: usize = 0xE5;
+
+/// Width of one gap histogram bucket.
+pub const GAP_BUCKET_MS: u64 = 5;
+/// 40 buckets of 5 ms (0–199 ms) plus one for every gap of 200 ms or more.
+pub const GAP_BUCKETS: usize = 41;
+/// Count of measured gaps per bucket for one key (see [`Debouncer::gap_histogram`]).
+pub type GapHistogram = [u32; GAP_BUCKETS];
+
+/// Timing state is tracked per physical key: the virtual-key code plus the
+/// extended flag (main Enter vs. numpad Enter, arrow cluster vs. numpad
+/// arrows share a code). Counters and thresholds stay per virtual key.
+pub const SLOTS: usize = 512;
+
+/// Timing slot of a key: `vk`, or `vk + 256` for the extended variant.
+pub fn slot_of(vk: usize, extended: bool) -> usize {
+    (vk & 0xFF) | (usize::from(extended) << 8)
+}
+
+/// Longest allowed release delay (`iReleaseDeferMs`).
+pub const RELEASE_DEFER_MAX_MS: u64 = 100;
+
+/// What the hook does with one event.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Decision {
+    /// Forward the event.
+    Pass,
+    /// Drop the event.
+    Block,
+    /// Drop this release for now: it is sent later by
+    /// [`Debouncer::due_releases`], or cancelled when the key bounces back
+    /// down in time (release delay, `iReleaseDeferMs`).
+    Defer,
+    /// A held-back release is overdue (its timer fired late): drop this
+    /// event, send the release first, then send this press again when
+    /// `then_pass`.
+    Flush { then_pass: bool },
+}
+
 /// Time-based chatter filter.
 ///
 /// A `Down` is blocked when the same key fires again inside its threshold.
@@ -35,16 +79,21 @@ pub struct Debouncer {
     per_key: [Option<Duration>; 256],
     measure_from: MeasureFrom,
     min_chatter: Duration,
-    last_release: [Option<Duration>; 256],
-    last_press: [Option<Duration>; 256],
-    held: [bool; 256],
+    /// How long a release of a held key is held back (zero = off).
+    release_defer: Duration,
+    last_release: [Option<Duration>; SLOTS],
+    last_press: [Option<Duration>; SLOTS],
+    held: [bool; SLOTS],
+    /// Release time of each held-back `Up` (see [`Decision::Defer`]).
+    pending_up: [Option<Duration>; SLOTS],
     pub total_presses: u64,
     pub blocked_presses: u64,
     pub per_key_presses: [u64; 256],
     pub per_key_blocked: [u64; 256],
     /// (virtual-key code, observed gap) of the most recent block.
     pub last_blocked: Option<(u8, Duration)>,
-    /// Keyboard cleaning mode: when true, all keystrokes are blocked until Enter (VK_RETURN) is pressed.
+    /// Keyboard cleaning mode: every press is blocked until Enter
+    /// (VK_RETURN) is pressed; releases pass so no key stays "stuck down".
     pub cleaning_mode: bool,
     /// Real-time event log buffer. Capacity is reserved up front by
     /// [`Debouncer::set_log_limit`], so the hook never allocates here.
@@ -56,6 +105,9 @@ pub struct Debouncer {
     /// Bumped on every log or counter reset change, so the History tab can
     /// skip re-rendering when nothing new was recorded.
     pub log_seq: u64,
+    /// Every measured gap (blocked or not) per key, for the threshold
+    /// recommendation. Allocated once here; the hook only increments.
+    gap_hist: Box<[GapHistogram; 256]>,
 }
 
 /// Bounds of the in-memory event log (UI and settings file share them).
@@ -69,9 +121,11 @@ impl Debouncer {
             per_key: [None; 256],
             measure_from: MeasureFrom::Release,
             min_chatter: Duration::ZERO,
-            last_release: [None; 256],
-            last_press: [None; 256],
-            held: [false; 256],
+            release_defer: Duration::ZERO,
+            last_release: [None; SLOTS],
+            last_press: [None; SLOTS],
+            held: [false; SLOTS],
+            pending_up: [None; SLOTS],
             total_presses: 0,
             blocked_presses: 0,
             per_key_presses: [0; 256],
@@ -82,7 +136,22 @@ impl Debouncer {
             record_all_keys: false,
             log_limit: 100,
             log_seq: 0,
+            gap_hist: vec![[0; GAP_BUCKETS]; 256]
+                .into_boxed_slice()
+                .try_into()
+                .expect("256 histograms"),
         }
+    }
+
+    /// Gaps measured for `vk` since startup or the last statistics reset.
+    pub fn gap_histogram(&self, vk: u8) -> &GapHistogram {
+        &self.gap_hist[vk as usize]
+    }
+
+    fn record_gap(&mut self, vk: usize, gap: Duration) {
+        let i = ((gap.as_millis() as u64 / GAP_BUCKET_MS) as usize).min(GAP_BUCKETS - 1);
+        let slot = &mut self.gap_hist[vk][i];
+        *slot = slot.saturating_add(1);
     }
 
     pub fn log_limit(&self) -> usize {
@@ -115,6 +184,9 @@ impl Debouncer {
         self.per_key_presses = [0; 256];
         self.per_key_blocked = [0; 256];
         self.last_blocked = None;
+        for h in self.gap_hist.iter_mut() {
+            *h = [0; GAP_BUCKETS];
+        }
         self.clear_log();
     }
 
@@ -155,6 +227,17 @@ impl Debouncer {
         self.min_chatter = Duration::from_millis(ms.min(1000));
     }
 
+    pub fn release_defer_ms(&self) -> u64 {
+        self.release_defer.as_millis() as u64
+    }
+
+    /// Hold back each release of a held key this long (0 turns it off).
+    /// Releases already held back are sent by the next
+    /// [`Debouncer::due_releases`] when the delay shrinks.
+    pub fn set_release_defer_ms(&mut self, ms: u64) {
+        self.release_defer = Duration::from_millis(ms.min(RELEASE_DEFER_MAX_MS));
+    }
+
     fn effective_threshold(&self, vk: usize) -> Duration {
         self.per_key[vk].unwrap_or(self.global_threshold)
     }
@@ -167,90 +250,180 @@ impl Debouncer {
         self.log_seq += 1;
     }
 
-    /// Returns `true` when the event should reach applications.
+    fn log_passed(&mut self, vk: usize, now: Duration, gap: Option<Duration>) {
+        if self.record_all_keys {
+            self.push_log(LogEvent {
+                time: now,
+                vk: vk as u8,
+                blocked: false,
+                gap_ms: gap.map(|g| g.as_millis() as u64),
+            });
+        }
+    }
+
+    fn note_block(&mut self, vk: usize, now: Duration, gap: Duration) {
+        self.blocked_presses += 1;
+        self.per_key_blocked[vk] += 1;
+        self.last_blocked = Some((vk as u8, gap));
+        self.push_log(LogEvent {
+            time: now,
+            vk: vk as u8,
+            blocked: true,
+            gap_ms: Some(gap.as_millis() as u64),
+        });
+    }
+
+    /// Returns `true` when the event should reach applications (a key with
+    /// no extended variant and no release delay in play).
+    #[cfg(test)]
     pub fn decide(&mut self, vk: usize, kind: KeyEventKind, now: Duration) -> bool {
+        self.decide_event(vk, false, kind, now) == Decision::Pass
+    }
+
+    /// Classify one key or mouse-button event.
+    pub fn decide_event(
+        &mut self,
+        vk: usize,
+        extended: bool,
+        kind: KeyEventKind,
+        now: Duration,
+    ) -> Decision {
+        let slot = slot_of(vk, extended);
         let vk = vk & 0xFF;
 
-        // Keyboard cleaning mode: block all keystrokes. Enter (0x0D) exits cleaning mode.
+        // Cleaning mode: block every press; Enter (0x0D) ends it. Releases
+        // pass, so a key held when cleaning started is not left stuck down.
         if self.cleaning_mode {
             if kind == KeyEventKind::Down && vk == 0x0D {
                 self.cleaning_mode = false;
             }
-            return false;
+            return match kind {
+                KeyEventKind::Up => Decision::Pass,
+                KeyEventKind::Down => Decision::Block,
+            };
+        }
+
+        // Shared codes for many different characters/keys: never chatter.
+        if vk == VK_PACKET || vk == VK_PROCESSKEY {
+            return Decision::Pass;
         }
 
         match kind {
             KeyEventKind::Up => {
-                self.held[vk] = false;
-                self.last_release[vk] = Some(now);
-                true
+                if self.pending_up[slot].is_some() {
+                    // A second release while one is held back: the first
+                    // still stands for both.
+                    return Decision::Block;
+                }
+                if !self.release_defer.is_zero() && self.held[slot] {
+                    self.pending_up[slot] = Some(now);
+                    return Decision::Defer;
+                }
+                self.held[slot] = false;
+                self.last_release[slot] = Some(now);
+                Decision::Pass
             }
             KeyEventKind::Down => {
-                self.total_presses += 1;
-                self.per_key_presses[vk] += 1;
-
-                // No release in between: genuine auto-repeat, never chatter.
-                if self.held[vk] {
-                    self.last_press[vk] = Some(now);
-                    if self.record_all_keys {
-                        self.push_log(LogEvent {
-                            time: now,
-                            vk: vk as u8,
-                            blocked: false,
-                            gap_ms: None,
-                        });
+                if let Some(released) = self.pending_up[slot].take() {
+                    let gap = now.saturating_sub(released);
+                    if gap < self.release_defer {
+                        // The contact bounced while the key is held: the
+                        // release was never shown, so the key simply stays
+                        // down for applications.
+                        self.total_presses += 1;
+                        self.per_key_presses[vk] += 1;
+                        self.record_gap(vk, gap);
+                        self.note_block(vk, now, gap);
+                        return Decision::Block;
                     }
-                    return true;
+                    // The timer was late: release first, then judge the
+                    // press as usual.
+                    self.held[slot] = false;
+                    self.last_release[slot] = Some(released);
+                    let then_pass = self.judge_down(slot, vk, now);
+                    return Decision::Flush { then_pass };
                 }
-
-                let anchor = match self.measure_from {
-                    MeasureFrom::Release => self.last_release[vk],
-                    MeasureFrom::Press => self.last_press[vk],
-                };
-
-                if let Some(prev) = anchor {
-                    let gap = now.saturating_sub(prev);
-                    if gap < self.min_chatter {
-                        // Bugged input (e.g. 0 ms duplicate): not chatter.
-                        self.held[vk] = true;
-                        self.last_press[vk] = Some(now);
-                        if self.record_all_keys {
-                            self.push_log(LogEvent {
-                                time: now,
-                                vk: vk as u8,
-                                blocked: false,
-                                gap_ms: Some(gap.as_millis() as u64),
-                            });
-                        }
-                        return true;
-                    }
-                    if gap < self.effective_threshold(vk) {
-                        self.blocked_presses += 1;
-                        self.per_key_blocked[vk] += 1;
-                        self.last_blocked = Some((vk as u8, gap));
-                        self.push_log(LogEvent {
-                            time: now,
-                            vk: vk as u8,
-                            blocked: true,
-                            gap_ms: Some(gap.as_millis() as u64),
-                        });
-                        return false;
-                    }
+                if self.judge_down(slot, vk, now) {
+                    Decision::Pass
+                } else {
+                    Decision::Block
                 }
-
-                self.held[vk] = true;
-                self.last_press[vk] = Some(now);
-                if self.record_all_keys {
-                    self.push_log(LogEvent {
-                        time: now,
-                        vk: vk as u8,
-                        blocked: false,
-                        gap_ms: None,
-                    });
-                }
-                true
             }
         }
+    }
+
+    /// The press half of the filter: `true` forwards the press.
+    fn judge_down(&mut self, slot: usize, vk: usize, now: Duration) -> bool {
+        self.total_presses += 1;
+        self.per_key_presses[vk] += 1;
+
+        // No release in between: genuine auto-repeat, never chatter.
+        if self.held[slot] {
+            self.last_press[slot] = Some(now);
+            self.log_passed(vk, now, None);
+            return true;
+        }
+
+        let anchor = match self.measure_from {
+            MeasureFrom::Release => self.last_release[slot],
+            MeasureFrom::Press => self.last_press[slot],
+        };
+
+        if let Some(prev) = anchor {
+            let gap = now.saturating_sub(prev);
+            self.record_gap(vk, gap);
+            if gap < self.min_chatter {
+                // Bugged input (e.g. 0 ms duplicate): not chatter.
+                self.held[slot] = true;
+                self.last_press[slot] = Some(now);
+                self.log_passed(vk, now, Some(gap));
+                return true;
+            }
+            if gap < self.effective_threshold(vk) {
+                // The switch is physically down again: a further Down
+                // before the next Up is the keyboard's auto-repeat of a
+                // held key (a bounce mid-hold), not another chatter, and
+                // must not be blocked.
+                self.held[slot] = true;
+                self.note_block(vk, now, gap);
+                return false;
+            }
+        }
+
+        self.held[slot] = true;
+        self.last_press[slot] = Some(now);
+        self.log_passed(vk, now, None);
+        true
+    }
+
+    /// Whether any release is being held back.
+    pub fn has_pending_releases(&self) -> bool {
+        self.pending_up.iter().any(Option::is_some)
+    }
+
+    /// Releases whose delay ran out by `now` (all of them when `flush_all`):
+    /// they become real releases here and their slots are written to `out`
+    /// for the caller to send. Returns how many were written.
+    pub fn due_releases(
+        &mut self,
+        now: Duration,
+        flush_all: bool,
+        out: &mut [u16; SLOTS],
+    ) -> usize {
+        let mut n = 0;
+        for slot in 0..SLOTS {
+            let Some(released) = self.pending_up[slot] else {
+                continue;
+            };
+            if flush_all || now.saturating_sub(released) >= self.release_defer {
+                self.pending_up[slot] = None;
+                self.held[slot] = false;
+                self.last_release[slot] = Some(released);
+                out[n] = slot as u16;
+                n += 1;
+            }
+        }
+        n
     }
 
     /// Finds the key with the highest number of blocked chatter events.
@@ -509,6 +682,316 @@ mod tests {
         assert_eq!(d.last_blocked, None);
         assert!(d.log_events.is_empty());
         assert_eq!(d.top_chattered_key(), None);
+    }
+
+    #[test]
+    fn held_key_bounce_does_not_count_repeats_as_chatter() {
+        // A held key whose contact bounces once (Up, Down) in the middle of
+        // the hold: the bounce Down is chatter, but the keyboard's next
+        // auto-repeat Down must resume the key, not be blocked as more
+        // chatter (it used to be, until the gap since the bounce release
+        // grew past the threshold).
+        let mut d = Debouncer::new(50);
+        assert!(d.decide(0x57, KeyEventKind::Down, ms(0)));
+        assert!(d.decide(0x57, KeyEventKind::Up, ms(200)));
+        assert!(!d.decide(0x57, KeyEventKind::Down, ms(203)));
+        assert!(d.decide(0x57, KeyEventKind::Down, ms(233)));
+        assert!(d.decide(0x57, KeyEventKind::Down, ms(266)));
+        assert_eq!(d.blocked_presses, 1);
+        assert_eq!(d.per_key_blocked[0x57], 1);
+    }
+
+    #[test]
+    fn release_chatter_is_still_blocked_after_a_blocked_bounce() {
+        // Down, Up, bounce Down (blocked), bounce Up, bounce Down again:
+        // the Up in between ends the "held" state, so the second bounce is
+        // judged as chatter again.
+        let mut d = Debouncer::new(50);
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(0)));
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(100)));
+        assert!(!d.decide(0x41, KeyEventKind::Down, ms(104)));
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(107)));
+        assert!(!d.decide(0x41, KeyEventKind::Down, ms(111)));
+        assert_eq!(d.blocked_presses, 2);
+    }
+
+    #[test]
+    fn shared_ime_codes_always_pass_and_are_not_counted() {
+        let mut d = Debouncer::new(50);
+        d.record_all_keys = true;
+        for vk in [VK_PACKET, VK_PROCESSKEY] {
+            for t in 0..5 {
+                // Different characters 2 ms apart, all reported as one code.
+                assert!(d.decide(vk, KeyEventKind::Down, ms(t * 4)));
+                assert!(d.decide(vk, KeyEventKind::Up, ms(t * 4 + 2)));
+            }
+        }
+        assert_eq!((d.total_presses, d.blocked_presses), (0, 0));
+        assert!(d.log_events.is_empty());
+    }
+
+    #[test]
+    fn cleaning_mode_lets_releases_through() {
+        // A key held while cleaning starts must not stay "down" in apps.
+        let mut d = Debouncer::new(50);
+        d.cleaning_mode = true;
+        assert!(d.decide(0x10, KeyEventKind::Up, ms(10)));
+        assert!(!d.decide(0x10, KeyEventKind::Down, ms(20)));
+    }
+
+    #[test]
+    fn extended_and_plain_keys_sharing_a_code_are_timed_apart() {
+        // Main Enter then numpad Enter 10 ms later: two physical keys.
+        let mut d = Debouncer::new(50);
+        let down = |d: &mut Debouncer, ext, t| d.decide_event(0x0D, ext, KeyEventKind::Down, ms(t));
+        let up = |d: &mut Debouncer, ext, t| d.decide_event(0x0D, ext, KeyEventKind::Up, ms(t));
+        assert_eq!(down(&mut d, false, 0), Decision::Pass);
+        assert_eq!(up(&mut d, false, 30), Decision::Pass);
+        assert_eq!(down(&mut d, true, 40), Decision::Pass);
+        assert_eq!(up(&mut d, true, 60), Decision::Pass);
+        // The same physical key bouncing is still chatter.
+        assert_eq!(down(&mut d, true, 65), Decision::Block);
+        // Counters stay per virtual key.
+        assert_eq!((d.per_key_presses[0x0D], d.per_key_blocked[0x0D]), (3, 1));
+    }
+
+    fn defer(ms_: u64) -> Debouncer {
+        let mut d = Debouncer::new(50);
+        d.set_release_defer_ms(ms_);
+        d
+    }
+
+    #[test]
+    fn release_defer_hides_a_bounce_while_held() {
+        let mut d = defer(30);
+        let mut out = [0u16; SLOTS];
+        assert_eq!(
+            d.decide_event(0x57, false, KeyEventKind::Down, ms(0)),
+            Decision::Pass
+        );
+        // Mid-hold bounce: the release is held back, the bounce press is
+        // swallowed, and applications never see the key go up.
+        assert_eq!(
+            d.decide_event(0x57, false, KeyEventKind::Up, ms(200)),
+            Decision::Defer
+        );
+        assert_eq!(
+            d.decide_event(0x57, false, KeyEventKind::Down, ms(204)),
+            Decision::Block
+        );
+        assert!(!d.has_pending_releases());
+        assert_eq!(d.blocked_presses, 1);
+        // Auto-repeat continues normally.
+        assert_eq!(
+            d.decide_event(0x57, false, KeyEventKind::Down, ms(233)),
+            Decision::Pass
+        );
+        // The real release goes out once the delay ran out.
+        assert_eq!(
+            d.decide_event(0x57, false, KeyEventKind::Up, ms(500)),
+            Decision::Defer
+        );
+        assert_eq!(d.due_releases(ms(520), false, &mut out), 0);
+        assert_eq!(d.due_releases(ms(530), false, &mut out), 1);
+        assert_eq!(out[0], 0x57);
+        // Measured from the real release time: 540 is 40 ms after 500.
+        assert_eq!(
+            d.decide_event(0x57, false, KeyEventKind::Down, ms(540)),
+            Decision::Block
+        );
+    }
+
+    #[test]
+    fn release_defer_flushes_a_late_release_before_the_next_press() {
+        let mut d = defer(20);
+        assert_eq!(
+            d.decide_event(0x41, false, KeyEventKind::Down, ms(0)),
+            Decision::Pass
+        );
+        assert_eq!(
+            d.decide_event(0x41, false, KeyEventKind::Up, ms(100)),
+            Decision::Defer
+        );
+        // The timer did not run: 300 ms later the release is still pending.
+        assert_eq!(
+            d.decide_event(0x41, false, KeyEventKind::Down, ms(300)),
+            Decision::Flush { then_pass: true }
+        );
+        assert_eq!(
+            d.decide_event(0x41, false, KeyEventKind::Up, ms(400)),
+            Decision::Defer
+        );
+        // Late again, and this press is chatter after the real release.
+        assert_eq!(
+            d.decide_event(0x41, false, KeyEventKind::Down, ms(430)),
+            Decision::Flush { then_pass: false }
+        );
+    }
+
+    #[test]
+    fn release_defer_only_holds_releases_of_held_keys() {
+        let mut d = defer(30);
+        // A release with no press seen (e.g. the key was down at startup).
+        assert_eq!(
+            d.decide_event(0x41, false, KeyEventKind::Up, ms(10)),
+            Decision::Pass
+        );
+        // A duplicate release while one is held back is dropped.
+        assert_eq!(
+            d.decide_event(0x42, false, KeyEventKind::Down, ms(20)),
+            Decision::Pass
+        );
+        assert_eq!(
+            d.decide_event(0x42, false, KeyEventKind::Up, ms(30)),
+            Decision::Defer
+        );
+        assert_eq!(
+            d.decide_event(0x42, false, KeyEventKind::Up, ms(31)),
+            Decision::Block
+        );
+        // Turning the delay off releases what is held back at once.
+        d.set_release_defer_ms(0);
+        let mut out = [0u16; SLOTS];
+        assert_eq!(d.due_releases(ms(32), false, &mut out), 1);
+        assert_eq!(
+            d.decide_event(0x42, false, KeyEventKind::Down, ms(200)),
+            Decision::Pass
+        );
+        assert_eq!(
+            d.decide_event(0x42, false, KeyEventKind::Up, ms(250)),
+            Decision::Pass
+        );
+        assert_eq!(d.release_defer_ms(), 0);
+        d.set_release_defer_ms(5000);
+        assert_eq!(d.release_defer_ms(), RELEASE_DEFER_MAX_MS);
+    }
+
+    #[test]
+    fn release_defer_never_loses_a_release() {
+        // Random streams with a delay on: every held-back release is either
+        // cancelled by a bounce or sent, and a final flush leaves none.
+        for seed in 0..100u64 {
+            let mut rng = Lcg(seed);
+            let mut d = defer(5 + rng.next() % 40);
+            let mut out = [0u16; SLOTS];
+            let mut now = 0u64;
+            for _ in 0..300 {
+                now += rng.next() % 50;
+                if rng.next().is_multiple_of(4) {
+                    d.due_releases(ms(now), false, &mut out);
+                }
+                let vk = [0x41usize, 0x01][(rng.next() % 2) as usize];
+                let kind = if rng.next().is_multiple_of(2) {
+                    KeyEventKind::Down
+                } else {
+                    KeyEventKind::Up
+                };
+                let decision = d.decide_event(vk, false, kind, ms(now));
+                if kind == KeyEventKind::Down {
+                    assert_ne!(decision, Decision::Defer, "seed {seed}");
+                }
+            }
+            d.due_releases(ms(now), true, &mut out);
+            assert!(!d.has_pending_releases(), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn cleaning_mode_still_blocks_shared_ime_codes() {
+        let mut d = Debouncer::new(50);
+        d.cleaning_mode = true;
+        assert!(!d.decide(VK_PACKET, KeyEventKind::Down, ms(10)));
+    }
+
+    #[test]
+    fn gap_histogram_buckets_every_measured_gap() {
+        let mut d = Debouncer::new(50);
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(0)));
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(10)));
+        // 3 ms after release: bucket 0, blocked.
+        assert!(!d.decide(0x41, KeyEventKind::Down, ms(13)));
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(20)));
+        // 72 ms: bucket 14, forwarded.
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(92)));
+        // Auto-repeat has no gap and is not measured.
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(125)));
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(130)));
+        // 5 s: overflow bucket.
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(5130)));
+        let h = d.gap_histogram(0x41);
+        assert_eq!((h[0], h[14], h[GAP_BUCKETS - 1]), (1, 1, 1));
+        assert_eq!(h.iter().sum::<u32>(), 3);
+        assert_eq!(d.gap_histogram(0x42).iter().sum::<u32>(), 0);
+        d.reset_stats();
+        assert_eq!(d.gap_histogram(0x41).iter().sum::<u32>(), 0);
+    }
+
+    /// Small deterministic generator, so the invariant test needs no extra
+    /// dependency and every failure is reproducible from its seed.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+    }
+
+    #[test]
+    fn invariants_hold_for_random_event_streams() {
+        let keys = [0x41usize, 0x42, 0x20, VK_PACKET];
+        for seed in 0..200u64 {
+            let mut rng = Lcg(seed);
+            let mut d = Debouncer::new(1 + rng.next() % 120);
+            d.set_min_chatter_ms(rng.next() % 6);
+            d.set_measure_from(if seed % 2 == 0 {
+                MeasureFrom::Release
+            } else {
+                MeasureFrom::Press
+            });
+            d.record_all_keys = seed % 3 == 0;
+            d.set_log_limit(10);
+            let mut now = 0u64;
+            // Last event seen per key: None = never, Some(true) = Down.
+            let mut last_down: [Option<bool>; 256] = [None; 256];
+            for _ in 0..400 {
+                now += rng.next() % 60;
+                let vk = keys[(rng.next() % keys.len() as u64) as usize];
+                let kind = if rng.next().is_multiple_of(2) {
+                    KeyEventKind::Down
+                } else {
+                    KeyEventKind::Up
+                };
+                let passed = d.decide(vk, kind, ms(now));
+                match kind {
+                    KeyEventKind::Up => assert!(passed, "seed {seed}: Up blocked"),
+                    KeyEventKind::Down => {
+                        if last_down[vk].is_none() {
+                            assert!(passed, "seed {seed}: first press blocked");
+                        }
+                        if last_down[vk] == Some(true) {
+                            assert!(passed, "seed {seed}: auto-repeat blocked");
+                        }
+                        if vk == VK_PACKET {
+                            assert!(passed, "seed {seed}: VK_PACKET blocked");
+                        }
+                    }
+                }
+                last_down[vk] = Some(kind == KeyEventKind::Down);
+            }
+            assert!(d.blocked_presses <= d.total_presses, "seed {seed}");
+            assert_eq!(d.per_key_presses.iter().sum::<u64>(), d.total_presses);
+            assert_eq!(d.per_key_blocked.iter().sum::<u64>(), d.blocked_presses);
+            assert_eq!(d.per_key_presses[VK_PACKET], 0, "seed {seed}");
+            assert!(d.log_events.len() <= d.log_limit(), "seed {seed}");
+            for vk in keys {
+                let measured: u32 = d.gap_histogram(vk as u8).iter().sum();
+                assert!(u64::from(measured) <= d.per_key_presses[vk], "seed {seed}");
+            }
+        }
     }
 
     #[test]

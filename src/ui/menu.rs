@@ -8,7 +8,10 @@ use windows::{
     Win32::{Foundation::HWND, UI::WindowsAndMessaging::*},
 };
 
-use super::{ids::*, state::current_lang, text::to_wide};
+use super::{
+    elevation, foreground::self_elevated, hotkeys, ids::*, state::current_lang, text::to_wide,
+    tray::with_hotkey,
+};
 use crate::{app::state::SHARED, i18n::strings};
 
 unsafe fn item(menu: HMENU, id: usize, text: &str) {
@@ -37,18 +40,36 @@ pub(crate) unsafe fn install(hwnd: HWND) {
         return;
     };
 
+    item(file, MENU_EXPORT_HISTORY, s.menu_export_history);
+    item(file, MENU_EXPORT_SETTINGS, s.menu_export_settings);
+    item(file, MENU_IMPORT_SETTINGS, s.menu_import_settings);
+    separator(file);
     item(file, MENU_HIDE, s.menu_hide);
     separator(file);
     item(file, MENU_EXIT, s.menu_exit);
 
-    item(tools, MENU_TOGGLE, s.menu_protect);
-    item(tools, MENU_CLEANING, s.menu_cleaning);
+    item(
+        tools,
+        MENU_TOGGLE,
+        &with_hotkey(s.menu_protect, hotkeys::toggle_label()),
+    );
+    item(
+        tools,
+        MENU_CLEANING,
+        &with_hotkey(s.menu_cleaning, hotkeys::cleaning_label()),
+    );
     separator(tools);
     item(tools, MENU_RESET_STATS, &format!("{}…", s.reset_stats_btn));
     item(tools, MENU_CLEAR_LOG, s.menu_clear_log);
     separator(tools);
     item(tools, MENU_OPEN_CPL, s.open_cpl_btn);
     item(tools, MENU_OPEN_CONFIG, s.menu_open_config);
+    separator(tools);
+    if self_elevated() {
+        item(tools, MENU_ELEVATED_AUTOSTART, s.menu_elevated_autostart);
+    } else {
+        item(tools, MENU_RUN_ELEVATED, s.menu_run_elevated);
+    }
 
     item(help, MENU_UPDATE, s.menu_update);
     item(help, MENU_HOMEPAGE, s.menu_homepage);
@@ -78,6 +99,17 @@ pub(crate) unsafe fn on_init_menu_popup(hwnd: HWND) {
         bar,
         MENU_TOGGLE as u32,
         (MF_BYCOMMAND | if enabled { MF_CHECKED } else { MF_UNCHECKED }).0,
+    );
+    let _ = CheckMenuItem(
+        bar,
+        MENU_ELEVATED_AUTOSTART as u32,
+        (MF_BYCOMMAND
+            | if elevation::task_on() {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            })
+        .0,
     );
     let busy = crate::updater::update_in_progress();
     let _ = EnableMenuItem(

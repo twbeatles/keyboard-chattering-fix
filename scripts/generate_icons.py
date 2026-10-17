@@ -263,6 +263,14 @@ def generate_svg():
 </svg>'''
     return svg_content
 
+def make_paused_icon(img):
+    """Gray, slightly faded copy for the tray while protection is paused/off."""
+    gray = img.convert("LA").convert("RGBA")
+    alpha = img.getchannel("A").point(lambda a: int(a * 0.75))
+    gray.putalpha(alpha)
+    return gray
+
+
 if __name__ == "__main__":
     os.makedirs("assets", exist_ok=True)
     os.makedirs("packaging", exist_ok=True)
@@ -284,3 +292,8 @@ if __name__ == "__main__":
     sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
     img_256.save(ico_path, format="ICO", sizes=sizes)
     print(f"Generated {ico_path} ({os.path.getsize(ico_path)} bytes)")
+
+    # 4. 보호 꺼짐/일시 중지용 회색 트레이 아이콘 (리소스 ID 2)
+    paused_path = "packaging/app_icon_paused.ico"
+    make_paused_icon(img_256).save(paused_path, format="ICO", sizes=sizes)
+    print(f"Generated {paused_path} ({os.path.getsize(paused_path)} bytes)")

@@ -1,6 +1,6 @@
 //! System-tray icon, its tooltip/balloon, and its context menu.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use windows::{
     core::PCWSTR,
@@ -16,8 +16,26 @@ use windows::{
     },
 };
 
-use super::{commands, ids::*, state::current_lang, text::to_wide, widgets::protection_on};
+use super::{commands, hotkeys, ids::*, state::current_lang, text::to_wide};
 use crate::i18n::strings;
+
+/// What the tray icon and tooltip show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TrayState {
+    On = 0,
+    Paused = 1,
+    Off = 2,
+}
+
+static STATE: AtomicU8 = AtomicU8::new(TrayState::On as u8);
+
+fn state() -> TrayState {
+    match STATE.load(Ordering::Relaxed) {
+        1 => TrayState::Paused,
+        2 => TrayState::Off,
+        _ => TrayState::On,
+    }
+}
 
 /// The "still running in the tray" balloon is shown once per session.
 static BALLOON_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -45,26 +63,32 @@ fn base(hwnd: HWND) -> NOTIFYICONDATAW {
 
 fn current_tip() -> &'static str {
     let s = strings(current_lang());
-    if protection_on() {
-        s.tray_tip_on
-    } else {
-        s.tray_tip_off
+    match state() {
+        TrayState::On => s.tray_tip_on,
+        TrayState::Paused => s.tray_tip_paused,
+        TrayState::Off => s.tray_tip_off,
     }
 }
 
-/// Add the icon. Also called again when Explorer restarts (TaskbarCreated).
-pub(crate) unsafe fn add_tray(hwnd: HWND) {
+/// Icon resource for the state: 1 = normal, 2 = gray (paused or off).
+unsafe fn icon_for(st: TrayState) -> HICON {
     let hinstance = HINSTANCE(
         windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
             .unwrap_or_default()
             .0,
     );
-    // MAKEINTRESOURCE(1): icon resource ID, not a real pointer. Clippy's
-    // `dangling()` suggestion would change the address and break loading.
+    let id: usize = if st == TrayState::On { 1 } else { 2 };
+    // MAKEINTRESOURCE(id): a resource ID, not a real pointer.
     #[allow(clippy::manual_dangling_ptr)]
-    let icon = LoadIconW(Some(hinstance), PCWSTR(1 as *const u16))
+    LoadIconW(Some(hinstance), PCWSTR(id as *const u16))
+        .or_else(|_| LoadIconW(Some(hinstance), PCWSTR(1 as *const u16)))
         .or_else(|_| LoadIconW(None, IDI_APPLICATION))
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+/// Add the icon. Also called again when Explorer restarts (TaskbarCreated).
+pub(crate) unsafe fn add_tray(hwnd: HWND) {
+    let icon = icon_for(state());
     let mut nid = NOTIFYICONDATAW {
         uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
         uCallbackMessage: WM_TRAY,
@@ -79,13 +103,39 @@ pub(crate) unsafe fn remove_tray(hwnd: HWND) {
     let _ = Shell_NotifyIconW(NIM_DELETE, &base(hwnd));
 }
 
-/// Keep the tooltip in sync with the protection state and language.
+/// Keep the tooltip in sync with the language.
 pub(crate) unsafe fn refresh_tip(hwnd: HWND) {
     let mut nid = NOTIFYICONDATAW {
         uFlags: NIF_TIP,
         ..base(hwnd)
     };
     copy_wide(&mut nid.szTip, current_tip());
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/// Show the protection state: gray icon while paused or off, and the
+/// matching tooltip.
+pub(crate) unsafe fn set_state(hwnd: HWND, st: TrayState) {
+    STATE.store(st as u8, Ordering::Relaxed);
+    let mut nid = NOTIFYICONDATAW {
+        uFlags: NIF_TIP | NIF_ICON,
+        hIcon: icon_for(st),
+        ..base(hwnd)
+    };
+    copy_wide(&mut nid.szTip, current_tip());
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+}
+
+/// A one-off notification balloon from the tray icon.
+pub(crate) unsafe fn balloon(hwnd: HWND, text: &str) {
+    let s = strings(current_lang());
+    let mut nid = NOTIFYICONDATAW {
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_INFO,
+        ..base(hwnd)
+    };
+    copy_wide(&mut nid.szInfoTitle, s.title);
+    copy_wide(&mut nid.szInfo, text);
     let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
@@ -105,6 +155,14 @@ pub(crate) unsafe fn notify_hidden_once(hwnd: HWND) {
     let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
+/// Menu text with its hotkey right-aligned (`Text\tCtrl+Alt+F12`).
+pub(crate) fn with_hotkey(text: &str, hotkey: Option<String>) -> String {
+    match hotkey {
+        Some(hk) => format!("{text}\t{hk}"),
+        None => text.to_string(),
+    }
+}
+
 pub(crate) unsafe fn show_tray_menu(hwnd: HWND) {
     let s = strings(current_lang());
     let Ok(menu) = CreatePopupMenu() else {
@@ -119,16 +177,21 @@ pub(crate) unsafe fn show_tray_menu(hwnd: HWND) {
     };
     item(MENU_SHOW, s.menu_show, MF_ENABLED);
     sep();
+    let toggle = if state() == TrayState::Off {
+        s.menu_enable
+    } else {
+        s.menu_disable
+    };
     item(
         MENU_TOGGLE,
-        if protection_on() {
-            s.menu_disable
-        } else {
-            s.menu_enable
-        },
+        &with_hotkey(toggle, hotkeys::toggle_label()),
         MF_ENABLED,
     );
-    item(MENU_CLEANING, s.menu_cleaning, MF_ENABLED);
+    item(
+        MENU_CLEANING,
+        &with_hotkey(s.menu_cleaning, hotkeys::cleaning_label()),
+        MF_ENABLED,
+    );
     sep();
     let busy = crate::updater::update_in_progress();
     item(

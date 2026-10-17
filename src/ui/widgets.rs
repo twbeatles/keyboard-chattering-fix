@@ -58,10 +58,6 @@ pub(crate) unsafe fn flip_toggle(parent: HWND, id: i32) -> bool {
     on
 }
 
-pub(crate) fn protection_on() -> bool {
-    PROTECTION_ON.load(Ordering::Relaxed)
-}
-
 pub(crate) fn set_protection_on(on: bool) {
     PROTECTION_ON.store(on, Ordering::Relaxed);
 }

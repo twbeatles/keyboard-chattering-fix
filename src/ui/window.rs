@@ -32,8 +32,9 @@ use windows::{
 use super::{
     commands,
     controls::child,
-    history,
+    elevation, foreground, history, hotkeys,
     ids::*,
+    keys_page,
     layout::{
         cards, current_page, is_visible, sc, set_current_page, set_dpi, showing_cleaning, Kind,
         Page, CLIENT_H, CLIENT_W, SPECS, STAT_DIVIDERS, TAB_TRACK,
@@ -139,8 +140,10 @@ pub(crate) unsafe fn apply_visibility(hwnd: HWND) {
             let _ = SetFocus(Some(h));
         }
     }
-    if page == Page::History {
-        history::refresh(hwnd, true);
+    match page {
+        Page::History => history::refresh(hwnd, true),
+        Page::Keys => keys_page::refresh(hwnd, true),
+        _ => {}
     }
 }
 
@@ -165,12 +168,20 @@ unsafe fn on_create(hwnd: HWND, lparam: LPARAM) -> LRESULT {
     apply_window_chrome(hwnd);
     create_controls(hwnd, cs.hInstance);
     history::init(hwnd);
+    keys_page::init(hwnd);
     apply_control_themes(hwnd);
     // Fills combos and the menu, then the form loads the saved values.
     apply_language(hwnd);
     settings_form::load_into_form(hwnd, init);
     apply_visibility(hwnd);
     add_tray(hwnd);
+    foreground::configure(&init.auto_disable_apps, init.auto_disable_fullscreen);
+    for problem in hotkeys::apply(hwnd, &init.hotkey_toggle, &init.hotkey_cleaning) {
+        tracing::warn!("{problem}");
+    }
+    // Menus show the registered hotkeys.
+    menu::install(hwnd);
+    elevation::init();
     // Like a dialog: no dotted focus box on the tab until the keyboard is
     // used (Windows clears this itself on the first Tab/arrow press).
     let _ = SendMessageW(
@@ -259,8 +270,11 @@ unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
     // Enter inside a field (IsDialogMessage sends IDOK): save on the
     // settings pages, otherwise ignore. IDCANCEL (Esc) is ignored.
     if id == IDOK.0 {
-        if matches!(current_page(), Page::Settings | Page::Advanced) && !showing_cleaning() {
-            on_save(hwnd);
+        match current_page() {
+            _ if showing_cleaning() => {}
+            Page::Settings | Page::Advanced => on_save(hwnd),
+            Page::Keys => keys_page::apply_override(hwnd),
+            _ => {}
         }
         return;
     }
@@ -284,6 +298,8 @@ unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             let on = flip_toggle(hwnd, id);
             if id == ID_TOGGLE_ENABLE {
                 commands::set_protection(hwnd, on);
+            } else if id == ID_TOGGLE_MOUSE {
+                keys_page::on_mouse_toggled(hwnd, on);
             } else {
                 settings_form::mark_dirty(hwnd);
             }
@@ -302,18 +318,29 @@ unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         (ID_BTN_SOUND_BROWSE, BN_CLICKED) => settings_form::browse_sound(hwnd),
         (ID_HIST_SEARCH, EN_CHANGE) => history::on_search_changed(hwnd),
         (
-            ID_EDIT_THRESHOLD | ID_EDIT_SOUND_FILE | ID_EDIT_MIN_CHATTER | ID_EDIT_LOG_LIMIT,
+            ID_EDIT_THRESHOLD
+            | ID_EDIT_SOUND_FILE
+            | ID_EDIT_MIN_CHATTER
+            | ID_EDIT_LOG_LIMIT
+            | ID_EDIT_DEFER
+            | ID_EDIT_AUTO_APPS
+            | ID_EDIT_HOTKEY_TOGGLE
+            | ID_EDIT_HOTKEY_CLEAN,
             EN_CHANGE,
         ) => settings_form::mark_dirty(hwnd),
         (ID_COMBO_MEASURE, CBN_SELCHANGE) => settings_form::mark_dirty(hwnd),
         (ID_COMBO_LANG, CBN_SELCHANGE) => settings_form::on_language_changed(hwnd),
         (ID_HIST_VIEW, CBN_SELCHANGE) => history::on_view_changed(hwnd),
+        (ID_KEYS_COMBO, CBN_SELCHANGE) => keys_page::on_combo_changed(hwnd),
+        (ID_BTN_KEY_SET, BN_CLICKED) => keys_page::apply_override(hwnd),
+        (ID_BTN_KEY_RESET, BN_CLICKED) => keys_page::clear_override(hwnd),
         _ => {}
     }
 }
 
 unsafe fn on_destroy(hwnd: HWND) {
     let _ = KillTimer(Some(hwnd), TIMER_STATS);
+    let _ = hotkeys::apply(hwnd, "", "");
     settings_form::persist_live();
     remove_tray(hwnd);
     // The hook thread is stopped by the bootstrap after the message loop.
@@ -491,18 +518,35 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
         }
         WM_NOTIFY => {
-            history::on_notify(lparam).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wparam, lparam))
+            if let Some(vk) = history::double_clicked_vk(lparam) {
+                // Per-key summary row: change that key's window.
+                switch_page(hwnd, Page::Keys);
+                keys_page::select_key(hwnd, vk, true);
+                return LRESULT(0);
+            }
+            history::on_notify(lparam)
+                .or_else(|| keys_page::on_notify(hwnd, lparam))
+                .unwrap_or_else(|| DefWindowProcW(hwnd, msg, wparam, lparam))
         }
         WM_SETTINGCHANGE => {
             apply_window_chrome(hwnd);
             apply_control_themes(hwnd);
             history::apply_theme(hwnd);
+            keys_page::apply_theme(hwnd);
             let _ = RedrawWindow(
                 Some(hwnd),
                 None,
                 None,
                 RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME,
             );
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            match wparam.0 as i32 {
+                HOTKEY_TOGGLE => commands::run(hwnd, MENU_TOGGLE),
+                HOTKEY_CLEANING => commands::run(hwnd, MENU_CLEANING),
+                _ => {}
+            }
             LRESULT(0)
         }
         WM_INITMENUPOPUP => {
@@ -514,8 +558,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_TIMER => {
+            commands::cleaning_tick(hwnd);
+            if foreground::tick(hwnd) {
+                super::stats::invalidate();
+            }
+            if super::watchdog::tick() {
+                super::stats::invalidate();
+            }
             update_stats(hwnd);
             history::refresh(hwnd, false);
+            keys_page::refresh(hwnd, false);
             settings_form::tick(hwnd);
             settings_form::autosave_tick();
             LRESULT(0)

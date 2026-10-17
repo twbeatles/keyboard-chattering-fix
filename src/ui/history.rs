@@ -60,6 +60,8 @@ impl HistoryView {
 pub(crate) struct Row {
     pub cells: Vec<String>,
     pub highlight: bool,
+    /// The key the row is about (double-click opens it in the Keys tab).
+    pub vk: Option<u8>,
 }
 
 /// `HH:MM:SS.mmm` local time for an event `elapsed` after startup, given
@@ -103,6 +105,7 @@ pub(crate) fn render_events(
             ],
             // In "blocked only" every row is blocked; color adds nothing.
             highlight: e.blocked && view == HistoryView::All,
+            vk: Some(e.vk),
         })
         .collect()
 }
@@ -150,6 +153,7 @@ pub(crate) fn render_keys(s: &Strings, t: &KeyTotals, query: &str) -> Vec<Row> {
                     },
                 ],
                 highlight: t.blocked[i] > 0,
+                vk: Some(vk),
             }
         })
         .collect()
@@ -173,6 +177,85 @@ pub(crate) fn render_info(
         fill(s.history_count_fmt, &[&shown.to_string()]),
         note
     )
+}
+
+fn csv_field(v: &str) -> String {
+    if v.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", v.replace('"', "\"\""))
+    } else {
+        v.to_string()
+    }
+}
+
+fn csv_row(out: &mut String, cells: &[String]) {
+    let line: Vec<String> = cells.iter().map(|c| csv_field(c)).collect();
+    out.push_str(&line.join(","));
+    out.push_str("\r\n");
+}
+
+/// The event log (oldest first) and the per-key summary as CSV, with a
+/// UTF-8 BOM so spreadsheet apps pick the right encoding.
+pub(crate) fn render_csv(
+    s: &Strings,
+    events: &[LogEvent],
+    totals: &KeyTotals,
+    clock_base_ms: u64,
+) -> String {
+    let mut out = String::from("\u{FEFF}");
+    let header = |cols: &[&str]| cols.iter().map(|c| c.to_string()).collect::<Vec<_>>();
+    csv_row(
+        &mut out,
+        &header(&[s.col_time, s.col_key, s.col_result, s.col_gap]),
+    );
+    for row in render_events(s, events, HistoryView::All, "", clock_base_ms)
+        .into_iter()
+        .rev()
+    {
+        csv_row(&mut out, &row.cells);
+    }
+    out.push_str("\r\n");
+    csv_row(
+        &mut out,
+        &header(&[
+            s.col_key,
+            s.col_presses,
+            s.col_blocked,
+            s.col_rate,
+            s.col_threshold,
+        ]),
+    );
+    for row in render_keys(s, totals, "") {
+        csv_row(&mut out, &row.cells);
+    }
+    out
+}
+
+/// CSV of what is recorded right now (File > Export history).
+pub(crate) fn csv_snapshot() -> Option<String> {
+    let shared = SHARED.get()?;
+    let (events, totals) = {
+        let g = shared.lock().unwrap();
+        let d = &g.debouncer;
+        let mut thresholds = [(0u64, false); 256];
+        for (vk, slot) in thresholds.iter_mut().enumerate() {
+            *slot = d.key_threshold_ms(vk as u8);
+        }
+        let events: Vec<LogEvent> = d.log_events.iter().copied().collect();
+        (
+            events,
+            Box::new(KeyTotals {
+                presses: d.per_key_presses,
+                blocked: d.per_key_blocked,
+                thresholds,
+            }),
+        )
+    };
+    Some(render_csv(
+        strings(current_lang()),
+        &events,
+        &totals,
+        START_CLOCK_MS.get().copied().unwrap_or(0),
+    ))
 }
 
 /// Column headers: (title, logical width, right-aligned).
@@ -225,26 +308,34 @@ unsafe fn list(hwnd: HWND) -> Option<HWND> {
 /// One-time list view setup after creation.
 pub(crate) unsafe fn init(hwnd: HWND) {
     if let Some(lv) = list(hwnd) {
-        let ex = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
-        SendMessageW(
-            lv,
-            LVM_SETEXTENDEDLISTVIEWSTYLE,
-            Some(WPARAM(ex as usize)),
-            Some(LPARAM(ex as isize)),
-        );
+        setup_list(lv);
     }
-    if let Some(lv) = list(hwnd) {
-        let header =
-            HWND(SendMessageW(lv, LVM_GETHEADER, Some(WPARAM(0)), Some(LPARAM(0))).0 as *mut _);
-        dark_header::install(header);
-    }
-    apply_theme(hwnd);
+}
+
+/// Full-row selection, double buffering, and the themed header; shared by
+/// every report list in the window.
+pub(crate) unsafe fn setup_list(lv: HWND) {
+    let ex = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER;
+    SendMessageW(
+        lv,
+        LVM_SETEXTENDEDLISTVIEWSTYLE,
+        Some(WPARAM(ex as usize)),
+        Some(LPARAM(ex as isize)),
+    );
+    let header =
+        HWND(SendMessageW(lv, LVM_GETHEADER, Some(WPARAM(0)), Some(LPARAM(0))).0 as *mut _);
+    dark_header::install(header);
+    theme_list(lv);
 }
 
 pub(crate) unsafe fn apply_theme(hwnd: HWND) {
-    let Some(lv) = list(hwnd) else {
-        return;
-    };
+    if let Some(lv) = list(hwnd) {
+        theme_list(lv);
+    }
+}
+
+/// Colors and visual style of a report list for the current theme.
+pub(crate) unsafe fn theme_list(lv: HWND) {
     let dark = theme_is_dark();
     let c = ThemeColors::new(dark);
     for msg in [LVM_SETBKCOLOR, LVM_SETTEXTBKCOLOR] {
@@ -270,12 +361,15 @@ pub(crate) unsafe fn apply_theme(hwnd: HWND) {
 }
 
 unsafe fn rebuild_columns(hwnd: HWND, view: HistoryView) {
-    let Some(lv) = list(hwnd) else {
-        return;
-    };
+    if let Some(lv) = list(hwnd) {
+        set_columns(lv, &columns(strings(current_lang()), view));
+    }
+}
+
+/// Replace every column: (title, logical width, right-aligned).
+pub(crate) unsafe fn set_columns(lv: HWND, cols: &[(&str, i32, bool)]) {
     while SendMessageW(lv, LVM_DELETECOLUMN, Some(WPARAM(0)), Some(LPARAM(0))).0 != 0 {}
-    let s = strings(current_lang());
-    for (i, (title, width, right)) in columns(s, view).into_iter().enumerate() {
+    for (i, &(title, width, right)) in cols.iter().enumerate() {
         let mut text = to_wide(title);
         let col = LVCOLUMNW {
             mask: LVCF_TEXT | LVCF_WIDTH | LVCF_FMT,
@@ -530,6 +624,36 @@ mod dark_header {
     }
 }
 
+/// Copy `text` into the list's cell buffer (truncated, NUL-terminated).
+/// The caller has checked that the buffer exists.
+pub(crate) unsafe fn write_cell(info: &mut NMLVDISPINFOW, text: &str) {
+    let buf = std::slice::from_raw_parts_mut(info.item.pszText.0, info.item.cchTextMax as usize);
+    let mut n = 0;
+    for unit in text.encode_utf16() {
+        if n + 1 >= buf.len() {
+            break;
+        }
+        buf[n] = unit;
+        n += 1;
+    }
+    buf[n] = 0;
+}
+
+/// The key of the row double-clicked in the per-key summary, if that is
+/// what this `WM_NOTIFY` is.
+pub(crate) unsafe fn double_clicked_vk(lparam: LPARAM) -> Option<u8> {
+    let hdr = &*(lparam.0 as *const windows::Win32::UI::Controls::NMHDR);
+    if hdr.idFrom != ID_HIST_LIST as usize || hdr.code != NM_DBLCLK {
+        return None;
+    }
+    let item = (*(lparam.0 as *const NMITEMACTIVATE)).iItem;
+    let st = STATE.lock().unwrap();
+    if st.view != HistoryView::Keys || item < 0 {
+        return None;
+    }
+    st.rows.get(item as usize).and_then(|r| r.vk)
+}
+
 /// `WM_NOTIFY` from the list: serve cell text and color blocked rows.
 pub(crate) unsafe fn on_notify(lparam: LPARAM) -> Option<LRESULT> {
     let hdr = &*(lparam.0 as *const windows::Win32::UI::Controls::NMHDR);
@@ -550,19 +674,7 @@ pub(crate) unsafe fn on_notify(lparam: LPARAM) -> Option<LRESULT> {
                     .and_then(|r| r.cells.get(info.item.iSubItem as usize))
                     .map(String::as_str)
                     .unwrap_or("");
-                let buf = std::slice::from_raw_parts_mut(
-                    info.item.pszText.0,
-                    info.item.cchTextMax as usize,
-                );
-                let mut n = 0;
-                for unit in text.encode_utf16() {
-                    if n + 1 >= buf.len() {
-                        break;
-                    }
-                    buf[n] = unit;
-                    n += 1;
-                }
-                buf[n] = 0;
+                write_cell(info, text);
             }
             Some(LRESULT(0))
         }
@@ -711,6 +823,24 @@ mod tests {
         let on = render_info(s, HistoryView::All, 3, true);
         assert_ne!(on, off);
         assert!(render_info(s, HistoryView::Keys, 0, false).contains("유지"));
+    }
+
+    #[test]
+    fn csv_lists_events_oldest_first_then_the_key_summary() {
+        let s = strings(Language::En);
+        let csv = render_csv(s, &sample(), &totals(), 0);
+        assert!(csv.starts_with('\u{FEFF}'));
+        let lines: Vec<&str> = csv.trim_start_matches('\u{FEFF}').split("\r\n").collect();
+        assert_eq!(lines[0], "Time,Key,Result,Gap");
+        assert_eq!(lines[1], "00:00:01.000,A,Passed,-");
+        assert_eq!(lines[4], "00:00:03.000,B,Passed,-");
+        assert_eq!(lines[5], "");
+        assert_eq!(lines[6], "Key,Presses,Blocked,Rate,Threshold");
+        assert_eq!(lines[7], "Space,40,10,25.0%,80 ms (custom)");
+        // Fields with separators or quotes are quoted.
+        assert_eq!(csv_field("a,b"), "\"a,b\"");
+        assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        assert_eq!(csv_field(","), "\",\"");
     }
 
     #[test]

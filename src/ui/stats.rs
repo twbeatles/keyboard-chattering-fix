@@ -15,6 +15,7 @@ use std::{
 
 use windows::Win32::{Foundation::HWND, Graphics::Gdi::InvalidateRect, UI::WindowsAndMessaging::*};
 
+use super::foreground::Pause;
 use super::{
     ids::*,
     keys::vk_name,
@@ -42,6 +43,12 @@ pub(crate) struct StatsSnapshot {
     pub blocked_presses: u64,
     pub last_blocked: Option<(u8, Duration)>,
     pub top_chattered: Option<(u8, u64, f64)>,
+    /// Paused for an app in front (`foreground`).
+    pub pause: Option<Pause>,
+    /// A window running as administrator is in front (we are not).
+    pub elevated_foreground: bool,
+    /// Local time the watchdog last restarted the hook.
+    pub hook_restarted_at: Option<String>,
 }
 
 /// Fully rendered readout for one refresh, built with no lock held and no
@@ -55,7 +62,11 @@ pub(crate) struct RenderedStats {
     /// Drives the badge and tray; never fed back into the switch, or a
     /// failed hook would get `bFilterEnabled=0` saved by the next Save.
     pub active: bool,
+    pub paused: bool,
     pub badge: String,
+    /// Home note under the tip: why protection is paused, an elevated
+    /// window in front, or a hook restart.
+    pub note: String,
     pub total: String,
     pub blocked: String,
     pub ratio: String,
@@ -72,6 +83,7 @@ pub(crate) struct StatsChanges {
     pub ratio: bool,
     pub last: bool,
     pub top: bool,
+    pub note: bool,
 }
 
 impl StatsChanges {
@@ -82,6 +94,7 @@ impl StatsChanges {
         ratio: true,
         last: true,
         top: true,
+        note: true,
     };
 }
 
@@ -106,16 +119,33 @@ pub(crate) fn render_stats(s: &Strings, snap: &StatsSnapshot) -> RenderedStats {
     } else {
         snap.blocked_presses as f64 * 100.0 / snap.total_presses as f64
     };
+    let protecting = snap.enabled && snap.hook_active;
+    let paused = protecting && snap.pause.is_some();
+    let note = match (
+        &snap.pause,
+        snap.elevated_foreground,
+        &snap.hook_restarted_at,
+    ) {
+        (Some(Pause::App(exe)), _, _) => fill(s.note_suspended_fmt, &[exe]),
+        (Some(Pause::Fullscreen(exe)), _, _) => fill(s.note_fullscreen_fmt, &[exe]),
+        (None, true, _) if protecting => s.note_elevated.to_string(),
+        (None, _, Some(at)) => fill(s.note_hook_restarted_fmt, &[at]),
+        _ => String::new(),
+    };
     RenderedStats {
         cleaning: snap.cleaning_mode,
         enabled: snap.enabled,
-        active: snap.enabled && snap.hook_active,
-        badge: (if snap.enabled && snap.hook_active {
+        active: protecting && !paused,
+        paused,
+        badge: (if paused {
+            s.status_paused
+        } else if protecting {
             s.status_on
         } else {
             s.status_off
         })
         .to_string(),
+        note,
         total: group_thousands(snap.total_presses),
         blocked: group_thousands(snap.blocked_presses),
         ratio: format!("{ratio:.1}%"),
@@ -144,12 +174,14 @@ pub(crate) fn diff_stats(prev: &RenderedStats, next: &RenderedStats) -> StatsCha
     StatsChanges {
         status: prev.enabled != next.enabled
             || prev.active != next.active
+            || prev.paused != next.paused
             || prev.badge != next.badge,
         total: prev.total != next.total,
         blocked: prev.blocked != next.blocked,
         ratio: prev.ratio != next.ratio,
         last: prev.last != next.last,
         top: prev.top != next.top,
+        note: prev.note != next.note,
     }
 }
 
@@ -213,11 +245,16 @@ pub(crate) unsafe fn update_stats(hwnd: HWND) {
             blocked_presses: g.debouncer.blocked_presses,
             last_blocked: g.debouncer.last_blocked,
             top_chattered: g.debouncer.top_chattered_key(),
+            pause: None,
+            elevated_foreground: false,
+            hook_restarted_at: None,
         }
     });
-    let Some(snapshot) = snapshot else {
+    let Some(mut snapshot) = snapshot else {
         return;
     };
+    (snapshot.pause, snapshot.elevated_foreground) = super::foreground::status();
+    snapshot.hook_restarted_at = super::watchdog::last_restart();
     let rendered = render_stats(strings(current_lang()), &snapshot);
 
     // 2. Diff against the last frame; the first frame updates everything.
@@ -245,7 +282,19 @@ pub(crate) unsafe fn update_stats(hwnd: HWND) {
         if let Ok(pill) = GetDlgItem(Some(hwnd), ID_PILL) {
             let _ = InvalidateRect(Some(pill), None, false);
         }
-        tray::refresh_tip(hwnd);
+        tray::set_state(
+            hwnd,
+            if rendered.paused {
+                tray::TrayState::Paused
+            } else if rendered.active {
+                tray::TrayState::On
+            } else {
+                tray::TrayState::Off
+            },
+        );
+    }
+    if changed.note {
+        set_text(hwnd, ID_HOME_NOTE, &rendered.note);
     }
     if changed.total {
         set_text(hwnd, ID_STAT_TOTAL_VAL, &rendered.total);
@@ -278,7 +327,62 @@ mod tests {
             blocked_presses: 0,
             last_blocked: None,
             top_chattered: None,
+            pause: None,
+            elevated_foreground: false,
+            hook_restarted_at: None,
         }
+    }
+
+    #[test]
+    fn paused_for_an_app_shows_paused_badge_and_why() {
+        let snap = StatsSnapshot {
+            pause: Some(Pause::App("game.exe".into())),
+            ..idle_snapshot()
+        };
+        let r = render_stats(strings(Language::En), &snap);
+        assert!(r.paused && !r.active && r.enabled);
+        assert_eq!(r.badge, "◐ Paused");
+        assert!(r.note.contains("game.exe"), "{}", r.note);
+        let full = StatsSnapshot {
+            pause: Some(Pause::Fullscreen("video.exe".into())),
+            ..idle_snapshot()
+        };
+        assert!(render_stats(strings(Language::Ko), &full)
+            .note
+            .contains("전체 화면 앱(video.exe)"));
+        // Switched off by the user: not "paused".
+        let off = StatsSnapshot {
+            enabled: false,
+            ..snap
+        };
+        assert_eq!(
+            render_stats(strings(Language::En), &off).badge,
+            "○ Protection off"
+        );
+        assert!(diff_stats(&render_stats(strings(Language::En), &idle_snapshot()), &r).note);
+    }
+
+    #[test]
+    fn notes_cover_elevated_windows_and_hook_restarts() {
+        let s = strings(Language::En);
+        let elevated = StatsSnapshot {
+            elevated_foreground: true,
+            ..idle_snapshot()
+        };
+        assert_eq!(render_stats(s, &elevated).note, s.note_elevated);
+        // Not protecting anyway: no point warning.
+        let off = StatsSnapshot {
+            enabled: false,
+            elevated_foreground: true,
+            ..idle_snapshot()
+        };
+        assert_eq!(render_stats(s, &off).note, "");
+        let restarted = StatsSnapshot {
+            hook_restarted_at: Some("14:05".into()),
+            ..idle_snapshot()
+        };
+        assert!(render_stats(s, &restarted).note.contains("14:05"));
+        assert_eq!(render_stats(s, &idle_snapshot()).note, "");
     }
 
     #[test]

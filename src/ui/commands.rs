@@ -13,7 +13,7 @@ use windows::{
 
 use super::{
     dialog::{msg_box, show_about},
-    history,
+    elevation, files, history,
     ids::*,
     settings_form::persist_live,
     state::current_lang,
@@ -23,6 +23,10 @@ use super::{
     update::spawn_update_check,
 };
 use crate::{app::state::SHARED, config, i18n::strings};
+use std::{
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 /// Bring the window back from the tray (or from minimized).
 pub(crate) unsafe fn show_window(hwnd: HWND) {
@@ -50,14 +54,47 @@ fn protection_on() -> bool {
     SHARED.get().is_none_or(|g| g.lock().unwrap().enabled)
 }
 
+/// When cleaning mode was turned on from the UI (for its time limit).
+static CLEANING_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+
 pub(crate) unsafe fn set_cleaning(hwnd: HWND, on: bool) {
     if let Some(g) = SHARED.get() {
         g.lock().unwrap().debouncer.cleaning_mode = on;
     }
+    *CLEANING_SINCE.lock().unwrap() = on.then(Instant::now);
     if on {
         show_window(hwnd);
     }
     update_stats(hwnd);
+}
+
+/// Whether cleaning mode has run out of time (`limit_min` 0 = never).
+pub(crate) fn cleaning_expired(elapsed: Duration, limit_min: u64) -> bool {
+    limit_min > 0 && elapsed >= Duration::from_secs(limit_min * 60)
+}
+
+/// Timer tick: end cleaning mode after its time limit, so a forgotten
+/// cleaning session never leaves the keyboard dead.
+pub(crate) unsafe fn cleaning_tick(hwnd: HWND) {
+    let since = *CLEANING_SINCE.lock().unwrap();
+    let Some(since) = since else {
+        return;
+    };
+    let active = SHARED
+        .get()
+        .is_some_and(|g| g.lock().unwrap().debouncer.cleaning_mode);
+    if !active {
+        // Ended with Enter or the button.
+        *CLEANING_SINCE.lock().unwrap() = None;
+        return;
+    }
+    let limit = super::state::SAVED
+        .get()
+        .map_or(5, |s| s.lock().unwrap().cleaning_timeout_min);
+    if cleaning_expired(since.elapsed(), limit) {
+        set_cleaning(hwnd, false);
+        tray::balloon(hwnd, strings(current_lang()).cleaning_auto_ended);
+    }
 }
 
 /// Open a folder or URL with the shell on a worker thread: `ShellExecuteW`
@@ -127,9 +164,26 @@ pub(crate) unsafe fn run(hwnd: HWND, cmd: usize) {
         MENU_UPDATE => spawn_update_check(hwnd),
         MENU_HOMEPAGE => shell_open(config::HOMEPAGE_URL.to_string()),
         MENU_ABOUT => show_about(hwnd),
+        MENU_EXPORT_HISTORY => files::export_history(hwnd),
+        MENU_EXPORT_SETTINGS => files::export_settings(hwnd),
+        MENU_IMPORT_SETTINGS => files::import_settings(hwnd),
+        MENU_RUN_ELEVATED => elevation::relaunch_elevated(hwnd),
+        MENU_ELEVATED_AUTOSTART => elevation::toggle_task(hwnd),
         MENU_EXIT => {
             let _ = DestroyWindow(hwnd);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleaning_limit_counts_minutes_and_zero_disables_it() {
+        assert!(!cleaning_expired(Duration::from_secs(299), 5));
+        assert!(cleaning_expired(Duration::from_secs(300), 5));
+        assert!(!cleaning_expired(Duration::from_secs(86_400), 0));
     }
 }

@@ -19,6 +19,14 @@ fn main() {
     if icon.is_file() {
         res.set_icon(icon.to_str().expect("icon path must be valid UTF-8"));
     }
+    // Resource 2: gray tray icon while protection is paused or off
+    // (`ui::tray`, falls back to resource 1 when missing).
+    let paused =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/app_icon_paused.ico");
+    println!("cargo:rerun-if-changed={}", paused.display());
+    if paused.is_file() {
+        res.set_icon_with_id(paused.to_str().expect("icon path must be valid UTF-8"), "2");
+    }
     res.set("ProductName", "Keyboard Chatter Fix");
     res.set("FileDescription", "Keyboard Chatter Fix");
     res.set("CompanyName", "twbeatles");
