@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: twbeatles.KeyboardChatteringFix
+PackageVersion: 0.3.0
+PackageLocale: en-US
+Publisher: twbeatles
+PublisherUrl: https://github.com/twbeatles
+PackageName: Keyboard Chatter Fix
+PackageUrl: https://github.com/twbeatles/keyboard-chattering-fix
+License: MIT
+LicenseUrl: https://github.com/twbeatles/keyboard-chattering-fix/blob/main/LICENSE
+ShortDescription: Stops keys and mouse buttons from registering twice (switch chatter).
+Description: |-
+  A lightweight Windows filter for mechanical keyboard and mouse-button chatter.
+  Blocks a repeat of the same key inside a configurable window, suggests per-key
+  thresholds from measured gaps, and can pause for games or full-screen apps.
+Tags:
+  - keyboard
+  - chatter
+  - debounce
+  - double-typing
+  - mouse
+ReleaseNotesUrl: https://github.com/twbeatles/keyboard-chattering-fix/releases/tag/v0.3.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
