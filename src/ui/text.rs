@@ -1,18 +1,18 @@
-//! Control text and checkbox helpers plus full-window retranslation.
+//! Control text helpers and full-window retranslation.
 
 use windows::{
     core::PCWSTR,
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
-        UI::{
-            Controls::{BST_CHECKED, BST_UNCHECKED},
-            WindowsAndMessaging::*,
-        },
+        UI::{Controls::EM_SETCUEBANNER, WindowsAndMessaging::*},
     },
 };
 
-use super::{ids::*, state::current_lang, stats::update_stats};
-use crate::i18n::strings;
+use super::{history, ids::*, layout::SPECS, menu, state::current_lang, stats, tray};
+use crate::{
+    config,
+    i18n::{fill, strings, LANGUAGE_NAMES},
+};
 
 pub(crate) fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -25,91 +25,98 @@ pub(crate) unsafe fn set_text(parent: HWND, id: i32, s: &str) {
     }
 }
 
-pub(crate) unsafe fn set_check(parent: HWND, id: i32, on: bool) {
+/// Current text of a child control, trimmed.
+pub(crate) fn get_text(parent: HWND, id: i32) -> String {
+    unsafe {
+        if let Ok(h) = GetDlgItem(Some(parent), id) {
+            let mut buf = [0u16; 1024];
+            let len = GetWindowTextW(h, &mut buf) as usize;
+            return String::from_utf16_lossy(&buf[..len.min(buf.len())])
+                .trim()
+                .to_string();
+        }
+    }
+    String::new()
+}
+
+/// Replace a combo box's items and select `sel` (clamped to the list).
+pub(crate) unsafe fn fill_combo(parent: HWND, id: i32, items: &[&str], sel: usize) {
+    let Ok(combo) = GetDlgItem(Some(parent), id) else {
+        return;
+    };
+    let _ = SendMessageW(combo, CB_RESETCONTENT, Some(WPARAM(0)), Some(LPARAM(0)));
+    for item in items {
+        let v = to_wide(item);
+        SendMessageW(
+            combo,
+            CB_ADDSTRING,
+            Some(WPARAM(0)),
+            Some(LPARAM(v.as_ptr() as isize)),
+        );
+    }
+    let sel = sel.min(items.len().saturating_sub(1));
+    SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(sel)), Some(LPARAM(0)));
+}
+
+/// Selected index of a combo box (0 when nothing is selected).
+pub(crate) unsafe fn combo_sel(parent: HWND, id: i32) -> usize {
+    GetDlgItem(Some(parent), id)
+        .map(|h| SendMessageW(h, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0)
+        .ok()
+        .filter(|&i| i >= 0)
+        .map_or(0, |i| i as usize)
+}
+
+unsafe fn set_cue(parent: HWND, id: i32, cue: &str) {
     if let Ok(h) = GetDlgItem(Some(parent), id) {
-        let _ = SendMessageW(
+        let v = to_wide(cue);
+        SendMessageW(
             h,
-            BM_SETCHECK,
-            Some(WPARAM(if on {
-                BST_CHECKED.0 as usize
-            } else {
-                BST_UNCHECKED.0 as usize
-            })),
-            Some(LPARAM(0)),
+            EM_SETCUEBANNER,
+            Some(WPARAM(0)),
+            Some(LPARAM(v.as_ptr() as isize)),
         );
     }
 }
 
-pub(crate) unsafe fn get_check(parent: HWND, id: i32) -> bool {
-    if let Ok(h) = GetDlgItem(Some(parent), id) {
-        return SendMessageW(h, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0))).0
-            == BST_CHECKED.0 as isize;
-    }
-    false
+/// Footer text depends on the close-to-tray choice.
+pub(crate) unsafe fn refresh_footer(hwnd: HWND, close_to_tray: bool) {
+    let s = strings(current_lang());
+    let template = if close_to_tray {
+        s.footer_tray
+    } else {
+        s.footer_exit
+    };
+    set_text(hwnd, ID_FOOTER, &fill(template, &[config::VERSION]));
 }
 
+/// Re-apply every visible string for the active language.
 pub(crate) unsafe fn apply_language(hwnd: HWND) {
     let s = strings(current_lang());
-    let t = to_wide(s.title);
-    let _ = SetWindowTextW(hwnd, PCWSTR(t.as_ptr()));
+    let caption = to_wide("Keyboard Chatter Fix");
+    let _ = SetWindowTextW(hwnd, PCWSTR(caption.as_ptr()));
 
-    set_text(hwnd, ID_HEADER_TITLE, s.title);
-    set_text(hwnd, ID_HEADER_SUB, s.subtitle);
-
-    set_text(hwnd, ID_CARD1_TITLE, s.card_telemetry);
-    set_text(hwnd, ID_STAT_TOTAL_LABEL, s.stat_total);
-    set_text(hwnd, ID_STAT_CHATTER_LABEL, s.stat_blocked);
-    set_text(hwnd, ID_STAT_RATIO_LABEL, s.stat_ratio);
-
-    set_text(hwnd, ID_CARD2_TITLE, s.card_settings);
-    set_text(hwnd, ID_LABEL_THRESHOLD, s.threshold_label);
-    set_text(hwnd, ID_LABEL_UNIT, s.threshold_unit);
-    set_text(hwnd, ID_CHECK_ENABLE, s.enable_filter);
-    set_text(hwnd, ID_CHECK_SOUND, s.play_sound);
-    set_text(hwnd, ID_LABEL_SOUND_FILE, s.sound_file_label);
-    set_text(hwnd, ID_BTN_SOUND_TEST, s.sound_test);
-    set_text(hwnd, ID_CHECK_AUTOSTART, s.autostart);
-    set_text(hwnd, ID_CHECK_MINIMIZE, s.minimize_on_launch);
-    set_text(hwnd, ID_CHECK_CLOSE_TO_TRAY, s.close_to_tray);
-    set_text(hwnd, ID_CHECK_RECORD_ALL, s.record_all_keys);
-
-    set_text(hwnd, ID_CARD3_TITLE, s.card_tools);
-    set_text(hwnd, ID_BTN_CLEAN_MODE, s.clean_mode_btn);
-    set_text(hwnd, ID_BTN_OPEN_CPL, s.open_cpl_btn);
-
-    set_text(hwnd, ID_CARD4_TITLE, s.card_options);
-    set_text(hwnd, ID_LABEL_MEASURE, s.measure_from_label);
-    set_text(hwnd, ID_LABEL_LANG, s.language_label);
-    set_text(hwnd, ID_LABEL_MIN_CHATTER, s.min_chatter_label);
-    set_text(hwnd, ID_LABEL_MIN_UNIT, s.min_chatter_unit);
-    set_text(hwnd, ID_CHECK_EXCLUDE_INJECTED, s.exclude_injected);
-    set_text(hwnd, ID_LABEL_LOG_LIMIT, s.log_limit_label);
-    set_text(hwnd, ID_LABEL_LOG_UNIT, s.log_limit_unit);
-    set_text(hwnd, ID_CHECK_RECORD_ALL, s.record_all_keys);
-
-    set_text(hwnd, ID_BTN_SAVE, s.save);
-    set_text(hwnd, ID_STATIC_HINT, s.tray_hint);
-
-    if let Ok(combo_m) = GetDlgItem(Some(hwnd), ID_COMBO_MEASURE) {
-        let cur = SendMessageW(combo_m, CB_GETCURSEL, Some(WPARAM(0)), Some(LPARAM(0))).0;
-        let _ = SendMessageW(combo_m, CB_RESETCONTENT, Some(WPARAM(0)), Some(LPARAM(0)));
-        let opt1 = to_wide(s.measure_release);
-        let opt2 = to_wide(s.measure_press);
-        SendMessageW(
-            combo_m,
-            CB_ADDSTRING,
-            Some(WPARAM(0)),
-            Some(LPARAM(opt1.as_ptr() as isize)),
-        );
-        SendMessageW(
-            combo_m,
-            CB_ADDSTRING,
-            Some(WPARAM(0)),
-            Some(LPARAM(opt2.as_ptr() as isize)),
-        );
-        let sel = if cur >= 0 { cur as usize } else { 0 };
-        SendMessageW(combo_m, CB_SETCURSEL, Some(WPARAM(sel)), Some(LPARAM(0)));
+    for spec in SPECS {
+        if let Some(text) = spec.text {
+            set_text(hwnd, spec.id, text(s));
+        }
     }
 
-    update_stats(hwnd);
+    let measure = combo_sel(hwnd, ID_COMBO_MEASURE);
+    fill_combo(hwnd, ID_COMBO_MEASURE, s.measure_options, measure);
+    let lang = combo_sel(hwnd, ID_COMBO_LANG);
+    fill_combo(hwnd, ID_COMBO_LANG, LANGUAGE_NAMES, lang);
+    set_cue(hwnd, ID_EDIT_SOUND_FILE, s.sound_file_cue);
+
+    let close_to_tray = super::state::SAVED
+        .get()
+        .map(|g| g.lock().unwrap().close_to_tray)
+        .unwrap_or(true);
+    refresh_footer(hwnd, close_to_tray);
+
+    menu::install(hwnd);
+    history::apply_language(hwnd);
+    stats::invalidate();
+    stats::update_stats(hwnd);
+    tray::refresh_tip(hwnd);
 }

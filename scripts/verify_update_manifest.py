@@ -34,6 +34,24 @@ def _canonical_payload(payload: dict[str, object]) -> bytes:
 MAX_ARTIFACT_BYTES = 512 * 1024 * 1024
 
 
+def _read_pinned_constants() -> "tuple[str, str]":
+    """Release prefix and artifact name exactly as the app pins them."""
+    prefix = re.search(
+        r'pub const RELEASE_DOWNLOAD_PREFIX: &str =\s*"([^"]+)"',
+        (ROOT / "src" / "updater" / "model.rs").read_text(encoding="utf-8"),
+    )
+    name = re.search(
+        r'pub const ARTIFACT_FILENAME: &str = "([^"]+)"',
+        (ROOT / "src" / "updater" / "manifest.rs").read_text(encoding="utf-8"),
+    )
+    if prefix is None or name is None:
+        raise ValueError("pinned release constants not found in src/updater")
+    return prefix.group(1), name.group(1)
+
+
+RELEASE_DOWNLOAD_PREFIX, ARTIFACT_FILENAME = _read_pinned_constants()
+
+
 def _parse_expiry(value: object) -> "datetime | None":
     """Parse an RFC3339 timestamp. Returns None when the field is absent."""
     if value is None:
@@ -61,8 +79,9 @@ def validate_payload(payload: dict[str, object]) -> None:
         raise ValueError("Manifest payload fields are invalid")
     if payload["tag"] != f"v{payload['version']}":
         raise ValueError("Manifest tag does not match version")
-    if not str(payload["artifact_url"]).startswith("https://github.com/"):
-        raise ValueError("Manifest artifact URL is not pinned to GitHub releases")
+    expected_url = f"{RELEASE_DOWNLOAD_PREFIX}{payload['tag']}/{ARTIFACT_FILENAME}"
+    if payload["artifact_url"] != expected_url:
+        raise ValueError("Manifest artifact URL is not pinned to this repository's release asset")
     sha256 = str(payload["sha256"])
     if len(sha256) != 64 or any(c not in "0123456789abcdefABCDEF" for c in sha256):
         raise ValueError("Manifest sha256 is invalid")

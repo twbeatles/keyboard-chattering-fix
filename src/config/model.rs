@@ -29,6 +29,17 @@ pub struct Settings {
     pub per_key_blocked: [u64; 256],
 }
 
+impl Settings {
+    /// Take the file-only fields from `disk`, the settings file as it is
+    /// now. Per-key thresholds (`key.XX`) have no UI and are edited in the
+    /// file while the app runs; writing the in-memory copy without this
+    /// would silently revert those edits on exit (ISSUE-005). Every other
+    /// field is owned by the UI or the live filter and keeps its value.
+    pub fn adopt_file_only_fields(&mut self, disk: &Settings) {
+        self.per_key_ms = disk.per_key_ms;
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {

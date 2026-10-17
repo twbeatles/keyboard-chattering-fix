@@ -10,7 +10,7 @@ use windows::Win32::{
 };
 
 use super::{dialog::msg_box, ids::WM_UPDATE_EXIT, state::current_lang};
-use crate::i18n::strings;
+use crate::i18n::{fill, strings, Language};
 
 /// Pure classification of an update-check result for the tray flow, split
 /// out so the branches are unit-testable without windows or network.
@@ -18,16 +18,18 @@ use crate::i18n::strings;
 enum UpdatePrompt {
     UpToDate,
     Available(crate::updater::UpdateManifest),
+    /// Failure text already rendered in the UI language (ISSUE-006).
     Failed(String),
 }
 
 fn classify_update_result(
     result: Result<crate::updater::UpdateManifest, crate::updater::UpdateError>,
+    lang: Language,
 ) -> UpdatePrompt {
     match result {
         Err(crate::updater::UpdateError::NoUpdate) => UpdatePrompt::UpToDate,
         Ok(manifest) => UpdatePrompt::Available(manifest),
-        Err(err) => UpdatePrompt::Failed(err.to_string()),
+        Err(err) => UpdatePrompt::Failed(err.message(lang)),
     }
 }
 
@@ -35,7 +37,11 @@ pub(crate) fn spawn_update_check(hwnd: HWND) {
     let raw_hwnd = hwnd.0 as usize;
     std::thread::spawn(move || {
         let hwnd = HWND(raw_hwnd as *mut _);
-        let s = strings(current_lang());
+        let lang = current_lang();
+        let s = strings(lang);
+        let fail = |text: &str| unsafe {
+            msg_box(hwnd, s.update_failed_title, text, MB_OK | MB_ICONERROR);
+        };
         if !crate::updater::try_begin_update() {
             unsafe {
                 msg_box(
@@ -47,72 +53,53 @@ pub(crate) fn spawn_update_check(hwnd: HWND) {
             }
             return;
         }
-        match classify_update_result(crate::updater::check_for_update()) {
+        let manifest = match classify_update_result(crate::updater::check_for_update(), lang) {
             UpdatePrompt::UpToDate => {
                 crate::updater::end_update();
                 let text = s.update_latest.replacen("{}", crate::config::VERSION, 1);
                 unsafe {
                     msg_box(hwnd, s.update_title, &text, MB_OK | MB_ICONINFORMATION);
                 }
-            }
-            UpdatePrompt::Available(manifest) => {
-                let text = s
-                    .update_available
-                    .replacen("{}", &manifest.version, 1)
-                    .replacen("{}", crate::config::VERSION, 1);
-                let answer =
-                    unsafe { msg_box(hwnd, s.update_title, &text, MB_YESNO | MB_ICONINFORMATION) };
-                if answer != IDYES {
-                    crate::updater::end_update();
-                    return;
-                }
-                match crate::updater::prepare_update(&manifest) {
-                    Ok(staged) => {
-                        if let Err(err) = crate::updater::launch_helper(&staged) {
-                            crate::updater::discard_staged(&staged);
-                            crate::updater::end_update();
-                            unsafe {
-                                msg_box(
-                                    hwnd,
-                                    s.update_failed_title,
-                                    &err.to_string(),
-                                    MB_OK | MB_ICONERROR,
-                                );
-                            }
-                            return;
-                        }
-                        // The helper owns the swap from here; this process
-                        // must exit so the executable file can be replaced.
-                        // (Single-flight flag intentionally left set.)
-                        unsafe {
-                            msg_box(
-                                hwnd,
-                                s.update_title,
-                                s.update_applying,
-                                MB_OK | MB_ICONINFORMATION,
-                            );
-                            let _ = PostMessageW(Some(hwnd), WM_UPDATE_EXIT, WPARAM(0), LPARAM(0));
-                        }
-                    }
-                    Err(err) => {
-                        crate::updater::end_update();
-                        unsafe {
-                            msg_box(
-                                hwnd,
-                                s.update_failed_title,
-                                &err.to_string(),
-                                MB_OK | MB_ICONERROR,
-                            );
-                        }
-                    }
-                }
+                return;
             }
             UpdatePrompt::Failed(message) => {
                 crate::updater::end_update();
-                unsafe {
-                    msg_box(hwnd, s.update_failed_title, &message, MB_OK | MB_ICONERROR);
-                }
+                fail(&message);
+                return;
             }
+            UpdatePrompt::Available(manifest) => manifest,
+        };
+        // The only confirmation: it also says the program restarts, so
+        // nothing modal sits between launching the helper and exiting.
+        let text = fill(
+            s.update_available,
+            &[&manifest.version, crate::config::VERSION],
+        );
+        let answer = unsafe { msg_box(hwnd, s.update_title, &text, MB_YESNO | MB_ICONINFORMATION) };
+        if answer != IDYES {
+            crate::updater::end_update();
+            return;
+        }
+        let staged = match crate::updater::prepare_update(&manifest) {
+            Ok(staged) => staged,
+            Err(err) => {
+                crate::updater::end_update();
+                fail(&err.message(lang));
+                return;
+            }
+        };
+        if let Err(err) = crate::updater::launch_helper(&staged, lang) {
+            crate::updater::discard_staged(&staged);
+            crate::updater::end_update();
+            fail(&err.message(lang));
+            return;
+        }
+        // The helper is now waiting for this process to exit: exit right
+        // away. A modal notice here used to eat into the helper's wait and
+        // could strand the update with no filter running (ISSUE-003).
+        // (Single-flight flag intentionally left set.)
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), WM_UPDATE_EXIT, WPARAM(0), LPARAM(0));
         }
     });
 }
@@ -134,25 +121,34 @@ mod tests {
     #[test]
     fn classify_maps_no_update_to_up_to_date() {
         assert!(matches!(
-            classify_update_result(Err(crate::updater::UpdateError::NoUpdate)),
+            classify_update_result(Err(crate::updater::UpdateError::NoUpdate), Language::En),
             UpdatePrompt::UpToDate
         ));
     }
 
     #[test]
     fn classify_carries_manifest_for_available() {
-        match classify_update_result(Ok(sample_manifest())) {
+        match classify_update_result(Ok(sample_manifest()), Language::En) {
             UpdatePrompt::Available(m) => assert_eq!(m.version, "0.2.0"),
             other => panic!("expected Available, got {other:?}"),
         }
     }
 
     #[test]
-    fn classify_preserves_error_message() {
-        match classify_update_result(Err(crate::updater::UpdateError::Message(
-            "boom".to_string(),
-        ))) {
-            UpdatePrompt::Failed(message) => assert_eq!(message, "boom"),
+    fn classify_renders_failure_in_ui_language() {
+        use crate::updater::{UpdateError, UpdateErrorKind};
+        let err = || UpdateError::with_detail(UpdateErrorKind::Download, "boom");
+        match classify_update_result(Err(err()), Language::En) {
+            UpdatePrompt::Failed(message) => {
+                assert_eq!(message, "Could not download the update.\n(boom)")
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        match classify_update_result(Err(err()), Language::Ko) {
+            UpdatePrompt::Failed(message) => {
+                assert!(message.starts_with("업데이트 파일을"), "{message}");
+                assert!(message.ends_with("(boom)"));
+            }
             other => panic!("expected Failed, got {other:?}"),
         }
     }

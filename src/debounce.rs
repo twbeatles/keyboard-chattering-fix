@@ -16,13 +16,8 @@ pub enum MeasureFrom {
     Release,
 }
 
-/// A recorded key event for real-time telemetry and logging.
-///
-/// The buffer is bounded and written on every decision, but no surface reads
-/// the fields back yet; the allowance documents that intent instead of
-/// letting the fields look accidentally unused.
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
+/// A recorded key event, shown in the window's History tab.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LogEvent {
     pub time: Duration,
     pub vk: u8,
@@ -51,13 +46,21 @@ pub struct Debouncer {
     pub last_blocked: Option<(u8, Duration)>,
     /// Keyboard cleaning mode: when true, all keystrokes are blocked until Enter (VK_RETURN) is pressed.
     pub cleaning_mode: bool,
-    /// Real-time event log buffer.
+    /// Real-time event log buffer. Capacity is reserved up front by
+    /// [`Debouncer::set_log_limit`], so the hook never allocates here.
     pub log_events: VecDeque<LogEvent>,
     /// Record all keypresses or only blocked chatter events.
     pub record_all_keys: bool,
-    /// Maximum log capacity.
-    pub log_limit: usize,
+    /// Maximum log capacity; change it only through `set_log_limit`.
+    log_limit: usize,
+    /// Bumped on every log or counter reset change, so the History tab can
+    /// skip re-rendering when nothing new was recorded.
+    pub log_seq: u64,
 }
+
+/// Bounds of the in-memory event log (UI and settings file share them).
+pub const LOG_LIMIT_MIN: usize = 10;
+pub const LOG_LIMIT_MAX: usize = 5000;
 
 impl Debouncer {
     pub fn new(threshold_ms: u64) -> Self {
@@ -75,9 +78,52 @@ impl Debouncer {
             per_key_blocked: [0; 256],
             last_blocked: None,
             cleaning_mode: false,
-            log_events: VecDeque::with_capacity(128),
+            log_events: VecDeque::with_capacity(100),
             record_all_keys: false,
             log_limit: 100,
+            log_seq: 0,
+        }
+    }
+
+    pub fn log_limit(&self) -> usize {
+        self.log_limit
+    }
+
+    /// Resize the event log. Called on the UI thread (startup/save): the
+    /// buffer is trimmed and its full capacity reserved here, so `push_log`
+    /// on the hook thread never grows the allocation.
+    pub fn set_log_limit(&mut self, limit: usize) {
+        self.log_limit = limit.clamp(LOG_LIMIT_MIN, LOG_LIMIT_MAX);
+        while self.log_events.len() > self.log_limit {
+            self.log_events.pop_front();
+        }
+        let extra = self.log_limit.saturating_sub(self.log_events.len());
+        self.log_events.reserve_exact(extra);
+        self.log_seq += 1;
+    }
+
+    /// Drop every recorded event (counters are kept).
+    pub fn clear_log(&mut self) {
+        self.log_events.clear();
+        self.log_seq += 1;
+    }
+
+    /// Zero every counter and the event log ("Reset statistics").
+    pub fn reset_stats(&mut self) {
+        self.total_presses = 0;
+        self.blocked_presses = 0;
+        self.per_key_presses = [0; 256];
+        self.per_key_blocked = [0; 256];
+        self.last_blocked = None;
+        self.clear_log();
+    }
+
+    /// Effective threshold for `vk` in ms and whether it is a per-key
+    /// override (`key.XX` in the settings file) rather than the global one.
+    pub fn key_threshold_ms(&self, vk: u8) -> (u64, bool) {
+        match self.per_key[vk as usize] {
+            Some(d) => (d.as_millis() as u64, true),
+            None => (self.threshold_ms(), false),
         }
     }
 
@@ -118,6 +164,7 @@ impl Debouncer {
             self.log_events.pop_front();
         }
         self.log_events.push_back(event);
+        self.log_seq += 1;
     }
 
     /// Returns `true` when the event should reach applications.
@@ -367,7 +414,7 @@ mod tests {
     fn log_buffer_stays_bounded() {
         let mut d = Debouncer::new(50);
         d.record_all_keys = true;
-        d.log_limit = 10;
+        d.set_log_limit(10);
         for t in 0..50 {
             assert!(d.decide(0x41, KeyEventKind::Down, ms(t * 100)));
             assert!(d.decide(0x41, KeyEventKind::Up, ms(t * 100 + 50)));
@@ -408,5 +455,68 @@ mod tests {
         // Exactly 10 ms: not a glitch, and inside the 50 ms threshold: blocked.
         assert!(!d.decide(0x41, KeyEventKind::Down, ms(40)));
         assert_eq!(d.blocked_presses, 1);
+    }
+
+    #[test]
+    fn log_limit_is_clamped_and_capacity_reserved() {
+        let mut d = Debouncer::new(50);
+        d.set_log_limit(3);
+        assert_eq!(d.log_limit(), LOG_LIMIT_MIN);
+        d.set_log_limit(1_000_000);
+        assert_eq!(d.log_limit(), LOG_LIMIT_MAX);
+        // The whole buffer is reserved up front: the hook never reallocates.
+        assert!(d.log_events.capacity() >= LOG_LIMIT_MAX);
+    }
+
+    #[test]
+    fn shrinking_log_limit_keeps_newest_events() {
+        let mut d = Debouncer::new(50);
+        d.record_all_keys = true;
+        for t in 0..20 {
+            d.decide(0x41, KeyEventKind::Down, ms(t * 100));
+            d.decide(0x41, KeyEventKind::Up, ms(t * 100 + 50));
+        }
+        d.set_log_limit(10);
+        assert_eq!(d.log_events.len(), 10);
+        assert_eq!(d.log_events.front().unwrap().time, ms(1000));
+    }
+
+    #[test]
+    fn log_seq_moves_on_every_log_change() {
+        let mut d = Debouncer::new(50);
+        let s0 = d.log_seq;
+        d.decide(0x41, KeyEventKind::Down, ms(10));
+        // record_all_keys off and nothing blocked: no log entry, no bump.
+        assert_eq!(d.log_seq, s0);
+        d.decide(0x41, KeyEventKind::Up, ms(20));
+        d.decide(0x41, KeyEventKind::Down, ms(30)); // blocked -> logged
+        assert_eq!(d.log_seq, s0 + 1);
+        d.clear_log();
+        assert_eq!(d.log_seq, s0 + 2);
+        assert!(d.log_events.is_empty());
+    }
+
+    #[test]
+    fn reset_stats_zeroes_counters_and_log() {
+        let mut d = Debouncer::new(50);
+        d.decide(0x41, KeyEventKind::Down, ms(10));
+        d.decide(0x41, KeyEventKind::Up, ms(20));
+        d.decide(0x41, KeyEventKind::Down, ms(30));
+        assert_eq!(d.blocked_presses, 1);
+        d.reset_stats();
+        assert_eq!((d.total_presses, d.blocked_presses), (0, 0));
+        assert_eq!(d.per_key_blocked[0x41], 0);
+        assert_eq!(d.last_blocked, None);
+        assert!(d.log_events.is_empty());
+        assert_eq!(d.top_chattered_key(), None);
+    }
+
+    #[test]
+    fn key_threshold_reports_override_flag() {
+        let mut d = Debouncer::new(50);
+        assert_eq!(d.key_threshold_ms(0x41), (50, false));
+        d.set_key_threshold(0x41, Some(120));
+        assert_eq!(d.key_threshold_ms(0x41), (120, true));
+        assert_eq!(d.key_threshold_ms(0x42), (50, false));
     }
 }

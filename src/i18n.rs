@@ -4,4 +4,4 @@ mod language;
 mod strings;
 
 pub use language::Language;
-pub use strings::{strings, Strings};
+pub use strings::{fill, strings, Strings, LANGUAGE_NAMES};

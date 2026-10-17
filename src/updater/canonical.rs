@@ -1,13 +1,14 @@
 use serde_json::Value;
 
-use super::error::UpdateError;
+use super::error::{UpdateError, UpdateErrorKind};
 
 // Compact (non-Python-compatible) encoding. Kept for API parity with the
 // reference updater; the shipped flow signs/verifies the Python-compatible
 // form. (Binary crates lint `pub` items as dead code, unlike lib crates.)
 #[allow(dead_code)]
 pub fn canonical_payload(payload: &Value) -> Result<Vec<u8>, UpdateError> {
-    serde_json::to_vec(payload).map_err(|err| UpdateError::Message(err.to_string()))
+    serde_json::to_vec(payload)
+        .map_err(|err| UpdateError::with_detail(UpdateErrorKind::Encoding, err))
 }
 
 /// Match Python json.dumps(..., ensure_ascii=False, sort_keys=True, separators=(",", ":"))

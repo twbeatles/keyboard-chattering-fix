@@ -66,22 +66,76 @@ jobs:
             --artifact dist/KeyboardChatteringFix.exe `
             --artifact-url "https://github.com/${{ github.repository }}/releases/download/$env:GITHUB_REF_NAME/KeyboardChatteringFix.exe" `
             --output dist/update.json
-      - name: Publish GitHub Release assets idempotently
+      - name: Verify manifest against the built executable
+        # Before anything is public: the signed manifest must describe the
+        # exact bytes about to be uploaded.
+        shell: pwsh
+        run: |
+          python scripts/verify_update_manifest.py --manifest dist/update.json --expect-asset dist/KeyboardChatteringFix.exe
+          if ($LASTEXITCODE -ne 0) { throw "manifest does not match dist/KeyboardChatteringFix.exe" }
+      - name: Publish GitHub Release (draft, verify, then publish)
+        # The release stays a draft while assets upload and are checked, so
+        # `releases/latest/download/update.json` never 404s or points at a
+        # half-uploaded release. Rerunning for the same tag is safe: a stale
+        # draft is replaced, a published release only gets assets refreshed.
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view $env:GITHUB_REF_NAME 2>$null
-          if ($LASTEXITCODE -ne 0) {
-            gh release create $env:GITHUB_REF_NAME --generate-notes --title $env:GITHUB_REF_NAME
+          $repo = "${{ github.repository }}"
+          $tag = $env:GITHUB_REF_NAME
+          $files = @("dist/KeyboardChatteringFix.exe", "dist/kcfix-updater.exe", "dist/KeyboardChatteringFix.zip", "dist/update.json")
+
+          function Get-ReleaseByTag {
+            $all = gh api "repos/$repo/releases?per_page=100" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw "could not list releases" }
+            $all | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
           }
-          gh release upload $env:GITHUB_REF_NAME dist/KeyboardChatteringFix.exe dist/kcfix-updater.exe dist/KeyboardChatteringFix.zip dist/update.json --clobber
+
+          $release = Get-ReleaseByTag
+          if ($release -and $release.draft) {
+            Write-Host "Removing stale draft release $($release.id)"
+            gh api -X DELETE "repos/$repo/releases/$($release.id)"
+            if ($LASTEXITCODE -ne 0) { throw "could not remove stale draft" }
+            $release = $null
+          }
+          if ($release) {
+            Write-Host "Release $tag is already public; refreshing assets"
+            gh release upload $tag @files --clobber
+            if ($LASTEXITCODE -ne 0) { throw "asset upload failed" }
+          } else {
+            gh release create $tag @files --draft --generate-notes --title $tag --verify-tag
+            if ($LASTEXITCODE -ne 0) { throw "release create failed" }
+          }
+
+          # Every local file must be attached with the same size.
+          $release = Get-ReleaseByTag
+          foreach ($f in $files) {
+            $name = Split-Path $f -Leaf
+            $asset = $release.assets | Where-Object { $_.name -eq $name }
+            if (-not $asset) { throw "asset $name is missing from release $tag" }
+            if ($asset.size -ne (Get-Item $f).Length) { throw "asset $name size $($asset.size) != local $((Get-Item $f).Length)" }
+          }
+          if ($release.draft) {
+            gh api -X PATCH "repos/$repo/releases/$($release.id)" -F draft=false -f make_latest=true | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "could not publish the draft release" }
+            Write-Host "Published $tag"
+          }
       - name: Verify published manifest asset
         shell: pwsh
         run: |
           $url = "https://github.com/${{ github.repository }}/releases/download/$env:GITHUB_REF_NAME/update.json"
-          Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile published-update.json
           $exeUrl = "https://github.com/${{ github.repository }}/releases/download/$env:GITHUB_REF_NAME/KeyboardChatteringFix.exe"
-          Invoke-WebRequest -UseBasicParsing -Uri $exeUrl -OutFile published-app.exe
+          # Right after publishing, the download CDN can lag by a few seconds.
+          foreach ($attempt in 1..6) {
+            try {
+              Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile published-update.json
+              Invoke-WebRequest -UseBasicParsing -Uri $exeUrl -OutFile published-app.exe
+              break
+            } catch {
+              if ($attempt -eq 6) { throw }
+              Start-Sleep -Seconds 10
+            }
+          }
           python scripts/verify_update_manifest.py --manifest published-update.json --expect-asset published-app.exe
           python -c "import json; d=json.load(open('published-update.json', encoding='utf-8')); assert d['payload']['tag']=='${{ github.ref_name }}'; assert d['payload']['artifact_url'].endswith('/${{ github.ref_name }}/KeyboardChatteringFix.exe')"

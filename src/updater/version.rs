@@ -1,4 +1,4 @@
-use super::error::UpdateError;
+use super::error::{UpdateError, UpdateErrorKind};
 
 pub fn version_tuple(value: &str) -> Result<Vec<u32>, UpdateError> {
     let parts: Vec<&str> = value.trim().split('.').collect();
@@ -7,9 +7,10 @@ pub fn version_tuple(value: &str) -> Result<Vec<u32>, UpdateError> {
             .iter()
             .any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()))
     {
-        return Err(UpdateError::Message(format!(
-            "Invalid update version: {value}"
-        )));
+        return Err(UpdateError::with_detail(
+            UpdateErrorKind::VersionInvalid,
+            value,
+        ));
     }
     Ok(parts.iter().map(|part| part.parse().unwrap_or(0)).collect())
 }

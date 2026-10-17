@@ -21,7 +21,15 @@ use windows::{
     },
 };
 
-use super::text::to_wide;
+use windows::{
+    core::w,
+    Win32::UI::{Controls::SetWindowTheme, WindowsAndMessaging::GetDlgItem},
+};
+
+use super::{
+    layout::{sc, Kind, SPECS},
+    text::to_wide,
+};
 
 #[inline]
 pub(crate) fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
@@ -29,57 +37,75 @@ pub(crate) fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 }
 
 pub(crate) struct ThemeColors {
-    pub(crate) _is_dark: bool,
     pub(crate) bg: COLORREF,
     pub(crate) card_bg: COLORREF,
     pub(crate) card_border: COLORREF,
     pub(crate) text_primary: COLORREF,
     pub(crate) text_secondary: COLORREF,
     pub(crate) accent: COLORREF,
+    pub(crate) accent_pressed: COLORREF,
+    pub(crate) on_accent: COLORREF,
     pub(crate) status_active_bg: COLORREF,
     pub(crate) status_active_fg: COLORREF,
     pub(crate) status_paused_bg: COLORREF,
     pub(crate) status_paused_fg: COLORREF,
-    pub(crate) cleaning_banner_bg: COLORREF,
-    pub(crate) cleaning_banner_fg: COLORREF,
+    pub(crate) warn: COLORREF,
     pub(crate) edit_bg: COLORREF,
+    pub(crate) tab_track: COLORREF,
+    pub(crate) tab_selected: COLORREF,
+    pub(crate) button_bg: COLORREF,
+    pub(crate) button_pressed: COLORREF,
+    pub(crate) button_border: COLORREF,
+    pub(crate) toggle_off: COLORREF,
 }
 
 impl ThemeColors {
     pub(crate) fn new(is_dark: bool) -> Self {
         if is_dark {
             Self {
-                _is_dark: true,
-                bg: rgb(30, 30, 30),
-                card_bg: rgb(40, 40, 40),
-                card_border: rgb(58, 58, 58),
-                text_primary: rgb(245, 245, 245),
-                text_secondary: rgb(165, 165, 165),
-                accent: rgb(76, 194, 255),
-                status_active_bg: rgb(35, 75, 45),
+                bg: rgb(32, 32, 32),
+                card_bg: rgb(43, 43, 43),
+                card_border: rgb(60, 60, 60),
+                text_primary: rgb(242, 242, 242),
+                text_secondary: rgb(170, 170, 170),
+                accent: rgb(96, 205, 255),
+                accent_pressed: rgb(72, 170, 220),
+                on_accent: rgb(0, 0, 0),
+                status_active_bg: rgb(30, 70, 40),
                 status_active_fg: rgb(108, 203, 95),
-                status_paused_bg: rgb(65, 65, 65),
-                status_paused_fg: rgb(180, 180, 180),
-                cleaning_banner_bg: rgb(120, 60, 20),
-                cleaning_banner_fg: rgb(255, 210, 140),
-                edit_bg: rgb(50, 50, 50),
+                status_paused_bg: rgb(70, 62, 30),
+                status_paused_fg: rgb(252, 225, 0),
+                warn: rgb(255, 153, 120),
+                edit_bg: rgb(52, 52, 52),
+                tab_track: rgb(40, 40, 40),
+                tab_selected: rgb(64, 64, 64),
+                button_bg: rgb(58, 58, 58),
+                button_pressed: rgb(46, 46, 46),
+                button_border: rgb(74, 74, 74),
+                toggle_off: rgb(160, 160, 160),
             }
         } else {
             Self {
-                _is_dark: false,
                 bg: rgb(243, 243, 243),
                 card_bg: rgb(255, 255, 255),
-                card_border: rgb(228, 228, 228),
-                text_primary: rgb(24, 24, 24),
-                text_secondary: rgb(110, 110, 110),
-                accent: rgb(0, 120, 212),
+                card_border: rgb(229, 229, 229),
+                text_primary: rgb(26, 26, 26),
+                text_secondary: rgb(96, 96, 96),
+                accent: rgb(0, 103, 192),
+                accent_pressed: rgb(0, 84, 160),
+                on_accent: rgb(255, 255, 255),
                 status_active_bg: rgb(223, 246, 221),
-                status_active_fg: rgb(15, 123, 15),
-                status_paused_bg: rgb(235, 235, 235),
-                status_paused_fg: rgb(100, 100, 100),
-                cleaning_banner_bg: rgb(255, 244, 206),
-                cleaning_banner_fg: rgb(157, 93, 0),
+                status_active_fg: rgb(16, 124, 16),
+                status_paused_bg: rgb(255, 244, 206),
+                status_paused_fg: rgb(157, 93, 0),
+                warn: rgb(196, 43, 28),
                 edit_bg: rgb(255, 255, 255),
+                tab_track: rgb(232, 232, 232),
+                tab_selected: rgb(255, 255, 255),
+                button_bg: rgb(251, 251, 251),
+                button_pressed: rgb(235, 235, 235),
+                button_border: rgb(208, 208, 208),
+                toggle_off: rgb(118, 118, 118),
             }
         }
     }
@@ -182,10 +208,10 @@ fn read_system_dark_mode() -> bool {
 
 pub(crate) struct GuiFonts {
     pub(crate) title: HFONT,
-    pub(crate) subtitle: HFONT,
     pub(crate) section: HFONT,
     pub(crate) stat_val: HFONT,
     pub(crate) body: HFONT,
+    pub(crate) small: HFONT,
     pub(crate) badge: HFONT,
 }
 
@@ -194,30 +220,55 @@ unsafe impl Sync for GuiFonts {}
 
 static FONTS: OnceLock<GuiFonts> = OnceLock::new();
 
+/// Fonts are created once, after `layout::set_dpi`, at the scaled size.
 pub(crate) fn get_fonts() -> &'static GuiFonts {
     FONTS.get_or_init(|| unsafe {
         GuiFonts {
-            title: create_font(18, FW_BOLD.0 as i32),
-            subtitle: create_font(12, FW_NORMAL.0 as i32),
-            section: create_font(13, FW_SEMIBOLD.0 as i32),
-            stat_val: create_font(16, FW_BOLD.0 as i32),
-            body: create_font(12, FW_NORMAL.0 as i32),
-            badge: create_font(11, FW_BOLD.0 as i32),
+            title: create_font(sc(20), FW_BOLD.0 as i32),
+            section: create_font(sc(14), FW_SEMIBOLD.0 as i32),
+            stat_val: create_font(sc(24), FW_SEMIBOLD.0 as i32),
+            body: create_font(sc(13), FW_NORMAL.0 as i32),
+            small: create_font(sc(12), FW_NORMAL.0 as i32),
+            badge: create_font(sc(12), FW_SEMIBOLD.0 as i32),
         }
     })
 }
 
-unsafe fn create_font(size_pt: i32, weight: i32) -> HFONT {
-    let font_names = [
-        "Segoe UI Variable Text",
-        "Segoe UI",
-        "맑은 고딕",
-        "Malgun Gothic",
-    ];
+/// Font for a control role.
+pub(crate) fn font_for(kind: Kind) -> HFONT {
+    let f = get_fonts();
+    match kind {
+        Kind::Title | Kind::CleanTitle => f.title,
+        Kind::Section | Kind::ToggleLarge => f.section,
+        Kind::StatValue | Kind::StatAccent => f.stat_val,
+        Kind::Subtitle | Kind::Hint | Kind::Footer | Kind::Status | Kind::StatLabel => f.small,
+        Kind::Pill => f.badge,
+        _ => f.body,
+    }
+}
+
+/// Text color and background for a static control role.
+pub(crate) fn static_colors(kind: Kind, on_card: bool, c: &ThemeColors) -> (COLORREF, COLORREF) {
+    let bg = if on_card { c.card_bg } else { c.bg };
+    let fg = match kind {
+        Kind::Subtitle | Kind::Hint | Kind::Footer | Kind::StatLabel | Kind::Status => {
+            c.text_secondary
+        }
+        Kind::StatAccent => c.accent,
+        Kind::CleanTitle => c.status_paused_fg,
+        _ => c.text_primary,
+    };
+    (fg, bg)
+}
+
+unsafe fn create_font(height_px: i32, weight: i32) -> HFONT {
+    // Segoe UI first; Korean glyphs fall back to Malgun Gothic via font
+    // linking, so mixed Korean/Latin text keeps Latin digits in Segoe UI.
+    let font_names = ["Segoe UI", "맑은 고딕", "Malgun Gothic"];
     for name in font_names {
         let wname = to_wide(name);
         let hf = CreateFontW(
-            -size_pt,
+            -height_px,
             0,
             0,
             0,
@@ -237,6 +288,16 @@ unsafe fn create_font(size_pt: i32, weight: i32) -> HFONT {
         }
     }
     HFONT(GetStockObject(DEFAULT_GUI_FONT).0 as *mut _)
+}
+
+/// Logical (96-DPI) rect to device pixels.
+pub(crate) fn scaled_rect((x, y, w, h): (i32, i32, i32, i32)) -> RECT {
+    RECT {
+        left: sc(x),
+        top: sc(y),
+        right: sc(x + w),
+        bottom: sc(y + h),
+    }
 }
 
 pub(crate) unsafe fn draw_rounded_card(
@@ -289,6 +350,25 @@ pub(crate) unsafe fn apply_window_chrome(hwnd: HWND) {
         &corner as *const _ as *const _,
         std::mem::size_of::<i32>() as u32,
     );
+}
+
+/// Re-skin native child controls for the current theme. Owner-drawn and
+/// static controls follow `ThemeColors` on their own; edits and combos need
+/// the system dark-mode class to darken their frames and drop-downs.
+pub(crate) unsafe fn apply_control_themes(hwnd: HWND) {
+    let dark = theme_is_dark();
+    for spec in SPECS {
+        if !matches!(spec.kind, Kind::Edit | Kind::NumberEdit | Kind::Combo) {
+            continue;
+        }
+        if let Ok(h) = GetDlgItem(Some(hwnd), spec.id) {
+            let _ = if dark {
+                SetWindowTheme(h, w!("DarkMode_CFD"), PCWSTR::null())
+            } else {
+                SetWindowTheme(h, PCWSTR::null(), PCWSTR::null())
+            };
+        }
+    }
 }
 
 #[cfg(test)]

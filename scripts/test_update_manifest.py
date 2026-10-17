@@ -66,6 +66,14 @@ def test_validate_payload_rejects_bad_shapes():
         verifier.validate_payload(_payload(tag="v9.9.9"))
     with pytest.raises(ValueError, match="pinned"):
         verifier.validate_payload(_payload(artifact_url="https://evil.example.com/a.exe"))
+    # UG5: any other repository or asset name under github.com is rejected
+    # too, exactly like the app's pin.
+    for url in (
+        "https://github.com/someone-else/keyboard-chattering-fix/releases/download/v0.2.0/KeyboardChatteringFix.exe",
+        "https://github.com/twbeatles/keyboard-chattering-fix/releases/download/v0.2.0/kcfix-updater.exe",
+    ):
+        with pytest.raises(ValueError, match="pinned"):
+            verifier.validate_payload(_payload(artifact_url=url))
     with pytest.raises(ValueError, match="sha256"):
         verifier.validate_payload(_payload(sha256="xyz"))
     for bad_size in (0, -5, True, 512 * 1024 * 1024 + 1, "1024"):

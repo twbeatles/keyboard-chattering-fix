@@ -1,43 +1,60 @@
-//! Telemetry readout: virtual-key names and the periodic stats refresh.
+//! Home-tab statistics and header status, refreshed on the 500 ms timer.
 //!
-//! The 500 ms timer does not touch windows blindly: the debouncer state is
+//! The timer does not touch windows blindly: the debouncer state is
 //! snapshotted under a short lock, rendered to plain strings with no lock
 //! held, and only controls whose text actually changed are updated. An idle
-//! tick therefore performs zero `SetWindowTextW` calls (previously seven,
-//! every tick, while holding the shared lock).
+//! tick therefore performs zero `SetWindowTextW` calls.
 
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
+        Mutex,
     },
     time::Duration,
 };
 
-use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::*};
+use windows::Win32::{Foundation::HWND, Graphics::Gdi::InvalidateRect, UI::WindowsAndMessaging::*};
 
-use super::{ids::*, state::current_lang, text::set_text};
+use super::{
+    ids::*,
+    keys::vk_name,
+    layout,
+    state::current_lang,
+    text::set_text,
+    tray,
+    widgets::{set_protection_on, set_toggle},
+};
 use crate::{
-    app::state::SHARED,
-    i18n::{strings, Strings},
+    app::state::{HOOK_ACTIVE, SHARED},
+    i18n::{fill, strings, Strings},
 };
 
-/// Point-in-time copy of everything the telemetry readout needs, taken
-/// under one short lock so no Win32 call ever runs while holding `SHARED`.
+/// Point-in-time copy of everything the readout needs, taken under one
+/// short lock so no Win32 call ever runs while holding `SHARED`.
 pub(crate) struct StatsSnapshot {
     pub cleaning_mode: bool,
+    /// The user's protection switch.
     pub enabled: bool,
+    /// Whether the keyboard hook is installed (false only after a failed
+    /// install, G1).
+    pub hook_active: bool,
     pub total_presses: u64,
     pub blocked_presses: u64,
     pub last_blocked: Option<(u8, Duration)>,
     pub top_chattered: Option<(u8, u64, f64)>,
 }
 
-/// Fully rendered telemetry strings for one refresh, built with no lock
-/// held and no window touched. `banner: None` means "hide the banner".
+/// Fully rendered readout for one refresh, built with no lock held and no
+/// window touched.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RenderedStats {
-    pub banner: Option<String>,
+    pub cleaning: bool,
+    /// The switch position, mirrored into the toggle (and saved from it).
+    pub enabled: bool,
+    /// Whether input is actually filtered: switch on AND hook installed.
+    /// Drives the badge and tray; never fed back into the switch, or a
+    /// failed hook would get `bFilterEnabled=0` saved by the next Save.
+    pub active: bool,
     pub badge: String,
     pub total: String,
     pub blocked: String,
@@ -46,7 +63,42 @@ pub(crate) struct RenderedStats {
     pub top: String,
 }
 
-/// Pure rendering: debouncer snapshot plus strings in, control texts out.
+/// Which parts of the window must be refreshed between two frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StatsChanges {
+    pub status: bool,
+    pub total: bool,
+    pub blocked: bool,
+    pub ratio: bool,
+    pub last: bool,
+    pub top: bool,
+}
+
+impl StatsChanges {
+    const ALL: StatsChanges = StatsChanges {
+        status: true,
+        total: true,
+        blocked: true,
+        ratio: true,
+        last: true,
+        top: true,
+    };
+}
+
+/// `1234567` -> `1,234,567`, so large counters stay readable.
+pub(crate) fn group_thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Pure rendering: snapshot plus strings in, control texts out.
 /// Unit-testable without windows, hooks, or locks.
 pub(crate) fn render_stats(s: &Strings, snap: &StatsSnapshot) -> RenderedStats {
     let ratio = if snap.total_presses == 0 {
@@ -55,124 +107,58 @@ pub(crate) fn render_stats(s: &Strings, snap: &StatsSnapshot) -> RenderedStats {
         snap.blocked_presses as f64 * 100.0 / snap.total_presses as f64
     };
     RenderedStats {
-        banner: snap.cleaning_mode.then(|| s.clean_mode_banner.to_string()),
-        badge: (if snap.enabled {
-            s.status_active
+        cleaning: snap.cleaning_mode,
+        enabled: snap.enabled,
+        active: snap.enabled && snap.hook_active,
+        badge: (if snap.enabled && snap.hook_active {
+            s.status_on
         } else {
-            s.status_paused
+            s.status_off
         })
         .to_string(),
-        total: snap.total_presses.to_string(),
-        blocked: snap.blocked_presses.to_string(),
+        total: group_thousands(snap.total_presses),
+        blocked: group_thousands(snap.blocked_presses),
         ratio: format!("{ratio:.1}%"),
         last: match snap.last_blocked {
-            Some((vk, gap)) => s.last_blocked_fmt.replacen("{}", &vk_name(vk), 1).replacen(
-                "{}",
-                &gap.as_millis().to_string(),
-                1,
+            Some((vk, gap)) => fill(
+                s.last_blocked_fmt,
+                &[&vk_name(vk), &gap.as_millis().to_string()],
             ),
             None => s.last_blocked_none.to_string(),
         },
         top: match snap.top_chattered {
-            Some((vk, blocked, ratio)) => s
-                .top_chattered_fmt
-                .replacen("{}", &vk_name(vk), 1)
-                .replacen("{}", &blocked.to_string(), 1)
-                .replacen("{:.1}", &format!("{ratio:.1}"), 1),
+            Some((vk, blocked, ratio)) => fill(
+                s.top_chattered_fmt,
+                &[
+                    &vk_name(vk),
+                    &group_thousands(blocked),
+                    &format!("{ratio:.1}"),
+                ],
+            ),
             None => s.top_chattered_none.to_string(),
         },
     }
 }
 
-/// Per-control "changed" flags in [`RenderedStats`] field order
-/// (banner, badge, total, blocked, ratio, last, top). The caller only
-/// touches windows whose flag is set.
-pub(crate) fn diff_stats(prev: &RenderedStats, next: &RenderedStats) -> [bool; 7] {
-    [
-        prev.banner != next.banner,
-        prev.badge != next.badge,
-        prev.total != next.total,
-        prev.blocked != next.blocked,
-        prev.ratio != next.ratio,
-        prev.last != next.last,
-        prev.top != next.top,
-    ]
+pub(crate) fn diff_stats(prev: &RenderedStats, next: &RenderedStats) -> StatsChanges {
+    StatsChanges {
+        status: prev.enabled != next.enabled
+            || prev.active != next.active
+            || prev.badge != next.badge,
+        total: prev.total != next.total,
+        blocked: prev.blocked != next.blocked,
+        ratio: prev.ratio != next.ratio,
+        last: prev.last != next.last,
+        top: prev.top != next.top,
+    }
 }
 
-fn vk_name(vk: u8) -> String {
-    match vk {
-        0x08 => "Backspace".to_string(),
-        0x09 => "Tab".to_string(),
-        0x0D => "Enter".to_string(),
-        0x10 => "Shift".to_string(),
-        0x11 => "Ctrl".to_string(),
-        0x12 => "Alt".to_string(),
-        0x13 => "Pause".to_string(),
-        0x14 => "CapsLock".to_string(),
-        0x1B => "Esc".to_string(),
-        0x20 => "Space".to_string(),
-        0x21 => "PageUp".to_string(),
-        0x22 => "PageDown".to_string(),
-        0x23 => "End".to_string(),
-        0x24 => "Home".to_string(),
-        0x25 => "Left".to_string(),
-        0x26 => "Up".to_string(),
-        0x27 => "Right".to_string(),
-        0x28 => "Down".to_string(),
-        0x2C => "PrintScreen".to_string(),
-        0x2D => "Insert".to_string(),
-        0x2E => "Delete".to_string(),
-        0x30..=0x39 | 0x41..=0x5A => (vk as char).to_string(),
-        0x5B => "LWin".to_string(),
-        0x5C => "RWin".to_string(),
-        0x5D => "Apps".to_string(),
-        0x5F => "Sleep".to_string(),
-        0x60..=0x69 => format!("Num{}", vk - 0x60),
-        0x6A => "Num*".to_string(),
-        0x6B => "Num+".to_string(),
-        0x6D => "Num-".to_string(),
-        0x6E => "Num.".to_string(),
-        0x6F => "Num/".to_string(),
-        0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
-        0x90 => "NumLock".to_string(),
-        0x91 => "ScrollLock".to_string(),
-        0xA0 => "LShift".to_string(),
-        0xA1 => "RShift".to_string(),
-        0xA2 => "LCtrl".to_string(),
-        0xA3 => "RCtrl".to_string(),
-        0xA4 => "LAlt".to_string(),
-        0xA5 => "RAlt".to_string(),
-        0xA6 => "BrowserBack".to_string(),
-        0xA7 => "BrowserForward".to_string(),
-        0xA8 => "BrowserRefresh".to_string(),
-        0xA9 => "BrowserStop".to_string(),
-        0xAA => "BrowserSearch".to_string(),
-        0xAB => "BrowserFavorites".to_string(),
-        0xAC => "BrowserHome".to_string(),
-        0xAD => "VolumeMute".to_string(),
-        0xAE => "VolumeDown".to_string(),
-        0xAF => "VolumeUp".to_string(),
-        0xB0 => "MediaNext".to_string(),
-        0xB1 => "MediaPrev".to_string(),
-        0xB2 => "MediaStop".to_string(),
-        0xB3 => "MediaPlayPause".to_string(),
-        0xB4 => "LaunchMail".to_string(),
-        0xB5 => "LaunchMedia".to_string(),
-        0xB6 => "LaunchApp1".to_string(),
-        0xB7 => "LaunchApp2".to_string(),
-        0xBA => ";".to_string(),
-        0xBB => "=".to_string(),
-        0xBC => ",".to_string(),
-        0xBD => "-".to_string(),
-        0xBE => ".".to_string(),
-        0xBF => "/".to_string(),
-        0xC0 => "`".to_string(),
-        0xDB => "[".to_string(),
-        0xDC => "\\".to_string(),
-        0xDD => "]".to_string(),
-        0xDE => "'".to_string(),
-        _ => format!("0x{vk:02X}"),
-    }
+static LAST_RENDERED: Mutex<Option<RenderedStats>> = Mutex::new(None);
+
+/// Forget the last frame so the next refresh repaints everything
+/// (language change).
+pub(crate) fn invalidate() {
+    *LAST_RENDERED.lock().unwrap() = None;
 }
 
 /// Reentrancy guard for the 500 ms stats tick (ISSUE-003). Modal dialogs pump
@@ -222,6 +208,7 @@ pub(crate) unsafe fn update_stats(hwnd: HWND) {
         StatsSnapshot {
             cleaning_mode: g.debouncer.cleaning_mode,
             enabled: g.enabled,
+            hook_active: HOOK_ACTIVE.load(Ordering::Relaxed),
             total_presses: g.debouncer.total_presses,
             blocked_presses: g.debouncer.blocked_presses,
             last_blocked: g.debouncer.last_blocked,
@@ -231,54 +218,49 @@ pub(crate) unsafe fn update_stats(hwnd: HWND) {
     let Some(snapshot) = snapshot else {
         return;
     };
-    let rendered = render_stats(&strings(current_lang()), &snapshot);
+    let rendered = render_stats(strings(current_lang()), &snapshot);
 
     // 2. Diff against the last frame; the first frame updates everything.
-    static LAST_RENDERED: OnceLock<Mutex<Option<RenderedStats>>> = OnceLock::new();
     let changed = {
-        let mut last = LAST_RENDERED
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .unwrap();
+        let mut last = LAST_RENDERED.lock().unwrap();
         let changed = match &*last {
             Some(prev) => diff_stats(prev, &rendered),
-            None => [true; 7],
+            None => StatsChanges::ALL,
         };
         *last = Some(rendered.clone());
         changed
     };
 
-    // 3. Touch only the controls whose text actually changed.
-    if changed[0] {
-        if let Ok(banner) = GetDlgItem(Some(hwnd), ID_CLEAN_BANNER) {
-            match &rendered.banner {
-                Some(text) => {
-                    let _ = ShowWindow(banner, SW_SHOW);
-                    set_text(hwnd, ID_CLEAN_BANNER, text);
-                }
-                None => {
-                    let _ = ShowWindow(banner, SW_HIDE);
-                }
-            }
+    // 3. Touch only what actually changed. Cleaning compares against what
+    // the window shows (not the last frame), so the first frame after
+    // startup does not rebuild the page for nothing.
+    if rendered.cleaning != layout::showing_cleaning() {
+        layout::set_showing_cleaning(rendered.cleaning);
+        super::window::apply_visibility(hwnd);
+    }
+    if changed.status {
+        set_protection_on(rendered.active);
+        set_toggle(hwnd, ID_TOGGLE_ENABLE, rendered.enabled);
+        set_text(hwnd, ID_PILL, &rendered.badge);
+        if let Ok(pill) = GetDlgItem(Some(hwnd), ID_PILL) {
+            let _ = InvalidateRect(Some(pill), None, false);
         }
+        tray::refresh_tip(hwnd);
     }
-    if changed[1] {
-        set_text(hwnd, ID_HEADER_BADGE, &rendered.badge);
-    }
-    if changed[2] {
+    if changed.total {
         set_text(hwnd, ID_STAT_TOTAL_VAL, &rendered.total);
     }
-    if changed[3] {
-        set_text(hwnd, ID_STAT_CHATTER_VAL, &rendered.blocked);
+    if changed.blocked {
+        set_text(hwnd, ID_STAT_BLOCKED_VAL, &rendered.blocked);
     }
-    if changed[4] {
+    if changed.ratio {
         set_text(hwnd, ID_STAT_RATIO_VAL, &rendered.ratio);
     }
-    if changed[5] {
-        set_text(hwnd, ID_STATIC_LAST, &rendered.last);
+    if changed.last {
+        set_text(hwnd, ID_STAT_LAST, &rendered.last);
     }
-    if changed[6] {
-        set_text(hwnd, ID_STATIC_TOP_CHATTER, &rendered.top);
+    if changed.top {
+        set_text(hwnd, ID_STAT_TOP, &rendered.top);
     }
 }
 
@@ -291,6 +273,7 @@ mod tests {
         StatsSnapshot {
             cleaning_mode: false,
             enabled: true,
+            hook_active: true,
             total_presses: 0,
             blocked_presses: 0,
             last_blocked: None,
@@ -300,14 +283,14 @@ mod tests {
 
     #[test]
     fn render_idle_shows_placeholders() {
-        let r = render_stats(&strings(Language::Ko), &idle_snapshot());
-        assert_eq!(r.banner, None);
-        assert_eq!(r.badge, "● 보호 동작 중");
+        let r = render_stats(strings(Language::Ko), &idle_snapshot());
+        assert!(!r.cleaning);
+        assert_eq!(r.badge, "● 보호 켜짐");
         assert_eq!(r.total, "0");
         assert_eq!(r.blocked, "0");
         assert_eq!(r.ratio, "0.0%");
-        assert_eq!(r.last, "최근 차단: 이력 없음");
-        assert_eq!(r.top, "최다 채터링 키: 아직 없음");
+        assert_eq!(r.last, "마지막으로 막은 키: 아직 없음");
+        assert_eq!(r.top, "가장 자주 튄 키: 아직 없음");
     }
 
     #[test]
@@ -319,23 +302,70 @@ mod tests {
             top_chattered: Some((0x20, 40, 80.0)),
             ..idle_snapshot()
         };
-        let r = render_stats(&strings(Language::En), &snap);
-        assert_eq!(r.banner, None);
+        let r = render_stats(strings(Language::En), &snap);
         assert_eq!(r.ratio, "25.0%");
-        assert_eq!(r.last, "Last blocked: Space (32ms gap)");
-        assert_eq!(r.top, "Top Chatter Key: Space (40 blocks, 80.0%)");
+        assert_eq!(r.last, "Last blocked: Space (repeated after 32 ms)");
+        assert_eq!(
+            r.top,
+            "Most affected key: Space (40 blocked, 80.0% of its presses)"
+        );
+        let ko = render_stats(strings(Language::Ko), &snap);
+        assert_eq!(ko.last, "마지막으로 막은 키: Space (32ms 만에 다시 눌림)");
+        assert_eq!(
+            ko.top,
+            "가장 자주 튄 키: Space (40회 막음, 이 키 입력의 80.0%)"
+        );
     }
 
     #[test]
-    fn render_cleaning_mode_shows_banner_and_paused_badge() {
+    fn render_groups_large_counters() {
+        let snap = StatsSnapshot {
+            total_presses: 1_234_567,
+            blocked_presses: 1_000,
+            ..idle_snapshot()
+        };
+        let r = render_stats(strings(Language::En), &snap);
+        assert_eq!(r.total, "1,234,567");
+        assert_eq!(r.blocked, "1,000");
+        assert_eq!(r.ratio, "0.1%");
+    }
+
+    #[test]
+    fn group_thousands_boundaries() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(100_000), "100,000");
+        assert_eq!(group_thousands(u64::MAX), "18,446,744,073,709,551,615");
+    }
+
+    #[test]
+    fn render_cleaning_mode_and_paused_badge() {
         let snap = StatsSnapshot {
             cleaning_mode: true,
             enabled: false,
             ..idle_snapshot()
         };
-        let r = render_stats(&strings(Language::En), &snap);
-        assert!(r.banner.unwrap().contains("Cleaning Mode"));
-        assert_eq!(r.badge, "○ Protection Paused");
+        let r = render_stats(strings(Language::En), &snap);
+        assert!(r.cleaning);
+        assert!(!r.enabled);
+        assert_eq!(r.badge, "○ Protection off");
+    }
+
+    #[test]
+    fn failed_hook_shows_off_but_keeps_the_switch_on() {
+        // G1 follow-up: the badge must not claim protection without a hook,
+        // but the switch (which Save persists) must keep the user's choice.
+        let snap = StatsSnapshot {
+            hook_active: false,
+            ..idle_snapshot()
+        };
+        let r = render_stats(strings(Language::En), &snap);
+        assert!(r.enabled);
+        assert!(!r.active);
+        assert_eq!(r.badge, "○ Protection off");
+        let healthy = render_stats(strings(Language::En), &idle_snapshot());
+        assert!(diff_stats(&healthy, &r).status);
     }
 
     #[test]
@@ -350,47 +380,64 @@ mod tests {
 
     #[test]
     fn diff_identical_frames_update_nothing() {
-        let r = render_stats(&strings(Language::Ko), &idle_snapshot());
-        assert_eq!(diff_stats(&r, &r), [false; 7]);
+        let r = render_stats(strings(Language::Ko), &idle_snapshot());
+        assert_eq!(diff_stats(&r, &r), StatsChanges::default());
     }
 
     #[test]
     fn diff_flags_only_the_changed_control() {
-        let prev = render_stats(&strings(Language::Ko), &idle_snapshot());
+        let prev = render_stats(strings(Language::Ko), &idle_snapshot());
         let snap = StatsSnapshot {
             total_presses: 1,
             ..idle_snapshot()
         };
-        let next = render_stats(&strings(Language::Ko), &snap);
+        let next = render_stats(strings(Language::Ko), &snap);
         // Only the total counter changed (ratio stays "0.0%").
         assert_eq!(
             diff_stats(&prev, &next),
-            [false, false, true, false, false, false, false]
+            StatsChanges {
+                total: true,
+                ..StatsChanges::default()
+            }
         );
     }
 
     #[test]
-    fn diff_detects_banner_toggle() {
-        let prev = render_stats(&strings(Language::Ko), &idle_snapshot());
+    fn cleaning_toggle_changes_no_text() {
+        // Entering cleaning mode swaps the page (compared against what the
+        // window shows), but must not rewrite any statistics text.
+        let prev = render_stats(strings(Language::Ko), &idle_snapshot());
         let snap = StatsSnapshot {
             cleaning_mode: true,
             ..idle_snapshot()
         };
-        let next = render_stats(&strings(Language::Ko), &snap);
+        let next = render_stats(strings(Language::Ko), &snap);
+        assert!(next.cleaning && !prev.cleaning);
+        assert_eq!(diff_stats(&prev, &next), StatsChanges::default());
+    }
+
+    #[test]
+    fn diff_flags_status_when_protection_flips() {
+        let prev = render_stats(strings(Language::En), &idle_snapshot());
+        let snap = StatsSnapshot {
+            enabled: false,
+            ..idle_snapshot()
+        };
+        let next = render_stats(strings(Language::En), &snap);
         let changed = diff_stats(&prev, &next);
-        assert!(changed[0]);
-        assert_eq!(&changed[1..], &[false; 6]);
+        assert!(changed.status);
+        assert!(!changed.total && !changed.ratio);
     }
 
     #[test]
     fn render_and_diff_sustained_tick_load() {
         // The 500 ms timer path must stay cheap: 10k render+diff cycles must
         // finish far inside one tick budget (ISSUE-003 regression guard).
-        let rendered = render_stats(&strings(Language::Ko), &idle_snapshot());
+        let rendered = render_stats(strings(Language::Ko), &idle_snapshot());
         let started = std::time::Instant::now();
         for _ in 0..10_000 {
-            let next = render_stats(&strings(Language::Ko), &idle_snapshot());
-            assert_eq!(diff_stats(&rendered, &next), [false; 7]);
+            let next = render_stats(strings(Language::Ko), &idle_snapshot());
+            assert_eq!(diff_stats(&rendered, &next), StatsChanges::default());
         }
         assert!(
             started.elapsed() < std::time::Duration::from_secs(10),

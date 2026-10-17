@@ -1,992 +1,416 @@
-//! Main window: message dispatch (`wndproc`), control construction, painting,
-//! and teardown.
+//! Main window: control construction, painting, page switching, message
+//! dispatch, and teardown.
 //!
 //! The procedure only routes messages; each domain lives in its own module:
-//! `controls` builds children, `paint` draws, `text`/`stats` refresh content,
-//! `settings_form` saves, `tray` owns the notification icon, and `update`
-//! drives the release-update flow.
+//! `layout` describes the controls, `widgets` draws the owner-drawn ones,
+//! `stats`/`history` refresh content, `settings_form` saves, `commands`
+//! implements menu/tray/button actions, and `update` drives the
+//! release-update flow.
 
-use std::sync::{atomic::Ordering, Mutex};
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Mutex,
+};
 
 use windows::{
     core::{w, PCWSTR},
     Win32::{
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::*,
-        System::SystemServices::{SS_CENTER, SS_LEFT},
-        UI::WindowsAndMessaging::*,
+        System::SystemServices::{SS_CENTER, SS_ENDELLIPSIS, SS_LEFT, SS_NOPREFIX},
+        UI::{
+            Controls::{
+                InitCommonControlsEx, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, LVS_NOSORTHEADER,
+                LVS_OWNERDATA, LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL,
+            },
+            Input::KeyboardAndMouse::{GetFocus, SetFocus},
+            WindowsAndMessaging::*,
+        },
     },
 };
 
 use super::{
+    commands,
     controls::child,
+    history,
     ids::*,
-    paint::{
-        apply_window_chrome, cached_brush, draw_rounded_card, get_fonts, theme_is_dark, ThemeColors,
+    layout::{
+        cards, current_page, is_visible, sc, set_current_page, set_dpi, showing_cleaning, Kind,
+        Page, CLIENT_H, CLIENT_W, SPECS, STAT_DIVIDERS, TAB_TRACK,
     },
-    settings_form::on_save,
-    state::{LANG, SAVED},
+    menu,
+    paint::{
+        apply_control_themes, apply_window_chrome, cached_brush, draw_rounded_card, font_for,
+        scaled_rect, static_colors, theme_is_dark, ThemeColors,
+    },
+    settings_form::{self, on_save},
+    state::{set_lang, SAVED},
     stats::update_stats,
-    text::{apply_language, get_check, set_check, to_wide},
+    text::apply_language,
     tray::{add_tray, remove_tray, show_tray_menu},
+    widgets::{draw_item, flip_toggle},
 };
-use crate::{
-    app::state::{HOOK, SHARED},
-    config::{self, Settings},
-    debounce::MeasureFrom,
-    i18n::{strings, Language},
-    input::sound::play_path_for_preview,
-};
+use crate::config::Settings;
+
+/// `TaskbarCreated`: Explorer restarted and dropped every tray icon.
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
+unsafe fn style_for(kind: Kind) -> WINDOW_STYLE {
+    let tab = WS_TABSTOP.0;
+    WINDOW_STYLE(match kind {
+        Kind::CleanTitle | Kind::CleanBody | Kind::Footer => SS_CENTER.0 | SS_NOPREFIX.0,
+        Kind::Hint | Kind::Subtitle => SS_LEFT.0 | SS_NOPREFIX.0,
+        k if k.is_static() => SS_LEFT.0 | SS_NOPREFIX.0 | SS_ENDELLIPSIS.0,
+        Kind::Edit => WS_BORDER.0 | tab | ES_AUTOHSCROLL as u32,
+        Kind::NumberEdit => WS_BORDER.0 | tab | ES_NUMBER as u32 | ES_CENTER as u32,
+        Kind::Combo => CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | tab,
+        Kind::List => {
+            WS_BORDER.0
+                | tab
+                | LVS_REPORT
+                | LVS_OWNERDATA
+                | LVS_SINGLESEL
+                | LVS_SHOWSELALWAYS
+                | LVS_NOSORTHEADER
+        }
+        k if k.is_owner_drawn() => BS_OWNERDRAW as u32 | tab,
+        _ => 0,
+    })
+}
+
+unsafe fn class_for(kind: Kind) -> PCWSTR {
+    match kind {
+        k if k.is_static() => w!("STATIC"),
+        Kind::Edit | Kind::NumberEdit => w!("EDIT"),
+        Kind::Combo => w!("COMBOBOX"),
+        Kind::List => w!("SysListView32"),
+        _ => w!("BUTTON"),
+    }
+}
+
+unsafe fn create_controls(hwnd: HWND, hinstance: HINSTANCE) {
+    for spec in SPECS {
+        let (x, y, w_, h) = spec.rect;
+        child(
+            hwnd,
+            class_for(spec.kind),
+            "",
+            style_for(spec.kind),
+            sc(x),
+            sc(y),
+            sc(w_),
+            sc(h),
+            spec.id,
+            hinstance,
+            font_for(spec.kind),
+        );
+    }
+}
+
+/// Show the controls of the current page (or the cleaning overlay).
+pub(crate) unsafe fn apply_visibility(hwnd: HWND) {
+    let page = current_page();
+    let cleaning = showing_cleaning();
+    let _ = SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(0)), Some(LPARAM(0)));
+    for spec in SPECS {
+        if let Ok(h) = GetDlgItem(Some(hwnd), spec.id) {
+            let show = is_visible(spec.scope, page, cleaning);
+            let _ = ShowWindow(h, if show { SW_SHOWNA } else { SW_HIDE });
+        }
+    }
+    let _ = SendMessageW(hwnd, WM_SETREDRAW, Some(WPARAM(1)), Some(LPARAM(0)));
+    let _ = RedrawWindow(
+        Some(hwnd),
+        None,
+        None,
+        RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN,
+    );
+
+    // Never leave keyboard focus on a control that just disappeared.
+    let focus = GetFocus();
+    let focus_hidden = focus.is_invalid() || !IsWindowVisible(focus).as_bool();
+    if focus_hidden && IsWindowVisible(hwnd).as_bool() {
+        let target = if cleaning {
+            ID_BTN_CLEAN_END
+        } else {
+            page.tab_id()
+        };
+        if let Ok(h) = GetDlgItem(Some(hwnd), target) {
+            let _ = SetFocus(Some(h));
+        }
+    }
+    if page == Page::History {
+        history::refresh(hwnd, true);
+    }
+}
+
+unsafe fn switch_page(hwnd: HWND, page: Page) {
+    if page == current_page() {
+        return;
+    }
+    set_current_page(page);
+    apply_visibility(hwnd);
+}
+
+unsafe fn on_create(hwnd: HWND, lparam: LPARAM) -> LRESULT {
+    let cs = &*(lparam.0 as *const CREATESTRUCTW);
+    let init = &*(cs.lpCreateParams as *const Settings);
+    set_lang(init.language);
+    TASKBAR_CREATED.store(
+        RegisterWindowMessageW(w!("TaskbarCreated")),
+        Ordering::Relaxed,
+    );
+    let _ = SAVED.set(Mutex::new(init.clone()));
+
+    apply_window_chrome(hwnd);
+    create_controls(hwnd, cs.hInstance);
+    history::init(hwnd);
+    apply_control_themes(hwnd);
+    // Fills combos and the menu, then the form loads the saved values.
+    apply_language(hwnd);
+    settings_form::load_into_form(hwnd, init);
+    apply_visibility(hwnd);
+    add_tray(hwnd);
+    let _ = SetTimer(Some(hwnd), TIMER_STATS, 500, None);
+    LRESULT(0)
+}
+
+unsafe fn on_paint(hwnd: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let hdc = BeginPaint(hwnd, &mut ps);
+    let mut rc = RECT::default();
+    let _ = GetClientRect(hwnd, &mut rc);
+    let (width, height) = (rc.right - rc.left, rc.bottom - rc.top);
+    let colors = ThemeColors::new(theme_is_dark());
+
+    // Double buffering.
+    let mem_dc = CreateCompatibleDC(Some(hdc));
+    let mem_bmp = CreateCompatibleBitmap(hdc, width, height);
+    let old_bmp = SelectObject(mem_dc, mem_bmp.into());
+
+    FillRect(mem_dc, &rc, cached_brush(colors.bg));
+    let cleaning = showing_cleaning();
+    let page = current_page();
+    if !cleaning {
+        draw_rounded_card(
+            mem_dc,
+            &scaled_rect(TAB_TRACK),
+            colors.tab_track,
+            colors.tab_track,
+            sc(10),
+        );
+    }
+    for &card in cards(page, cleaning) {
+        draw_rounded_card(
+            mem_dc,
+            &scaled_rect(card),
+            colors.card_bg,
+            colors.card_border,
+            sc(12),
+        );
+    }
+    if page == Page::Home && !cleaning {
+        let pen = CreatePen(PS_SOLID, 1, colors.card_border);
+        let old_pen = SelectObject(mem_dc, pen.into());
+        for (x, y0, y1) in STAT_DIVIDERS {
+            let _ = MoveToEx(mem_dc, sc(x), sc(y0), None);
+            let _ = LineTo(mem_dc, sc(x), sc(y1));
+        }
+        SelectObject(mem_dc, old_pen);
+        let _ = DeleteObject(pen.into());
+    }
+
+    let _ = BitBlt(hdc, 0, 0, width, height, Some(mem_dc), 0, 0, SRCCOPY);
+    SelectObject(mem_dc, old_bmp);
+    let _ = DeleteObject(mem_bmp.into());
+    let _ = DeleteDC(mem_dc);
+    let _ = EndPaint(hwnd, &ps);
+}
+
+unsafe fn on_ctl_color_static(wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let hdc = HDC(wparam.0 as *mut _);
+    let id = GetWindowLongW(HWND(lparam.0 as *mut _), GWL_ID);
+    let colors = ThemeColors::new(theme_is_dark());
+    let (fg, bg) = match super::layout::spec(id) {
+        Some(spec) => static_colors(spec.kind, spec.on_card, &colors),
+        None => (colors.text_primary, colors.card_bg),
+    };
+    let _ = SetTextColor(hdc, fg);
+    let _ = SetBkColor(hdc, bg);
+    let _ = SetBkMode(hdc, TRANSPARENT);
+    LRESULT(cached_brush(bg).0 as isize)
+}
+
+unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+    let id = (wparam.0 & 0xFFFF) as i32;
+    let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
+    let clicked = code == BN_CLICKED || code == BN_DOUBLECLICKED;
+
+    // Enter inside a field (IsDialogMessage sends IDOK): save on the
+    // settings pages, otherwise ignore. IDCANCEL (Esc) is ignored.
+    if id == IDOK.0 {
+        if matches!(current_page(), Page::Settings | Page::Advanced) && !showing_cleaning() {
+            on_save(hwnd);
+        }
+        return;
+    }
+    if id == IDCANCEL.0 {
+        return;
+    }
+    // Menu bar / accelerator commands carry no control handle.
+    if lparam.0 == 0 {
+        commands::run(hwnd, id as usize);
+        return;
+    }
+
+    if let Some(page) = Page::from_tab_id(id) {
+        if clicked {
+            switch_page(hwnd, page);
+        }
+        return;
+    }
+    if let Some(spec) = super::layout::spec(id) {
+        if spec.kind.is_toggle() && clicked {
+            let on = flip_toggle(hwnd, id);
+            if id == ID_TOGGLE_ENABLE {
+                commands::set_protection(hwnd, on);
+            } else {
+                settings_form::mark_dirty(hwnd);
+            }
+            return;
+        }
+    }
+    match (id, code) {
+        (ID_PILL, BN_CLICKED | BN_DOUBLECLICKED) => commands::run(hwnd, MENU_TOGGLE),
+        (ID_BTN_CLEAN_MODE, BN_CLICKED) => commands::run(hwnd, MENU_CLEANING),
+        (ID_BTN_CLEAN_END, BN_CLICKED) => commands::set_cleaning(hwnd, false),
+        (ID_BTN_RESET_STATS, BN_CLICKED) => commands::run(hwnd, MENU_RESET_STATS),
+        (ID_BTN_OPEN_CPL, BN_CLICKED) => commands::run(hwnd, MENU_OPEN_CPL),
+        (ID_BTN_CLEAR_LOG, BN_CLICKED) => commands::run(hwnd, MENU_CLEAR_LOG),
+        (ID_BTN_SAVE, BN_CLICKED) => on_save(hwnd),
+        (ID_BTN_SOUND_TEST, BN_CLICKED) => settings_form::preview_sound(hwnd),
+        (ID_BTN_SOUND_BROWSE, BN_CLICKED) => settings_form::browse_sound(hwnd),
+        (ID_HIST_SEARCH, EN_CHANGE) => history::on_search_changed(hwnd),
+        (
+            ID_EDIT_THRESHOLD | ID_EDIT_SOUND_FILE | ID_EDIT_MIN_CHATTER | ID_EDIT_LOG_LIMIT,
+            EN_CHANGE,
+        ) => settings_form::mark_dirty(hwnd),
+        (ID_COMBO_MEASURE, CBN_SELCHANGE) => settings_form::mark_dirty(hwnd),
+        (ID_COMBO_LANG, CBN_SELCHANGE) => settings_form::on_language_changed(hwnd),
+        (ID_HIST_VIEW, CBN_SELCHANGE) => history::on_view_changed(hwnd),
+        _ => {}
+    }
+}
+
+unsafe fn on_destroy(hwnd: HWND) {
+    let _ = KillTimer(Some(hwnd), TIMER_STATS);
+    settings_form::persist_live();
+    remove_tray(hwnd);
+    // The hook thread is stopped by the bootstrap after the message loop.
+    PostQuitMessage(0);
+}
+
+/// How to answer the session-end messages.
+#[derive(Debug, PartialEq, Eq)]
+enum SessionReply {
+    /// `WM_QUERYENDSESSION`: never veto a shutdown.
+    AllowEnd,
+    /// `WM_ENDSESSION(TRUE)`: the session really ends; persist now.
+    PersistNow,
+    /// `WM_ENDSESSION(FALSE)`: the shutdown was cancelled.
+    Ignore,
+}
+
+fn session_reply(msg: u32, wparam: usize) -> SessionReply {
+    match msg {
+        WM_QUERYENDSESSION => SessionReply::AllowEnd,
+        WM_ENDSESSION if wparam != 0 => SessionReply::PersistNow,
+        _ => SessionReply::Ignore,
+    }
+}
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
-        WM_CREATE => {
-            let cs = &*(lparam.0 as *const CREATESTRUCTW);
-            let init = &*(cs.lpCreateParams as *const Settings);
-            let hinstance = cs.hInstance;
-            LANG.store(
-                if init.language == Language::En { 1 } else { 0 },
-                Ordering::Relaxed,
-            );
-
-            apply_window_chrome(hwnd);
-
-            let fonts = get_fonts();
-
-            // 1. Cleaning Banner (y: 6..34, hidden by default)
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_CENTER.0),
-                16,
-                6,
-                432,
-                28,
-                ID_CLEAN_BANNER,
-                hinstance,
-                fonts.body,
-            );
-            if let Ok(b) = GetDlgItem(Some(hwnd), ID_CLEAN_BANNER) {
-                let _ = ShowWindow(b, SW_HIDE);
-            }
-
-            // 2. Header Card (y: 38..92)
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                46,
-                260,
-                24,
-                ID_HEADER_TITLE,
-                hinstance,
-                fonts.title,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                70,
-                260,
-                18,
-                ID_HEADER_SUB,
-                hinstance,
-                fonts.subtitle,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_CENTER.0),
-                300,
-                52,
-                134,
-                24,
-                ID_HEADER_BADGE,
-                hinstance,
-                fonts.badge,
-            );
-
-            // 3. Card 1: Telemetry (y: 102..232)
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                112,
-                400,
-                20,
-                ID_CARD1_TITLE,
-                hinstance,
-                fonts.section,
-            );
-            // Column 1
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                138,
-                125,
-                18,
-                ID_STAT_TOTAL_LABEL,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                156,
-                125,
-                24,
-                ID_STAT_TOTAL_VAL,
-                hinstance,
-                fonts.stat_val,
-            );
-            // Column 2
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                168,
-                138,
-                125,
-                18,
-                ID_STAT_CHATTER_LABEL,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                168,
-                156,
-                125,
-                24,
-                ID_STAT_CHATTER_VAL,
-                hinstance,
-                fonts.stat_val,
-            );
-            // Column 3
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                308,
-                138,
-                120,
-                18,
-                ID_STAT_RATIO_LABEL,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                308,
-                156,
-                120,
-                24,
-                ID_STAT_RATIO_VAL,
-                hinstance,
-                fonts.stat_val,
-            );
-            // Last blocked & top chatter chips
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                188,
-                400,
-                18,
-                ID_STATIC_LAST,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                208,
-                400,
-                18,
-                ID_STATIC_TOP_CHATTER,
-                hinstance,
-                fonts.body,
-            );
-
-            // 4. Card 2: Filter Settings (y: 242..432)
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                252,
-                400,
-                20,
-                ID_CARD2_TITLE,
-                hinstance,
-                fonts.section,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                276,
-                100,
-                20,
-                ID_LABEL_THRESHOLD,
-                hinstance,
-                fonts.body,
-            );
-            let edit = child(
-                hwnd,
-                w!("EDIT"),
-                "",
-                WINDOW_STYLE(WS_BORDER.0 | WS_TABSTOP.0 | ES_NUMBER as u32),
-                132,
-                274,
-                55,
-                24,
-                ID_EDIT_THRESHOLD,
-                hinstance,
-                fonts.body,
-            );
-            let t = to_wide(&init.threshold_ms.to_string());
-            let _ = SetWindowTextW(edit, PCWSTR(t.as_ptr()));
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                195,
-                276,
-                230,
-                20,
-                ID_LABEL_UNIT,
-                hinstance,
-                fonts.body,
-            );
-
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0),
-                28,
-                304,
-                400,
-                20,
-                ID_CHECK_ENABLE,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0),
-                28,
-                326,
-                280,
-                20,
-                ID_CHECK_SOUND,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_PUSHBUTTON as u32 | WS_TABSTOP.0),
-                320,
-                323,
-                110,
-                24,
-                ID_BTN_SOUND_TEST,
-                hinstance,
-                fonts.body,
-            );
-
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                350,
-                250,
-                18,
-                ID_LABEL_SOUND_FILE,
-                hinstance,
-                fonts.body,
-            );
-            let edit_s = child(
-                hwnd,
-                w!("EDIT"),
-                "",
-                WINDOW_STYLE(WS_BORDER.0 | WS_TABSTOP.0 | ES_AUTOHSCROLL as u32),
-                28,
-                370,
-                404,
-                24,
-                ID_EDIT_SOUND_FILE,
-                hinstance,
-                fonts.body,
-            );
-            if let Some(ref path) = init.sound_file {
-                let p = to_wide(path);
-                let _ = SetWindowTextW(edit_s, PCWSTR(p.as_ptr()));
-            }
-
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0),
-                28,
-                402,
-                195,
-                20,
-                ID_CHECK_AUTOSTART,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0),
-                230,
-                402,
-                200,
-                20,
-                ID_CHECK_MINIMIZE,
-                hinstance,
-                fonts.body,
-            );
-
-            // 5. Card 3: Helpful Tools (y: 442..506)
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                452,
-                400,
-                20,
-                ID_CARD3_TITLE,
-                hinstance,
-                fonts.section,
-            );
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_PUSHBUTTON as u32 | WS_TABSTOP.0),
-                28,
-                474,
-                195,
-                28,
-                ID_BTN_CLEAN_MODE,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_PUSHBUTTON as u32 | WS_TABSTOP.0),
-                235,
-                474,
-                195,
-                28,
-                ID_BTN_OPEN_CPL,
-                hinstance,
-                fonts.body,
-            );
-
-            // 6. Card 4: Advanced Preferences (y: 516..700)
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                526,
-                400,
-                20,
-                ID_CARD4_TITLE,
-                hinstance,
-                fonts.section,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                548,
-                120,
-                20,
-                ID_LABEL_MEASURE,
-                hinstance,
-                fonts.body,
-            );
-            let combo_m = child(
-                hwnd,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | WS_TABSTOP.0),
-                150,
-                545,
-                280,
-                100,
-                ID_COMBO_MEASURE,
-                hinstance,
-                fonts.body,
-            );
-            let opt1 = to_wide(strings(init.language).measure_release);
-            let opt2 = to_wide(strings(init.language).measure_press);
-            SendMessageW(
-                combo_m,
-                CB_ADDSTRING,
-                Some(WPARAM(0)),
-                Some(LPARAM(opt1.as_ptr() as isize)),
-            );
-            SendMessageW(
-                combo_m,
-                CB_ADDSTRING,
-                Some(WPARAM(0)),
-                Some(LPARAM(opt2.as_ptr() as isize)),
-            );
-            SendMessageW(
-                combo_m,
-                CB_SETCURSEL,
-                Some(WPARAM(if init.measure_from == MeasureFrom::Press {
-                    1
-                } else {
-                    0
-                })),
-                Some(LPARAM(0)),
-            );
-
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                574,
-                120,
-                20,
-                ID_LABEL_LANG,
-                hinstance,
-                fonts.body,
-            );
-            let combo_l = child(
-                hwnd,
-                w!("COMBOBOX"),
-                "",
-                WINDOW_STYLE(CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0 | WS_TABSTOP.0),
-                150,
-                571,
-                140,
-                100,
-                ID_COMBO_LANG,
-                hinstance,
-                fonts.body,
-            );
-            for name in ["한국어", "English"] {
-                let v = to_wide(name);
-                SendMessageW(
-                    combo_l,
-                    CB_ADDSTRING,
-                    Some(WPARAM(0)),
-                    Some(LPARAM(v.as_ptr() as isize)),
-                );
-            }
-            SendMessageW(
-                combo_l,
-                CB_SETCURSEL,
-                Some(WPARAM(init.language.combo_index())),
-                Some(LPARAM(0)),
-            );
-
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0),
-                300,
-                574,
-                130,
-                20,
-                ID_CHECK_CLOSE_TO_TRAY,
-                hinstance,
-                fonts.body,
-            );
-
-            // Advanced numeric filters (y: 600..646)
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                600,
-                120,
-                20,
-                ID_LABEL_MIN_CHATTER,
-                hinstance,
-                fonts.body,
-            );
-            let edit_min = child(
-                hwnd,
-                w!("EDIT"),
-                "",
-                WINDOW_STYLE(WS_BORDER.0 | WS_TABSTOP.0 | ES_NUMBER as u32),
-                150,
-                598,
-                55,
-                24,
-                ID_EDIT_MIN_CHATTER,
-                hinstance,
-                fonts.body,
-            );
-            let t_min = to_wide(&init.min_chatter_ms.to_string());
-            let _ = SetWindowTextW(edit_min, PCWSTR(t_min.as_ptr()));
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                212,
-                600,
-                218,
-                20,
-                ID_LABEL_MIN_UNIT,
-                hinstance,
-                fonts.body,
-            );
-
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                28,
-                626,
-                120,
-                20,
-                ID_LABEL_LOG_LIMIT,
-                hinstance,
-                fonts.body,
-            );
-            let edit_log = child(
-                hwnd,
-                w!("EDIT"),
-                "",
-                WINDOW_STYLE(WS_BORDER.0 | WS_TABSTOP.0 | ES_NUMBER as u32),
-                150,
-                624,
-                55,
-                24,
-                ID_EDIT_LOG_LIMIT,
-                hinstance,
-                fonts.body,
-            );
-            let t_log = to_wide(&init.log_limit.to_string());
-            let _ = SetWindowTextW(edit_log, PCWSTR(t_log.as_ptr()));
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_LEFT.0),
-                212,
-                626,
-                218,
-                20,
-                ID_LABEL_LOG_UNIT,
-                hinstance,
-                fonts.body,
-            );
-
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0),
-                28,
-                652,
-                402,
-                20,
-                ID_CHECK_EXCLUDE_INJECTED,
-                hinstance,
-                fonts.body,
-            );
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_AUTOCHECKBOX as u32 | WS_TABSTOP.0),
-                28,
-                674,
-                402,
-                20,
-                ID_CHECK_RECORD_ALL,
-                hinstance,
-                fonts.body,
-            );
-
-            // 7. Bottom Actions (y: 712..)
-            child(
-                hwnd,
-                w!("BUTTON"),
-                "",
-                WINDOW_STYLE(BS_DEFPUSHBUTTON as u32 | WS_TABSTOP.0),
-                16,
-                712,
-                432,
-                38,
-                ID_BTN_SAVE,
-                hinstance,
-                fonts.section,
-            );
-            child(
-                hwnd,
-                w!("STATIC"),
-                "",
-                WINDOW_STYLE(SS_CENTER.0),
-                16,
-                756,
-                432,
-                20,
-                ID_STATIC_HINT,
-                hinstance,
-                fonts.subtitle,
-            );
-
-            let _ = SAVED.set(Mutex::new(init.clone()));
-            set_check(hwnd, ID_CHECK_ENABLE, init.enabled);
-            set_check(hwnd, ID_CHECK_SOUND, init.play_sound);
-            set_check(hwnd, ID_CHECK_MINIMIZE, init.minimize_on_launch);
-            set_check(hwnd, ID_CHECK_CLOSE_TO_TRAY, init.close_to_tray);
-            set_check(hwnd, ID_CHECK_EXCLUDE_INJECTED, init.exclude_injected);
-            set_check(hwnd, ID_CHECK_RECORD_ALL, init.record_all_keys);
-            set_check(hwnd, ID_CHECK_AUTOSTART, config::autostart_enabled());
-
-            apply_language(hwnd);
-            add_tray(hwnd);
-            let _ = SetTimer(Some(hwnd), 1, 500, None);
-            LRESULT(0)
-        }
+        WM_CREATE => on_create(hwnd, lparam),
         WM_PAINT => {
-            let mut ps = PAINTSTRUCT::default();
-            let hdc = BeginPaint(hwnd, &mut ps);
-            let mut rc = RECT::default();
-            let _ = GetClientRect(hwnd, &mut rc);
-            let width = rc.right - rc.left;
-            let height = rc.bottom - rc.top;
-
-            let is_dark = theme_is_dark();
-            let colors = ThemeColors::new(is_dark);
-
-            // Double buffering
-            let mem_dc = CreateCompatibleDC(Some(hdc));
-            let mem_bmp = CreateCompatibleBitmap(hdc, width, height);
-            let old_bmp = SelectObject(mem_dc, mem_bmp.into());
-
-            // Fill canvas
-            let bg_brush = CreateSolidBrush(colors.bg);
-            FillRect(mem_dc, &rc, bg_brush);
-            let _ = DeleteObject(bg_brush.into());
-
-            // Draw Card 0 (Header): 16, 38, 448, 92
-            let c0 = RECT {
-                left: 16,
-                top: 38,
-                right: 448,
-                bottom: 92,
-            };
-            draw_rounded_card(mem_dc, &c0, colors.card_bg, colors.card_border, 10);
-
-            // Draw Card 1 (Telemetry): 16, 102, 448, 232
-            let c1 = RECT {
-                left: 16,
-                top: 102,
-                right: 448,
-                bottom: 232,
-            };
-            draw_rounded_card(mem_dc, &c1, colors.card_bg, colors.card_border, 10);
-
-            // Telemetry grid divider lines
-            let div_pen = CreatePen(PS_SOLID, 1, colors.card_border);
-            let old_pen = SelectObject(mem_dc, div_pen.into());
-            let _ = MoveToEx(mem_dc, 156, 138, None);
-            let _ = LineTo(mem_dc, 156, 180);
-            let _ = MoveToEx(mem_dc, 296, 138, None);
-            let _ = LineTo(mem_dc, 296, 180);
-            SelectObject(mem_dc, old_pen);
-            let _ = DeleteObject(div_pen.into());
-
-            // Draw Card 2 (Settings): 16, 242, 448, 432
-            let c2 = RECT {
-                left: 16,
-                top: 242,
-                right: 448,
-                bottom: 432,
-            };
-            draw_rounded_card(mem_dc, &c2, colors.card_bg, colors.card_border, 10);
-
-            // Draw Card 3 (Tools): 16, 442, 448, 506
-            let c3 = RECT {
-                left: 16,
-                top: 442,
-                right: 448,
-                bottom: 506,
-            };
-            draw_rounded_card(mem_dc, &c3, colors.card_bg, colors.card_border, 10);
-
-            // Draw Card 4 (Preferences): 16, 516, 448, 700
-            let c4 = RECT {
-                left: 16,
-                top: 516,
-                right: 448,
-                bottom: 700,
-            };
-            draw_rounded_card(mem_dc, &c4, colors.card_bg, colors.card_border, 10);
-
-            // Draw Status Pill in Header
-            let enabled = SHARED
-                .get()
-                .map(|g| g.lock().unwrap().enabled)
-                .unwrap_or(true);
-            let (badge_bg, badge_border) = if enabled {
-                (colors.status_active_bg, colors.status_active_fg)
-            } else {
-                (colors.status_paused_bg, colors.status_paused_fg)
-            };
-            let badge_rc = RECT {
-                left: 296,
-                top: 50,
-                right: 438,
-                bottom: 78,
-            };
-            draw_rounded_card(mem_dc, &badge_rc, badge_bg, badge_border, 14);
-
-            let _ = BitBlt(hdc, 0, 0, width, height, Some(mem_dc), 0, 0, SRCCOPY);
-            SelectObject(mem_dc, old_bmp);
-            let _ = DeleteObject(mem_bmp.into());
-            let _ = DeleteDC(mem_dc);
-            let _ = EndPaint(hwnd, &ps);
+            on_paint(hwnd);
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
-        WM_CTLCOLORSTATIC => {
+        WM_CTLCOLORSTATIC => on_ctl_color_static(wparam, lparam),
+        WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX => {
             let hdc = HDC(wparam.0 as *mut _);
-            let c_hwnd = HWND(lparam.0 as *mut _);
-            let id = GetWindowLongW(c_hwnd, GWL_ID);
-            let is_dark = theme_is_dark();
-            let colors = ThemeColors::new(is_dark);
-            let _ = SetBkMode(hdc, TRANSPARENT);
-
-            match id {
-                ID_CLEAN_BANNER => {
-                    let _ = SetTextColor(hdc, colors.cleaning_banner_fg);
-                    LRESULT(cached_brush(colors.cleaning_banner_bg).0 as isize)
-                }
-                ID_HEADER_TITLE => {
-                    let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-                ID_HEADER_SUB
-                | ID_STAT_TOTAL_LABEL
-                | ID_STAT_CHATTER_LABEL
-                | ID_LABEL_UNIT
-                | ID_LABEL_THRESHOLD
-                | ID_LABEL_SOUND_FILE
-                | ID_LABEL_MEASURE
-                | ID_LABEL_LANG
-                | ID_LABEL_MIN_CHATTER
-                | ID_LABEL_MIN_UNIT
-                | ID_LABEL_LOG_LIMIT
-                | ID_LABEL_LOG_UNIT => {
-                    let _ = SetTextColor(hdc, colors.text_secondary);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-                ID_HEADER_BADGE => {
-                    let enabled = SHARED
-                        .get()
-                        .map(|g| g.lock().unwrap().enabled)
-                        .unwrap_or(true);
-                    let (fg, bg) = if enabled {
-                        (colors.status_active_fg, colors.status_active_bg)
-                    } else {
-                        (colors.status_paused_fg, colors.status_paused_bg)
-                    };
-                    let _ = SetTextColor(hdc, fg);
-                    LRESULT(cached_brush(bg).0 as isize)
-                }
-                ID_CARD1_TITLE | ID_CARD2_TITLE | ID_CARD3_TITLE | ID_CARD4_TITLE => {
-                    let _ = SetTextColor(hdc, colors.accent);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-                ID_STAT_TOTAL_VAL | ID_STAT_CHATTER_VAL => {
-                    let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-                ID_STAT_RATIO_LABEL => {
-                    let _ = SetTextColor(hdc, colors.text_secondary);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-                ID_STAT_RATIO_VAL => {
-                    let _ = SetTextColor(hdc, colors.accent);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-                ID_STATIC_LAST | ID_STATIC_TOP_CHATTER => {
-                    let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-                ID_STATIC_HINT => {
-                    let _ = SetTextColor(hdc, colors.text_secondary);
-                    LRESULT(cached_brush(colors.bg).0 as isize)
-                }
-                ID_CHECK_ENABLE
-                | ID_CHECK_SOUND
-                | ID_CHECK_AUTOSTART
-                | ID_CHECK_MINIMIZE
-                | ID_CHECK_CLOSE_TO_TRAY
-                | ID_CHECK_EXCLUDE_INJECTED
-                | ID_CHECK_RECORD_ALL => {
-                    let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-                _ => {
-                    let _ = SetTextColor(hdc, colors.text_primary);
-                    LRESULT(cached_brush(colors.card_bg).0 as isize)
-                }
-            }
-        }
-        WM_CTLCOLOREDIT => {
-            let hdc = HDC(wparam.0 as *mut _);
-            let is_dark = theme_is_dark();
-            let colors = ThemeColors::new(is_dark);
+            let colors = ThemeColors::new(theme_is_dark());
             let _ = SetTextColor(hdc, colors.text_primary);
             let _ = SetBkColor(hdc, colors.edit_bg);
             LRESULT(cached_brush(colors.edit_bg).0 as isize)
         }
         WM_CTLCOLORBTN => {
-            let is_dark = theme_is_dark();
-            let colors = ThemeColors::new(is_dark);
+            let colors = ThemeColors::new(theme_is_dark());
             LRESULT(cached_brush(colors.card_bg).0 as isize)
+        }
+        WM_DRAWITEM => {
+            if draw_item(lparam) {
+                LRESULT(1)
+            } else {
+                DefWindowProcW(hwnd, msg, wparam, lparam)
+            }
+        }
+        WM_NOTIFY => {
+            history::on_notify(lparam).unwrap_or_else(|| DefWindowProcW(hwnd, msg, wparam, lparam))
         }
         WM_SETTINGCHANGE => {
             apply_window_chrome(hwnd);
-            let _ = InvalidateRect(Some(hwnd), None, true);
+            apply_control_themes(hwnd);
+            history::apply_theme(hwnd);
+            let _ = RedrawWindow(
+                Some(hwnd),
+                None,
+                None,
+                RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME,
+            );
+            LRESULT(0)
+        }
+        WM_INITMENUPOPUP => {
+            menu::on_init_menu_popup(hwnd);
             LRESULT(0)
         }
         WM_COMMAND => {
-            let id = (wparam.0 & 0xFFFF) as i32;
-            let code = ((wparam.0 >> 16) & 0xFFFF) as u32;
-
-            if id == ID_BTN_SAVE && code == BN_CLICKED {
-                on_save(hwnd);
-            }
-            if id == ID_BTN_SOUND_TEST && code == BN_CLICKED {
-                if let Ok(h) = GetDlgItem(Some(hwnd), ID_EDIT_SOUND_FILE) {
-                    let mut buf = [0u16; 512];
-                    let len = GetWindowTextW(h, &mut buf) as usize;
-                    let file_str = String::from_utf16_lossy(&buf[..len.min(buf.len())])
-                        .trim()
-                        .to_string();
-                    // The test button previews exactly what was typed; failure
-                    // falls back to the system beep inside the player.
-                    if !file_str.is_empty() {
-                        play_path_for_preview(std::path::Path::new(&file_str));
-                    }
-                }
-            }
-            if id == ID_BTN_CLEAN_MODE && code == BN_CLICKED {
-                if let Some(shared) = SHARED.get() {
-                    shared.lock().unwrap().debouncer.cleaning_mode = true;
-                }
-                update_stats(hwnd);
-                let _ = InvalidateRect(Some(hwnd), None, true);
-            }
-            if id == ID_BTN_OPEN_CPL && code == BN_CLICKED {
-                let _ = std::process::Command::new("control.exe")
-                    .arg("keyboard")
-                    .spawn();
-            }
-            if id == ID_CHECK_ENABLE && code == BN_CLICKED {
-                let enabled = get_check(hwnd, ID_CHECK_ENABLE);
-                if let Some(shared) = SHARED.get() {
-                    shared.lock().unwrap().enabled = enabled;
-                }
-                let _ = InvalidateRect(Some(hwnd), None, false);
-            }
+            on_command(hwnd, wparam, lparam);
             LRESULT(0)
         }
         WM_TIMER => {
             update_stats(hwnd);
+            history::refresh(hwnd, false);
+            settings_form::tick(hwnd);
+            settings_form::autosave_tick();
             LRESULT(0)
         }
+        WM_QUERYENDSESSION | WM_ENDSESSION => match session_reply(msg, wparam.0) {
+            SessionReply::AllowEnd => LRESULT(1),
+            SessionReply::PersistNow => {
+                // Windows may terminate the process after this returns,
+                // without WM_DESTROY: flush now (ISSUE-004).
+                settings_form::persist_live();
+                remove_tray(hwnd);
+                LRESULT(0)
+            }
+            SessionReply::Ignore => LRESULT(0),
+        },
         WM_CLOSE => {
             let close_to_tray = SAVED
                 .get()
                 .map(|s| s.lock().unwrap().close_to_tray)
                 .unwrap_or(true);
             if close_to_tray {
-                let _ = ShowWindow(hwnd, SW_HIDE);
+                commands::hide_to_tray(hwnd);
             } else {
                 let _ = DestroyWindow(hwnd);
             }
             LRESULT(0)
         }
         WM_DESTROY => {
-            let _ = KillTimer(Some(hwnd), 1);
-            if let Some(saved) = SAVED.get() {
-                let mut s = saved.lock().unwrap();
-                if let Some(shared) = SHARED.get() {
-                    let g = shared.lock().unwrap();
-                    s.total_presses = g.debouncer.total_presses;
-                    s.blocked_presses = g.debouncer.blocked_presses;
-                    s.per_key_presses = g.debouncer.per_key_presses;
-                    s.per_key_blocked = g.debouncer.per_key_blocked;
-                }
-                config::save(&s);
-            }
-            remove_tray(hwnd);
-            let raw = HOOK.swap(0, Ordering::Relaxed);
-            if raw != 0 {
-                let _ = UnhookWindowsHookEx(HHOOK(raw as _));
-            }
-            PostQuitMessage(0);
+            on_destroy(hwnd);
             LRESULT(0)
         }
         _ if msg == WM_UPDATE_EXIT => {
@@ -996,9 +420,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         _ if msg == WM_TRAY => match lparam.0 as u32 {
-            WM_LBUTTONDBLCLK => {
-                let _ = ShowWindow(hwnd, SW_SHOW);
-                let _ = SetForegroundWindow(hwnd);
+            WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
+                commands::show_window(hwnd);
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
@@ -1007,11 +430,33 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         },
+        _ if msg != 0 && msg == TASKBAR_CREATED.load(Ordering::Relaxed) => {
+            add_tray(hwnd);
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
 
+unsafe fn system_dpi() -> i32 {
+    let screen = GetDC(None);
+    let dpi = GetDeviceCaps(Some(screen), LOGPIXELSY);
+    ReleaseDC(None, screen);
+    if dpi > 0 {
+        dpi
+    } else {
+        96
+    }
+}
+
 pub(crate) unsafe fn create_window(hinstance: HINSTANCE, init: &Settings) -> HWND {
+    let icc = INITCOMMONCONTROLSEX {
+        dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+        dwICC: ICC_LISTVIEW_CLASSES,
+    };
+    let _ = InitCommonControlsEx(&icc);
+    set_dpi(system_dpi());
+
     let class = w!("KeyboardChatteringFixMain");
     // MAKEINTRESOURCE(1): see add_tray for why the lint is suppressed here.
     #[allow(clippy::manual_dangling_ptr)]
@@ -1029,18 +474,28 @@ pub(crate) unsafe fn create_window(hinstance: HINSTANCE, init: &Settings) -> HWN
         ..Default::default()
     };
     RegisterClassW(&wc);
-    let title = to_wide(strings(init.language).title);
 
-    // Modern window dimensions: 480 x 824 outer size
+    // Outer size from the logical client size, including the menu bar.
+    // WS_CLIPCHILDREN: the double-buffered BitBlt in WM_PAINT must never
+    // paint over child controls that already drew themselves.
+    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+    let mut outer = RECT {
+        left: 0,
+        top: 0,
+        right: sc(CLIENT_W),
+        bottom: sc(CLIENT_H),
+    };
+    let _ = AdjustWindowRectEx(&mut outer, style, true, WINDOW_EX_STYLE::default());
+
     let hwnd = CreateWindowExW(
         WINDOW_EX_STYLE::default(),
         class,
-        PCWSTR(title.as_ptr()),
-        WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+        w!("Keyboard Chatter Fix"),
+        style,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
-        480,
-        824,
+        outer.right - outer.left,
+        outer.bottom - outer.top,
         Some(HWND::default()),
         Some(HMENU::default()),
         Some(hinstance),
@@ -1069,4 +524,16 @@ pub(crate) unsafe fn create_window(hinstance: HINSTANCE, init: &Settings) -> HWN
 pub(crate) unsafe fn show_initial(hwnd: HWND, minimized: bool) {
     let _ = ShowWindow(hwnd, if minimized { SW_HIDE } else { SW_SHOW });
     let _ = UpdateWindow(hwnd);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_end_persists_only_when_the_session_really_ends() {
+        assert_eq!(session_reply(WM_QUERYENDSESSION, 0), SessionReply::AllowEnd);
+        assert_eq!(session_reply(WM_ENDSESSION, 1), SessionReply::PersistNow);
+        assert_eq!(session_reply(WM_ENDSESSION, 0), SessionReply::Ignore);
+    }
 }

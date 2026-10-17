@@ -8,7 +8,10 @@
 use std::{collections::HashMap, fs, path::PathBuf};
 
 use super::model::Settings;
-use crate::{debounce::MeasureFrom, i18n::Language};
+use crate::{
+    debounce::{MeasureFrom, LOG_LIMIT_MAX, LOG_LIMIT_MIN},
+    i18n::Language,
+};
 
 pub fn config_path() -> PathBuf {
     let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
@@ -31,18 +34,21 @@ fn backup_path(path: &std::path::Path) -> PathBuf {
 }
 
 pub fn load() -> Settings {
+    try_load().unwrap_or_default()
+}
+
+/// Settings from disk, or `None` when neither the main file nor its backup
+/// is readable. Callers that merge disk state into memory use this so an
+/// unreadable file is never mistaken for "everything was removed".
+pub fn try_load() -> Option<Settings> {
     let path = config_path();
     match fs::read_to_string(&path) {
-        Ok(text) if !text.trim().is_empty() => parse(&text),
+        Ok(text) if !text.trim().is_empty() => Some(parse(&text)),
         _ => {
             // Missing/empty main file: a torn write may have truncated it,
             // so fall back to the previous generation (ISSUE-004).
-            if let Ok(bak) = fs::read_to_string(backup_path(&path)) {
-                if !bak.trim().is_empty() {
-                    return parse(&bak);
-                }
-            }
-            Settings::default()
+            let bak = fs::read_to_string(backup_path(&path)).ok()?;
+            (!bak.trim().is_empty()).then(|| parse(&bak))
         }
     }
 }
@@ -93,7 +99,7 @@ fn parse(text: &str) -> Settings {
     }
     if let Some(v) = map.get("iLogLimit") {
         if let Ok(n) = v.parse::<usize>() {
-            s.log_limit = n.clamp(10, 5000);
+            s.log_limit = n.clamp(LOG_LIMIT_MIN, LOG_LIMIT_MAX);
         }
     }
     if let Some(v) = map.get("sLanguage") {
@@ -389,6 +395,65 @@ mod tests {
             assert!(s.play_sound);
             assert!(s.record_all_keys);
             assert!(!s.enabled);
+        });
+    }
+
+    #[test]
+    fn external_per_key_edit_survives_persisting_the_startup_snapshot() {
+        // ISSUE-005: the app holds the settings it loaded at startup; the
+        // user adds `key.41=120` to the file while it runs, then the app
+        // persists on exit. The edit must survive, UI-owned fields must not.
+        with_isolated_appdata(|dir| {
+            let startup = Settings {
+                threshold_ms: 60,
+                ..Default::default()
+            };
+            assert!(save(&startup));
+            let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+            let mut text = std::fs::read_to_string(&ini).unwrap();
+            text = text.replace("iThreshold=60", "iThreshold=999");
+            text.push_str("key.41=120\n");
+            std::fs::write(&ini, text).unwrap();
+
+            let mut app = startup.clone();
+            app.total_presses = 10;
+            app.adopt_file_only_fields(&load());
+            assert!(save(&app));
+
+            let back = load();
+            assert_eq!(back.per_key_ms[0x41], Some(120));
+            assert_eq!(back.threshold_ms, 60, "UI-owned field keeps the app value");
+            assert_eq!(back.total_presses, 10);
+        });
+    }
+
+    #[test]
+    fn removed_per_key_edit_is_not_resurrected() {
+        // Deleting a `key.XX` line in the file while running sticks too.
+        with_isolated_appdata(|dir| {
+            let mut startup = Settings::default();
+            startup.per_key_ms[0x20] = Some(80);
+            assert!(save(&startup));
+            let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+            let text = std::fs::read_to_string(&ini)
+                .unwrap()
+                .replace("key.20=80\n", "");
+            std::fs::write(&ini, text).unwrap();
+
+            let mut app = startup.clone();
+            app.adopt_file_only_fields(&load());
+            assert!(save(&app));
+            assert_eq!(load().per_key_ms[0x20], None);
+        });
+    }
+
+    #[test]
+    fn try_load_distinguishes_missing_from_empty_settings() {
+        with_isolated_appdata(|_| {
+            // Nothing on disk: no state to merge, not "all defaults".
+            assert!(try_load().is_none());
+            assert!(save(&Settings::default()));
+            assert!(try_load().is_some());
         });
     }
 

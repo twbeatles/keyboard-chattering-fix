@@ -1,0 +1,31 @@
+name: e2e
+
+# Manual only: starts the real GUI app and a low-level keyboard hook, which
+# the per-push `windows-ci` job deliberately avoids. Run it before a release
+# (Actions -> e2e -> Run workflow). See scripts/e2e/README.md.
+on:
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build debug binaries
+        run: cargo build -p keyboard-chattering-fix -p kcfix-updater
+      - name: Hook, UI freeze and session-end persistence
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\e2e\hook_session_e2e.ps1
+      - name: Update swap with the freshly built helper
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\e2e\update_swap_e2e.ps1
+      - name: Update swap with the latest published helper
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo ${{ github.repository }} -p kcfix-updater.exe -D "$env:RUNNER_TEMP\old_helper"
+          if ($LASTEXITCODE -ne 0) { throw "could not download the published helper" }
+          powershell -ExecutionPolicy Bypass -File .\scripts\e2e\update_swap_e2e.ps1 -HelperExe "$env:RUNNER_TEMP\old_helper\kcfix-updater.exe"

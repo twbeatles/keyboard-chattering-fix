@@ -1,420 +1,386 @@
-# Project Audit — KeyboardChatteringFix (`kcfix-rs`)
+# Project Audit
 
-- 대상: `C:\twbeatles-repos\keyboard-chattering-fix` (단일 Rust 바이너리 + `kcfix-updater` 헬퍼, Cargo 워크스페이스)
-- 감사일: 2026-10-17, 코드 수정 없이 읽기·테스트 실행·스크래치 프로브만으로 감사
-- 관점: 기능 구현 정확성 · 런타임 안정성 (스타일·취향 제외)
-- 이전 감사(`2026-10-16` 작성 서술이 남은 구 `PROJECT_AUDIT.md`)는 이번 감사로 전면 교체한다.
-  구 리포트의 ISSUE-001~004(중복 실행, Run 경로 인용, 훅 내 파일 I/O, 비원자 저장)는
-  모두 수정된 것을 코드로 재확인했다.
+- 대상: `keyboard-chattering-fix` (`kcfix-rs`) — 메인 바이너리 + `crates/kcfix-updater` 헬퍼 (Cargo 워크스페이스)
+- 기준 시점: 2026-10-17, `main` 브랜치 작업 트리(커밋 `a280cad` + 미커밋 UI 분할 변경분 포함)
+- 방법: 문서 확인 → CodeGraph 탐색 → 소스 직접 열람 → 테스트 실행. **코드는 수정하지 않았다.**
+- 이 문서는 이전 `PROJECT_AUDIT.md`(같은 날 작성, `a280cad`에 커밋됨)를 대체한다. 이전 문서의
+  ISSUE-001(롤백 재시도)·002(GDI 브러시 캐시)·004(저장 실패 알림)는 코드에서 해소된 것을 다시 확인했다.
+
+---
 
 ## 1. Executive Summary
 
-전체 상태: 핵심 필터(`debounce::decide`)와 설정·업데이트 검증 로직은 정확하고
-테스트로 잘 방어되어 있다. 이전 감사의 4개 이슈는 모두 해소되었다.
-감사 과정에서 스위트 RED 1건(업데이터 롤백 가드)을 발견했으나, 진단 강화로
-실제 원인을 특정하고(롤백 rename의 일시적 Access Denied) 재시도 강건화로 해소했다.
-현재 스위트는 79/79 통과다(§10 적용 내역). 잔여 위험은 기동 직후 응답없음 리포트의
-근본 원인 미확정이다. 전체 위험도: **Acceptable**.
+**전체 상태.** 필터 핵심(`Debouncer::decide`), 설정 직렬화, 업데이트 매니페스트 검증(Ed25519 + 핀 고정 URL + 이중 SHA-256)은
+정확하고 테스트도 촘촘하다(Rust 110개, Python 7개 모두 통과). 문제는 주로 **프로세스 수명주기와 업데이트 흐름**에 있다.
+한 번 동작하고 나면 망가지거나(업데이트 헬퍼), 정상 종료가 아닌 경로(OS 종료, UI 정지)에서 상태가 사라지는 유형이다.
 
-가장 중요한 문제 3개:
+**전체 위험도: Medium.** 데이터를 파괴하는 경로는 없다. 다만 자동 업데이트가 두 번째부터 동작하지 않는 문제(확정)와,
+필터가 아무 표시 없이 꺼질 수 있는 구조적 문제(유력)가 있다.
 
-1. [ISSUE-001] 업데이터 롤백 rename 일시 잠금 — 재시도 강건화로 해결됨 (해결 / §10)
-2. [ISSUE-002] `WM_CTLCOLOR*` 핸들러의 GDI 브러시 누수 — 색상별 캐시로 해결됨 (해결 / §10)
-3. [ISSUE-003] GUI 기동 직후 응답없음 리포트의 근본 원인 미확정 — 재진입 가드·느린 틱 로깅으로 완화, 원인 추적은 잔여 (Medium / Likely)
+**가장 중요한 문제**
 
-데이터 손상/유실 가능성: 영구 데이터 파괴 경로는 없다.
-현실적 유실 범위는 (a) 롤백 rename 실패 시의 이전 버전 미복원(ISSUE-001, 재시도 강건화로 해소),
-(b) 저장 실패 침묵 시 설정 미영속(ISSUE-004, `save() -> bool` + 실패 알림으로 해소)이다.
+1. **[ISSUE-001] 자동 업데이트가 첫 번째 이후 영구적으로 실패함** — 헬퍼(`kcfix-updater.exe`)는 교체되지 않는데, 엄격한 버전 스탬프 검사가 새 앱 버전과 헬퍼 버전의 일치를 요구한다. (High / Confirmed)
+2. **[ISSUE-002] 저수준 훅이 UI 스레드에서 실행됨** — UI가 약 1초 이상 멈추면 Windows가 훅을 아무 알림 없이 제거한다. 이후 필터는 꺼진 상태지만 UI는 "보호 중"으로 표시된다. (High / Likely)
+3. **[ISSUE-003] 업데이트 "적용 중" 대화상자를 30초 안에 닫지 않으면** 헬퍼가 대기 시간 초과로 포기한다. 앱은 그 뒤에 종료되므로 필터가 실행되지 않는 상태로 남는다. (Medium / Confirmed)
+4. **[ISSUE-004] Windows 종료·로그오프 시 통계와 보호 상태를 저장하지 않음** (`WM_ENDSESSION` 미처리). (Medium / Confirmed)
+5. **[ISSUE-005] 실행 중에 `settings.ini`를 직접 수정하면** 종료·언어 변경·통계 초기화 시점에 기동 시점의 스냅샷으로 덮어쓰여 사라진다. 키별 임계값(`key.XX`)은 파일로만 설정할 수 있어서 영향이 직접적이다. (Medium / Confirmed)
 
-가장 먼저 수정해야 할 영역: `crates/kcfix-updater` 롤백 경로의 실패 원인 규명
-(테스트 assert에 실제 `result` 출력 + CI 재현 확인) → `src/ui/window.rs`의
-`WM_CTLCOLOR*` 브러시 캐싱 → GUI 응답성 근본 원인 추적.
+**데이터 손상/유실 가능성.** 설정 파일 손상 경로는 없다(tmp → rename 원자 저장, `.bak` 폴백). 현실적인 유실은
+(a) OS 종료 시 세션 통계·보호 토글 미저장(ISSUE-004),
+(b) 실행 중 외부에서 편집한 설정의 덮어쓰기(ISSUE-005)다. 둘 다 사용자 설정과 통계 수준이고, 바이너리나 시스템 손상은 없다.
+
+**가장 먼저 수정할 영역.** `src/updater/staging.rs` + `crates/kcfix-updater`(헬퍼 갱신 전략) →
+`src/app/bootstrap.rs`·`src/input/hook.rs`(훅 전용 스레드 또는 훅 생존 감시) → `src/ui/window.rs`(`WM_ENDSESSION` 처리).
+
+---
 
 ## 2. Project Understanding
 
-### 프로젝트 목적
-
-기계식 키보드 스위치 바운스(채터링·이중 입력)를 Windows 저수준 키보드 훅
-(`WH_KEYBOARD_LL`)으로 가로채 드롭하는 상주형 필터. 관리자 권한·DLL 인젝션
-불필요. Win32 네이티브 UI(Fluent 스타일), 실시간 텔레메트리, 청소 모드,
-Ed25519 서명 기반 자동 업데이트를 제공한다. Windows 전용이 설계 의도다.
+### 목적
+Windows `WH_KEYBOARD_LL` 저수준 키보드 훅으로 기계식 스위치 바운스(채터링)를 가로채 버리는 상주형 필터다.
+관리자 권한이 필요 없고, Win32 네이티브 UI(탭·트레이)를 쓴다. 청소 모드, 실시간 통계, Ed25519 서명 기반 수동 업데이트를 제공한다.
+설계상 Windows 전용이다.
 
 ### 주요 entrypoint
-
-- `src/main.rs::main` — `app::cli::handle_cli()` (`--version`/`-V`/`--check-update`,
-  처리되면 GUI 없이 종료) → `app::bootstrap::run(config::load())`
-- `src/input/hook.rs::hook_proc` — OS가 호출하는 실제 키보드 필터 콜백
-- `src/app/bootstrap.rs::run` — `init_shared` → 단일 인스턴스 뮤텍스 →
-  update handshake ack → 1ms 타이머 → 창 생성 → 훅 설치 → 메시지 펌프
-- `crates/kcfix-updater/src/main.rs::main` — 교체 전용 헬퍼 프로세스
-  (대기 → 해시 재검증 → 교체 → 재실행 검증 → 실패 시 롤백)
+| Entrypoint | 위치 | 역할 |
+|---|---|---|
+| `main` | `src/main.rs:28` | `app::cli::handle_cli()`(`--version`/`-V`/`--check-update`) → `app::bootstrap::run(config::load())` |
+| `bootstrap::run` | `src/app/bootstrap.rs:78` | `init_shared` → 단일 인스턴스 뮤텍스 → 업데이트 핸드셰이크 ack → `timeBeginPeriod(1)` → `create_window` → `install_hook` → 메시지 루프 |
+| `hook_proc` | `src/input/hook.rs:17` | OS가 키 이벤트마다 호출하는 필터 콜백(**설치한 스레드 = UI 스레드에서 실행**) |
+| `wndproc` | `src/ui/window.rs:316` | 메시지 라우팅(타이머·명령·트레이·종료) |
+| 헬퍼 `main` | `crates/kcfix-updater/src/main.rs` | 대기 → 해시 재검증 → 교체 → 재실행·준비 확인 → 실패 시 롤백·이전 버전 재실행 |
 
 ### 핵심 모듈
-
 | 모듈 | 역할 |
 |---|---|
-| `debounce.rs` | `Debouncer::decide` 상태 머신 (임계값·홀드·통계·청소 모드·로그 버퍼) |
-| `app/` | `bootstrap`(기동 순서), `cli`, `instance`(단일 인스턴스 뮤텍스), `state`(`SHARED`/`START`/`HOOK`) |
-| `input/` | `hook`(락 + `decide`만), `sound`(캐시된 WAV 재생, 폴백 비프) |
-| `config/` | `model`(`Settings`), `storage`(원자적 INI 저장·`.bak` 폴백), `autostart`(Run 인용 경로), `sound`(`ValidatedSound`) |
-| `ui/` | `window`(메시지 디스패치), `stats`(스냅샷→렌더→diff), `settings_form`(`on_save`), `tray`, `update`(워커 스레드), `paint`(테마 캐시), `text` |
-| `updater/` + `crates/kcfix-updater/` | Ed25519 매니페스트 검증, 핀 고정 URL, 이중 SHA-256 검증, 헬퍼 교체/롤백 |
+| `debounce.rs` | `Debouncer::decide` 상태 머신(키별 임계값, release/press 기준, 오토리핏 보존, 청소 모드, 로그 링버퍼) |
+| `app/state.rs` | `SHARED: OnceLock<Mutex<Shared>>`(훅·UI가 공유), `START`, `HOOK` |
+| `config/` | `Settings` 모델, INI 원자 저장(`storage`), Run 레지스트리(`autostart`), 사운드 경로 사전 검증(`sound`) |
+| `ui/` | `window`(디스패치), `settings_form`(저장·적용), `stats`/`history`(스냅샷 → 렌더 → diff), `commands`, `tray`, `update`(워커 스레드) |
+| `updater/` | 매니페스트 서명·형식·만료 검증, 다운로드·해시, 헬퍼 해석·스테이징·실행 |
 
-### 데이터 저장 방식
-
-- `%APPDATA%\KeyboardChatteringFix\settings.ini` (구 `KcfixRs` 경로 읽기 호환,
-  쓰기는 신경로에만). 임시파일 기록 → 기존 파일 `.bak` 복사 → rename 원자 교체.
-  시작 시 본 파일이 비어 있으면 `.bak` 폴백.
-- 누적 카운터(`iTotalPresses`/`iBlockedPresses`)만 영속화. 키별 통계·로그 버퍼는
-  메모리 전용(세션 종료 시 소멸).
-- 레지스트리 `HKCU\...\Run\KeyboardChatteringFix` (자동 실행, 인용된 경로).
-- 업데이트 스테이징: `%TEMP%` 고유 경로 (프로세스ID·시간·시퀀스).
+### 데이터 저장
+- `%APPDATA%\KeyboardChatteringFix\settings.ini`(레거시 `KcfixRs` 폴백). 저장 순서는 `settings.ini.tmp` 기록 → 기존 파일을 `.bak`으로 복사 → rename.
+- 저장 시점은 다음 넷뿐이다: Save 버튼(`on_save`), 언어 변경, 통계 초기화, `WM_DESTROY`(`persist_live`).
+- `HKCU\...\Run\KeyboardChatteringFix`(따옴표로 감싼 경로).
+- DB와 서버 상태는 없다.
 
 ### 외부 의존성
-
-- `windows 0.62` (Win32 API), `ureq 3` (HTTPS, 접속 30초/수신 60초/전체 90초,
-  재시도 없음 — 수동 재확인 흐름이므로 허용 가능),
-  `ed25519-dalek 3` + `base64` + `sha2`/`hex` (업데이트 검증).
-- 네트워크: GitHub Releases의 `update.json`·EXE 수신. 첫 릴리스 전에는 404 안내가 정상.
+`windows 0.62`, `ureq 3`(HTTP, timeout 30/60/90s), `ed25519-dalek 3`, `sha2`, `serde_json`, `tracing`. 헬퍼는 `clap`을 쓴다.
+GitHub Releases(`releases/latest/download/update.json`)에 의존한다.
 
 ### 핵심 실행 흐름
+- **키 입력:** `OS 키 이벤트 → hook_proc(UI 스레드) → SHARED.lock → Debouncer::decide → LRESULT(1)(차단) / CallNextHookEx(통과) → (차단 + 사운드) PlaySoundW 비동기`
+- **설정 저장:** `Save/Enter → on_save → 폼 파싱·클램프 → set_autostart → config::load()(디스크 재읽기) → resolve_sound_file(락 밖) → SHARED 갱신 → config::save → SAVED 갱신 → 상태 표시/실패 대화상자`
+- **통계 표시:** `WM_TIMER(500ms) → update_stats: 스냅샷(짧은 락) → render_stats → diff_stats → 바뀐 컨트롤만 SetWindowTextW`
+- **업데이트:** `메뉴/트레이 → spawn_update_check(워커) → check_for_update(서명·URL·만료·버전) → Yes → prepare_update(resolve_helper → %TEMP% 스테이징 → 다운로드·해시) → launch_helper → "적용 중" MessageBox → WM_UPDATE_EXIT → DestroyWindow → 헬퍼: pid 대기(30s) → 해시 재검증 → rename 교체 → 재실행·준비 확인(60s) → 백업 삭제 / 실패 시 롤백`
+- **종료:** `WM_CLOSE(close_to_tray면 숨김) / MENU_EXIT / WM_UPDATE_EXIT → WM_DESTROY → persist_live → 트레이 제거 → UnhookWindowsHookEx → PostQuitMessage`
 
-키 입력 흐름:
-
-`WH_KEYBOARD_LL → hook_proc → SHARED 락 → (청소 모드 | 합성입력 제외 | decide)`
-`→ 차단(LRESULT 1 + 캐시 사운드) / 통과(CallNextHookEx)`
-
-설정 저장 흐름:
-
-`대화상자 → on_save(클램프·폴백·1회 검증) → SHARED 즉시 적용 + ValidatedSound 캐시`
-`→ config::save(원자 교체) → WM_DESTROY에서 카운터 합산 후 최종 저장 → Unhook → PostQuit`
-
-업데이트 흐름:
-
-`트레이/--check-update → check_for_update → 서명·URL·버전·크기·만료 검증`
-`→ prepare_update(헬퍼 resolve → 스테이징 → 다운로드 SHA-256 검증)`
-`→ launch_helper → WM_UPDATE_EXIT → 헬퍼가 종료 대기 → 해시 재검증 → 교체 →`
-`재실행 readiness handshake(60초) → 실패 시 롤백·이전 버전 실행`
+---
 
 ## 3. Audit Coverage & Limitations
 
-### 실제 확인한 주요 모듈
+### 직접 확인한 모듈(전체 열람)
+`main.rs`, `app/{bootstrap,cli,instance,state}.rs`, `input/{hook,sound}.rs`, `debounce.rs`(본체),
+`config/{model,storage,sound,autostart}.rs`, `config.rs`, `ui/{window,settings_form,commands,state,update,dialog}.rs`,
+`ui/{stats,history,tray}.rs`(핵심 함수), `ui/text.rs`(일부), `i18n/language.rs`,
+`updater/{http,staging,model,version}.rs`, `updater/manifest.rs`(검증 본체),
+`crates/kcfix-updater/{src/lib.rs,src/main.rs,build.rs,Cargo.toml}`,
+`.github/workflows/*`·`scripts/build_release.ps1`·`docs/UPDATE.md`(헬퍼 배포 관련 부분만 grep).
 
-`main.rs`, `app/{bootstrap,cli,instance,state}`, `input/{hook,sound}`,
-`config/{model,storage,autostart,sound}`, `debounce.rs` 전문,
-`ui/{window(디스트로이·페인트·CTLCOLOR부),stats,settings_form,state,update}`,
-`updater/{model,manifest,http,staging,version,error}`,
-`crates/kcfix-updater/{lib,main}`, `tests/{version_sync,exe_smoke}`,
-`README.md`, `CLAUDE.md`, `GEMINI.md`, `docs/UPDATE.md`,
-`.github/workflows/windows-ci.yml`, `.githooks/pre-push` 전문.
+### CodeGraph로 분석한 호출 관계
+- `update_stats` ← `wndproc(WM_TIMER)`, `commands::set_protection/set_cleaning/run`, `settings_form::on_save`(7개 caller)
+- `history::refresh` ← `apply_visibility`, `WM_TIMER`, `commands::run`, `on_view_changed`/`on_search_changed`
+- `install_hook` ← `bootstrap::run`(유일), `hook_proc` ← `install_hook`(유일)
+- `resolve_helper` ← `prepare_update` ← `ui::update::spawn_update_check`, `launch_helper` ← `spawn_update_check`/`apply_update`(dead code, `#[allow(dead_code)]`)
+- `persist_live` ← `window::on_destroy`, `commands::run(MENU_RESET_STATS)`, `on_language_changed`(grep으로 보완)
+- `config::save` ← `persist_live`, `on_save`
+- CodeGraph는 `explore` 2회와 프롬프트 훅 컨텍스트로 사용했다. 정확한 caller 목록이 필요한 곳(`persist_live`, `WM_ENDSESSION` 부재, `exe.old`, `timeout_secs`)은 grep으로 보완했다.
 
-### CodeGraph로 분석한 호출 관계 (4회 `codegraph_explore` 실행)
+### 실행한 테스트
+| 명령 | 결과 |
+|---|---|
+| `cargo test --workspace` | **110 passed, 0 failed**(메인 90 + 헬퍼 lib 2 + 헬퍼 통합 10 + exe_smoke 2 + version_sync 6) |
+| `python -m pytest scripts/ -q` | **7 passed** |
+| `dist/*.exe` VersionInfo 조회 | 앱·헬퍼 모두 `ProductVersion 0.2.0.0`(ISSUE-001 근거) |
 
-1. 진입점·훅·디바운스 흐름: `run` ← `main`, `hook_proc` → `decide`,
-   `acknowledge_update_handshake` 위치 확인.
-2. 설정 영속화: `save`/`load`/`backup_path`, `ValidatedSound::resolve_sound_file`,
-   `quote_run_path`, 호출자 각 1~3곳.
-3. UI·업데이트: `update_stats`(호출 6곳) → `render_stats`/`diff_stats`,
-   `wndproc` → `show_tray_menu` → `spawn_update_check`,
-   `StagedUpdate`/`UpdateManifest` 영향 범위.
-4. 상태·종료·버전: `init_shared` → `SHARED`, `handle_cli`(호출 1곳),
-   `check_for_update` → `parse_and_verify_manifest` → `is_newer`,
-   `on_save` → `SHARED`/`SAVED`/`save`, `WM_DESTROY` 카운터 영속 경로.
+실행 시점에 앱이 떠 있지 않아 `second_acquisition_fails_while_first_held`도 통과했다.
 
-CodeGraph 인덱스가 최신 파일을 반영하므로 `Read` 재확인 없이 인용 가능한
-수준이었고, 잘린 구간(`storage::parse` 등)은 직접 열람으로 보완했다.
+### 확인하지 못한 것
+- GUI 실제 구동, 실제 키 입력 기반 훅 동작(CLAUDE.md 규칙상 GUI 테스트는 하지 않았다).
+- 실제 GitHub Release를 대상으로 한 업데이트 E2E(0.2.0 → 0.3.0 → 0.4.0 연속 업데이트), 네트워크 실패 재현.
+- `LowLevelHooksTimeout` 초과 시 훅이 제거되는 현상의 실측(ISSUE-002는 Win32 문서상 동작과 코드 구조에 근거한 Likely 판정).
+- `cargo clippy`/`cargo fmt --check`는 감사 범위상 실행하지 않았다.
+- `ui/layout.rs`, `ui/widgets.rs`, `ui/paint.rs`, `ui/menu.rs`, `ui/keys.rs`는 기능 위험이 낮다고 보고 테스트 존재 여부만 확인했다(정밀 열람 안 함).
 
-### 실행한 테스트 (실측, 주장 아님)
-
-- `cargo test --workspace`: updater 9/10 통과 + 1 실패로 중단.
-  실패: `readiness_failure_rolls_back_and_success_releases_backup`
-  (멀티스레드·`--test-threads=1`·바이너리 직접 실행 모두 실패, 총 5회 재현).
-- `cargo test -p keyboard-chattering-fix`: 단위 48 + `exe_smoke` 2 +
-  `version_sync` 5 = 55개 전부 통과.
-- 전체 합산(감사 시점): 65개 중 64개 통과, 1개 실패. (`README` 영문 "65개"와 일치,
-  국문 "50개"는 만료 — §6 참조.) 개선 적용 후에는 79개 전부 통과(§10).
-- 스크래치 프로브(`/tmp` 격리가 아닌 샌드박스 허용 임시 경로에 배치, 레포 미변경):
-  `update_executable_with`의 exit/timeout 모드는 정상 롤백(이전 버전 복원·`.bak` 제거),
-  ack 모드에서 `RelaunchFailed("Access denied (os error 5)")` 관찰.
-  자식 바이너리 단독 실행으로 `--exact readiness_exit_child` 필터와
-  환경변수 설정 시 exit 17 종료를 직접 확인.
-- `%TEMP%` 잔해 포렌식: 실패 실행마다 `kcfix_handshake_<pid>_exit` 디렉터리가 남고,
-  내부는 교체된 바이너리(`app.exe` 1055744B) + 미정리 백업(`app.exe.old` 16B),
-  고아 프로세스는 없음.
-
-### 확인하지 못한 환경/외부 서비스
-
-- 실제 GUI 기동·장시간 타이핑(디스플레이·GDI 실측 불가 — GUI 테스트 금지 규칙 준수).
-- 실제 GitHub Releases 게시 후 `latest/download` E2E, 네트워크 실패 주입.
-- Win10에서의 DWM 신형 속성 무시 동작, 저사양 PC의 훅 지연.
-- CI(`windows-latest`)에서의 실패 재현 여부.
-
-### 분석상의 한계
-
-- 정적 분석 + 단위 테스트 + 프로브 기반이므로 타이밍·스케줄러·백신 의존 문제는
-  코드 근거 + 환경 증거로만 판단하고 신뢰도에 반영했다.
-- ISSUE-001의 제품/환경 귀인은 미확정으로 명시한다 (반증 시도 내역은 §4에 기록).
+---
 
 ## 4. High-Risk Issues
 
-### [ISSUE-001] 업데이터 롤백 rename 일시 잠금 — 해결됨 (§10)
+### [ISSUE-001] 인앱 업데이트가 첫 번째 이후 영구적으로 실패함(헬퍼 미갱신 + 엄격한 버전 스탬프 검사)
 
-- **위치:** `crates/kcfix-updater/tests/updater_tests.rs:125`
-  (`readiness_failure_rolls_back_and_success_releases_backup`),
-  대상 코드 `crates/kcfix-updater/src/lib.rs::update_executable_with` (150행~) 및
-  `launch_verified` (260행~)
+- **위치:** `src/updater/staging.rs` `resolve_helper`(120–155), `helper_stamp_compatible`(99–118); `crates/kcfix-updater/src/lib.rs` `update_executable_with`(182–293); `crates/kcfix-updater/build.rs`(17–36)
 - **우선순위:** High
-- **신뢰도:** Confirmed (개선된 assert가 실제 값을 노출했고, 재시도 후 테스트 통과로 검증)
-- **해결:** assert에 `mode`·`result`를 출력하도록 강화했더니 실제 값이
-  `Err(RollbackFailed("app exited before readiness: exit code: 17; ... (os error 5)"))`로
-  확인됐다. 판정 경로는 정상(자식이 exit 17로 종료됨을 감지)이나 롤백 rename이
-  일시적 Access Denied로 실패한 것이다. `%TEMP%` 실행 파일에 대한 백신·스캐너의
-  일시 잠금과의 경합이 원인이며, `rollback_swap`에 4회·150ms 재시도를 넣어 해소했다.
-  동일 테스트가 1.50초(재시도 동작) 만에 통과하고 전체 79개가 green이다.
-  원 감사에서 과거형으로 서술된 "스위트 RED"는 이 수정으로 해소된 상태다.
-- **문제:** `cargo test --workspace`가 항상 실패한다. 실패 지점은 exit/timeout 모드에서
-  `Err(HelperError::RelaunchFailed(_))`를 기대하는 assert(160행)다.
-  실패 실행의 `%TEMP%` 잔해는 교체는 끝났으나 롤백도 백업 정리도 안 된 상태다.
-- **발생 조건:** `cargo test --workspace` (CI `windows-ci.yml`의 `Test` 단계와 동일 명령),
-  `--test-threads=1`, 테스트 바이너리 직접 실행에서도 100% 재현 (이 환경 기준 5/5).
-- **영향:** 릴리스 게이트가 깨진다 (CI Test 단계 실패 시 릴리스·스모크 단계로 진행 불가).
-  가드가 지키는 경로가 업데이트 실패 시 롤백이라는 안전 핵심 경로라,
-  가드 실패를 방치하면 실제 롤백 회귀를 감지할 수 없다.
-- **근거:** 실행 출력 5회 모두 동일 assert 실패. 잔해 `kcfix_handshake_<pid>_exit` 5건 모두
-  `app.exe`=교체 바이너리 + `app.exe.old`=16B 백업 + 고아 프로세스 없음.
-  이 상태와 양립하는 결과는 `Ok` + 백업 삭제 침묵 실패, 또는
-  `RollbackFailed`(둘 다 실패)뿐이다. 다른 모든 실패 분기는 `RelaunchFailed`로 수렴한다.
-- **반증 확인:** 다음을 시도했고 모두 반증에 실패했다.
-  - 병렬 실행 탓 가설 → `--test-threads=1`로도 실패.
-  - cargo 환경 탓 가설 → 바이너리 직접 실행으로도 실패.
-  - 자식 필터 오동작 가설 → `--exact readiness_exit_child`는 정확히 1건만 실행하고,
-    `KCFIX_UPDATE_READY_FILE` 설정 시 exit 17로 즉시 종료함을 직접 확인.
-  - 제품 로직 전반 파손 가설 → 스크래치 프로브에서 동일 API의 exit/timeout 모드는
-    정상 롤백(이전 버전 복원·`.old` 제거). 즉 교체→재실행→롤백 기제는 격리 환경에서 동작한다.
-  - 유력 잔여 가설: 이 환경의 `%TEMP%` 내 프로세스 생성·파일 조작에 대한 간섭
-    (프로브의 ack 모드에서 `RelaunchFailed("Access denied (os error 5)")` 관찰,
-    프로브의 `%TEMP%` 직접 생성도 같은 거부 발생)으로 400ms readiness 창과
-    롤백 파일 조작이 깨지는 것. CI(`windows-latest`) 재현 확인이 필요하다.
-- **호출/영향 범위:** CodeGraph상 `update_executable_with` 호출자는 헬퍼 `main.rs` 1곳.
-  영향은 업데이트 파이프라인 전체와 릴리스 게이트.
-- **권장 수정 방향:** 코드를 고치기 전에 assert에 `"{result:?}"`를 포함시켜 실제 값을
-  노출하고, CI 로그로 환경 귀인을 확정한다. `remove_file`/`rename`의 `let _` 침묵
-  3곳(롤백·백업 정리)에는 `warn!` 로그를 남긴다. 환경 문제로 확정되면 readiness
-  타임아웃(400ms) 상향 또는 재시도를 테스트 한정으로 완화한다.
-- **필요한 회귀 테스트:** 기존 테스트 자체가 회귀 테스트다. 추가로는
-  "롤백 후 `.old`가 남지 않음"을 모든 모드에서 assert(현재는 공통 assert에 있음)하고,
-  실패 시 실제 `result`를 출력하도록 강화한다.
+- **신뢰도:** Confirmed(코드 흐름 + 배포 바이너리 스탬프 확인)
+- **문제:** 업데이트는 `--current`(메인 exe)만 교체하고, 앱 옆의 `kcfix-updater.exe`는 손대지 않는다. 그런데 `resolve_helper`는 앱 옆 헬퍼를 "authoritative"로 취급하면서, 헬퍼의 ProductVersion이 **현재 실행 중인 앱의 `VERSION`**(또는 `VERSION.0`)과 같지 않으면 오류로 중단한다. 헬퍼 스탬프는 빌드 시 워크스페이스 버전(`0.2.0.0`)으로 고정된다.
+- **발생 조건:** 0.2.0 → 0.3.0 업데이트는 성공한다(0.2.0 앱 + 0.2.0 헬퍼). 이후 0.3.0 앱에서 다음 업데이트를 시도하면 옆의 헬퍼는 여전히 `0.2.0.0`이므로 `"kcfix-updater.exe 헬퍼의 버전이 앱과 일치하지 않습니다"` 오류가 난다.
+- **영향:** 자동 업데이트 기능이 1회용이 된다. 사용자가 zip을 받아 수동으로 헬퍼를 교체하기 전까지 모든 후속 업데이트가 실패한다.
+- **근거:**
+  - `launch_helper`가 넘기는 인자는 `--current <app exe>`, `--replacement <staged app>`뿐이다(staging.rs:203–215).
+  - 헬퍼는 `current`만 rename/교체한다(lib.rs:226–254). 헬퍼 자신을 갱신하는 코드는 없다.
+  - `helper_stamp_compatible(Some("0.2.0.0"))`는 `VERSION = "0.3.0"`일 때 false를 반환한다(staging.rs:109–114, 테스트 `helper_stamp_compatible_accepts_legacy_and_matching`가 `"0.0.0"` 거부를 확인).
+  - `dist/kcfix-updater.exe` ProductVersion = `0.2.0.0`(실측).
+- **반증 확인:**
+  - 매니페스트나 릴리스가 헬퍼를 함께 배포하는가? `release.yml`은 `kcfix-updater.exe`와 zip을 릴리스 자산으로 올린다. 하지만 앱 업데이트 흐름은 `update.json`의 `artifact_url`(메인 exe 하나, `is_valid_artifact_url`로 파일명 고정)만 받는다. 헬퍼 자산을 받는 경로는 없다.
+  - 폴백이 있는가? 앱 옆에 헬퍼가 **존재**하면 dev-tree 폴백으로 넘어가지 않고 즉시 Err를 반환한다(staging.rs:125–137).
+  - 스탬프가 없는 경우(None)만 legacy로 허용하는데, 현재 빌드는 항상 스탬프가 있다.
+  - 결론: 보호 장치가 없다.
+- **호출/영향 범위:** `ui::update::spawn_update_check` → `prepare_update` → `resolve_helper`. CLI `--check-update`는 확인만 하므로 영향이 없다. 헬퍼의 롤백·재실행 로직은 정상이다.
+- **권장 수정 방향(택1 또는 조합):**
+  1. 헬퍼 호환성을 "앱 버전과 동일"이 아니라 **프로토콜 버전**(예: 헬퍼 CLI 계약 버전 상수)으로 판정한다. 또는 "헬퍼 ≤ 앱이면 허용"처럼 완화한다.
+  2. 새 앱 exe가 첫 실행 시(핸드셰이크 후) 자기 리소스에 내장한 헬퍼를 꺼내 옆 헬퍼를 갱신한다.
+  3. 매니페스트에 헬퍼 해시·URL을 서명 대상으로 포함하고 함께 교체한다.
+- **필요한 회귀 테스트:** `helper_stamp_compatible`에 "이전 릴리스 헬퍼 스탬프(예: `0.2.0.0`)를 다음 마이너 앱 버전에서 수락" 케이스를 추가한다. `resolve_helper`에는 스탬프된 구버전 헬퍼가 옆에 있을 때 Ok를 반환하는 통합 테스트를 둔다(테스트 빌드에서 `VERSION`을 주입할 수 있게 함수를 순수화). 릴리스 체크리스트에는 "N → N+1 → N+2 연속 업데이트 E2E"를 넣는다.
 
-### [ISSUE-002] `WM_CTLCOLOR*` 핸들러의 GDI 브러시 누수
+---
 
-- **위치:** `src/ui/window.rs` `WM_CTLCOLORSTATIC`(817~899행, 컨트롤별 10여 분기),
-  `WM_CTLCOLORBTN`(901~905행) — 모든 분기에서 `CreateSolidBrush(...)` 반환
+### [ISSUE-002] 저수준 키보드 훅이 UI 스레드에서 실행됨 — UI가 멈추면 훅이 아무 알림 없이 제거되고 UI는 계속 "보호 중"으로 표시함
+
+- **위치:** `src/app/bootstrap.rs` `run`(113–126), `src/input/hook.rs` `install_hook`/`hook_proc`, UI 스레드에서 동기 작업을 하는 곳들(`settings_form::on_save`, `persist_live`, `commands::shell_open` 등)
+- **우선순위:** High
+- **신뢰도:** Likely(코드 구조는 확정, 훅 제거는 Windows 문서상 동작이며 실측은 못 함)
+- **문제:** `WH_KEYBOARD_LL` 콜백은 **훅을 설치한 스레드의 메시지 루프**에서 호출된다. 이 앱은 메인 UI 스레드에서 훅을 설치하고, 같은 스레드에서 창 메시지를 처리한다. Windows 7 이후로는 콜백이 `LowLevelHooksTimeout`(Win10 1709+ 최대 1000ms) 안에 돌아오지 않으면 훅을 **알림 없이 제거**한다(MS 문서: "There is no way for the application to know whether the hook is removed").
+- **발생 조건:** UI 스레드가 키 입력 도중 약 1초 이상 블록되는 경우다. 후보는 다음과 같다.
+  - `ShellExecuteW`(설정 폴더 열기, 홈페이지 열기 — 브라우저나 셸 콜드 스타트 시 수 초 걸릴 수 있음)
+  - `on_save` 안의 레지스트리·디스크 I/O
+  - 사운드 경로가 응답 없는 네트워크 경로일 때의 `resolve_sound_file`(`is_file()`)
+  - CLAUDE.md에 기록된 "GUI 기동 직후 응답없음" 현상 자체
+- **영향:**
+  1. UI가 멈춘 동안 **시스템 전체 키 입력이 지연**된다(모든 키 이벤트가 이 스레드를 거침).
+  2. 타임아웃 뒤 훅이 제거되면 채터링 필터가 꺼진다. 그런데 `HOOK` 핸들과 `enabled` 플래그는 그대로라서 트레이와 상태 알약은 "보호 중"을 계속 표시한다. 재시작 전까지 복구되지 않는다.
+- **근거:**
+  - `install_hook`은 `bootstrap::run`(메인 스레드)에서 호출되고, 그 스레드가 곧바로 `GetMessageW` 루프를 돈다(bootstrap.rs:113–126).
+  - 훅 생존을 확인하거나 재설치하는 코드가 없다(`HOOK`은 `WM_DESTROY`에서만 읽음, window.rs:309).
+  - `hook.rs` 모듈 주석은 "Runs on the system hook thread"라고 쓰고 있어 실제 모델과 다르다.
+- **반증 확인:**
+  - 모달 루프(`MessageBoxW`, `TrackPopupMenu`, `GetOpenFileNameW`)는 메시지를 펌프하므로 훅이 계속 서비스된다. 이 경로들은 문제가 아니다.
+  - `update_stats`/`history::refresh`는 락을 짧게 잡고 Win32 호출 전에 놓는다. 같은 스레드라 훅과 락 경합은 없다.
+  - 네트워크 업데이트는 워커 스레드에서 돈다.
+  - 그래도 펌프하지 않는 동기 호출(셸 실행, I/O)과 원인 미상의 응답없음은 남는다. 정상 경로에서는 대부분 짧기 때문에 Likely로 둔다.
+- **호출/영향 범위:** `hook_proc`(모든 키 입력), `window::wndproc`의 모든 동기 핸들러, `stats::update_stats`의 상태 표시(잘못된 "보호 중").
+- **권장 수정 방향:** 훅 설치와 메시지 펌프를 **전용 훅 스레드**로 분리한다. 그 스레드는 `GetMessageW` 루프만 돌고 UI 작업은 하지 않는다. `SHARED` 락은 이미 스레드 간 공유를 전제로 설계되어 있다. 보조 조치로 `ShellExecuteW`를 워커 스레드로 옮기고, 사운드 경로 검증을 비동기로 바꾼다.
+- **필요한 회귀 테스트:** (단위) 훅 스레드 생성 함수가 스레드 ID를 반환하고 UI 스레드 ID와 다른지 확인. (수동/플랫폼) 디버그 빌드에 UI 스레드 2초 sleep 메뉴를 숨겨 두고 실행해, 이후에도 채터링 차단 카운터가 증가하는지 확인한다(실제 키보드 사용, `APPDATA` 임시 폴더).
+
+---
+
+### [ISSUE-003] 업데이트 "적용 중" 대화상자가 헬퍼의 30초 대기 시간을 소모함 — 늦게 닫으면 업데이트는 실패하고 앱은 꺼진 채로 남음
+
+- **위치:** `src/ui/update.rs` `spawn_update_check`(284–310); `src/updater/staging.rs` `launch_helper`(201–226); `crates/kcfix-updater/src/main.rs`(`timeout_secs` 기본 30), `lib.rs` `should_relaunch_previous`
 - **우선순위:** Medium
-- **신뢰도:** Confirmed (누수 자체는 코드로 확정, 고갈 소요 시간은 추산)
-- **문제:** 정적·버튼 컨트롤을 그릴 때마다 새 GDI 브러시를 만들어 반환하고 절대
-  삭제하지 않는다. 시스템은 이 브러시를 삭제해 주지 않으므로(문서화된 규약)
-  프로세스 GDI 핸들이 단조 증가한다. `WM_PAINT` 경로(`paint.rs`, 723~725행 등)와
-  `draw_rounded_card`(230~231행)는 `DeleteObject`로 정리하므로 대조적으로 정상이다.
-- **발생 조건:** 타이핑 중 500ms 타이머가 변경된 스탯 컨트롤에 `SetWindowTextW`를
-  호출할 때마다 해당 컨트롤이 다시 그려지며 브러시 1개 누수. 총 타건수처럼
-  매 틱 바뀌는 컨트롤이 있으면 초당 2개 내외로 증가한다.
-  프로세스당 GDI 상한(약 10,000)에 도달하면 그리기 실패·UI 깨짐이 발생한다.
-- **영향:** 장시간 상주(설계상 24시간 상주 앱) 중 UI 렌더 실패. 필터 훅 자체는
-  별도 경로라 입력 보호는 유지될 가능성이 크나, 사용자가 상태를 볼 수 없게 된다.
-- **근거:** 10개 이상 분기 모두 `LRESULT(CreateSolidBrush(...))` 패턴이며 파일 전체에
-  대응 `DeleteObject`가 CTLCOLOR 반환값에는 없다. 폰트는 `OnceLock` 캐시(`paint.rs`
-  159행)로 이미 올바르게 처리되어 있어 수정 패턴의 선례가 있다.
-- **반증 확인:** 시스템이 대신 삭제해 준다는 반증은 성립하지 않는다
-  (CTLCOLOR 규약상 소유권은 앱에 있음). diff 갱신이 빈도를 낮출 뿐 누수를 막지 못한다.
-- **호출/영향 범위:** `wndproc` 내 페인트 경로 전체. 수정 영향은 `window.rs` 국소.
-- **권장 수정 방향:** 2~3개의 테마별 브러시를 `OnceLock`/정적 캐시에 만들어 재사용
-  (테마 변경 시 재생성). `WM_SETTINGCHANGE`에서 캐시 무효화.
-- **필요한 회귀 테스트:** HWND 없이 `ThemeColors` 조합별로 브러시 팩토리가 동일 입력에
-  동일 핸들을 반환하는지 단위 테스트. E2E는 장시간 실행 시 GDI 카운트(작업 관리자)
-  증가 없음을 수동 확인.
+- **신뢰도:** Confirmed(코드 흐름)
+- **문제:** `launch_helper`로 헬퍼를 **먼저 실행**한 뒤 `msg_box(update_applying, MB_OK)`로 사용자 확인을 기다리고, 확인한 다음에야 `WM_UPDATE_EXIT`를 보낸다. 헬퍼는 `--timeout-secs`를 받지 않으므로 기본 30초만 앱 종료를 기다린다. 대기 시간을 넘기면 `WaitTimeout`이 되고, 이 경우 `should_relaunch_previous`가 false라서 이전 버전도 다시 띄우지 않는다.
+- **발생 조건:** 사용자가 "업데이트를 적용합니다" 대화상자를 30초 넘게 두는 경우다. 예를 들어 트레이에서 업데이트를 시작해 소유 창이 숨겨진 상태에서 대화상자가 다른 창 뒤에 깔린 경우.
+- **영향:** 헬퍼가 "상위 프로세스 대기 시간 초과" 오류를 띄우고 스테이징 파일을 삭제한다. 그 뒤 사용자가 OK를 누르면 앱이 종료된다. 결과적으로 **업데이트는 적용되지 않았고 필터도 실행되지 않는** 상태가 된다. 데이터 손상은 없고, 수동으로 다시 실행하면 복구된다.
+- **근거:** update.rs:286(`launch_helper`) → 302–309(`msg_box` 후 `PostMessageW(WM_UPDATE_EXIT)`). staging.rs:204–215에 `--timeout-secs` 인자가 없다. 헬퍼 main.rs:95–96 `default_value_t = 30`, lib.rs:102–104.
+- **반증 확인:** 헬퍼의 대기는 프로세스 종료를 기다리는 것이라 대화상자와 무관하게 시계가 흐른다. 대화상자가 자동으로 닫히는 장치는 없다(MB_OK 모달). 보호 장치가 없다.
+- **호출/영향 범위:** 수동 업데이트 흐름 전체(메뉴 바·트레이 공용 `MENU_UPDATE`).
+- **권장 수정 방향:** "적용 중" 안내를 헬퍼 실행 **이전**의 Yes/No 확인에 합치고, 헬퍼 실행 직후 바로 `WM_UPDATE_EXIT`를 보낸다. 또는 `--timeout-secs`를 충분히 크게 넘기고, 시간 초과 시에도 앱이 이미 종료됐다면 이전 버전을 재실행한다(`WaitTimeout` 뒤 pid 생존 재확인).
+- **필요한 회귀 테스트:** (헬퍼 통합) 죽지 않는 더미 pid로 `timeout=1s`를 주면 `WaitTimeout`이 나는지 확인(기존). 여기에 "대기 초과 후 pid가 사라졌으면 이전 버전 재실행" 같은 새 정책을 단위 테스트한다. (앱) `launch_helper`가 받는 인자 목록 스냅샷 테스트로 `--timeout-secs` 포함 여부를 고정한다.
 
-### [ISSUE-003] GUI 기동 직후 응답없음 리포트의 근본 원인 미확정
+---
 
-- **위치:** `src/ui/stats.rs::update_stats` (175~241행) 주변 타이머 경로,
-  `CLAUDE.md`·`GEMINI.md` "알려진 주의점/열린 위험"으로 기록됨
+### [ISSUE-004] Windows 종료·로그오프 시 통계와 보호 상태가 저장되지 않음
+
+- **위치:** `src/ui/window.rs` `wndproc`(316–411), `on_destroy`(305–314); `src/ui/settings_form.rs` `persist_live`(164–178)
 - **우선순위:** Medium
-- **신뢰도:** Likely (리포트 이력 + 원인 미확정, 재현 없음)
-- **문제:** GUI 기동 직후 응답없음 리포트 이력이 있고 원인 확정이 안 되었다.
-  타이머 `SetWindowTextW` 경로가 의심되었다.
-- **발생 조건:** 기동 직후 (정확한 트리거 불명).
-- **영향:** 핵심 기능(창·설정 변경)이 먹통으로 보인다. 훅은 별도 스레드라
-  필터 자체는 동작할 수 있으나 사용자는 확인할 방법이 없다.
-- **근거:** 프로젝트 문서가 스스로 미확정으로 표기. 현재 코드는 노출 면적을
-  줄였다: 락을 쥔 채 Win32 호출 금지(스냅샷 후 가드 드롭, 176~191행),
-  변경분만 갱신(diff, 194~207행), 테마 레지스트리 읽기는 캐시(`paint.rs`).
-- **반증 확인:** 락-컨텐션 가설은 현재 구조에서 성립하지 않는다
-  (`update_stats`는 짧은 락 2개만 사용, 훅 스레드와 중첩 Win32 호출 없음).
-  잔여 의심 경로: `GetDlgItem` + `SetWindowTextW` 폭주(첫 프레임 전체 갱신),
-  `apply_window_chrome`의 DWM 호출, 폰트 생성 — 모두 UI 스레드 내부라
-  응답없음과의 인과가 추가로 필요하다.
-- **호출/영향 범위:** `WM_TIMER`(500ms) → `update_stats` → `set_text` × 최대 7.
-- **권장 수정 방향:** 응답없음 재현 시 스택 덤프 확보가 1순위. 코드적으로는
-  첫 프레임 전체 갱신을 `WM_CREATE` 이후로 분산하거나, 타이머 콜백에
-  재진입 가드·시간 측정을 넣어 느린 틱을 로그로 남긴다.
-- **필요한 회귀 테스트:** `render_stats`·`diff_stats` 단위 테스트는 이미 존재.
-  추가로는 10,000회 연속 `render+diff` 호출의 시간 상한 테스트(회귀 방지용).
+- **신뢰도:** Confirmed(코드 흐름 + Win32 수명주기)
+- **문제:** 누적 통계(`total/blocked`, 키별 `stat.XX`)와 즉시 적용되는 보호 토글은 `persist_live`에서만 디스크에 쓰인다. 이 함수는 `WM_DESTROY`, 통계 초기화, 언어 변경에서만 호출된다. 앱은 `WM_QUERYENDSESSION`/`WM_ENDSESSION`을 처리하지 않는다(소스 전체 grep 0건). Windows는 세션 종료 시 `WM_ENDSESSION` 뒤에 `WM_DESTROY` 없이 프로세스를 종료할 수 있다.
+- **발생 조건:** 트레이에 상주한 채로 PC를 종료하거나 로그오프하거나 재시작하는 경우다. 상주형 앱이라 이것이 **가장 흔한 종료 경로**다.
+- **영향:** 마지막 Save 이후 세션 동안 쌓인 통계가 사라진다. 그래서 "재시작 후에도 유지되는 최다 불량 키 진단"(`model.rs` 주석, README)이 일반적인 사용 패턴에서는 사실상 동작하지 않는다. 보호 토글을 꺼 둔 상태도 재부팅하면 켜짐으로 돌아간다(안전한 방향이긴 하다).
+- **근거:** `persist_live` caller는 `on_destroy`, `MENU_RESET_STATS`, `on_language_changed`뿐이다. 주기 저장 타이머는 없다(`SetTimer`는 `TIMER_STATS` 하나, 저장은 하지 않음).
+- **반증 확인:** `DefWindowProcW`는 `WM_ENDSESSION`에서 아무것도 저장하지 않는다. Rust 런타임에도 종료 훅이 없다. `close_to_tray`와 무관하다. 보호 장치가 없다.
+- **호출/영향 범위:** `config::save`(`persist_live` 경로), 홈 탭 통계·기록 탭 키별 통계의 재시작 후 표시.
+- **권장 수정 방향:** `WM_ENDSESSION`(wParam=TRUE)에서 `persist_live()`를 호출하고 트레이를 제거한다. 여기에 저빈도 주기 저장(예: 변경이 있을 때만 5분마다)이나 차단 수 증가분 기준 저장을 더한다.
+- **필요한 회귀 테스트:** (단위) `wndproc`에서 메시지 분기를 순수 함수로 분리해 `WM_ENDSESSION(TRUE)`가 "persist" 액션을 반환하는지 검증한다. (수동) `APPDATA` 임시 폴더로 실행해 몇 키를 입력하고 `shutdown /l`로 로그오프한 뒤, 재로그인했을 때 `iTotalPresses`가 0보다 큰지 확인한다.
 
-### [ISSUE-004] 설정 저장 실패의 침묵 (Low)
+---
 
-- **위치:** `src/config/storage.rs::save` (171~178행):
-  `fs::write(&tmp).is_err()` 시 조용히 return, `fs::rename` 결과 `let _` 무시
+### [ISSUE-005] 실행 중 `settings.ini`를 직접 편집하면 종료·언어 변경·통계 초기화 때 기동 시점 스냅샷으로 덮어써짐
+
+- **위치:** `src/ui/settings_form.rs` `persist_live`(164–178), `on_language_changed`(181–193); `src/ui/window.rs` `on_create`(163, `SAVED` 초기화); `src/ui/commands.rs` `MENU_OPEN_CONFIG`
+- **우선순위:** Medium
+- **신뢰도:** Confirmed(코드 흐름)
+- **문제:** `persist_live`는 메모리의 `SAVED`(기동 시 로드한 설정 + 이후 Save 결과)에 라이브 카운터만 덮어 그대로 저장한다. 디스크를 다시 읽지 않는다. 반면 `on_save`는 `config::load()`로 디스크를 다시 읽어 병합한다. 두 경로의 동작이 서로 다르다.
+- **발생 조건:** 키별 임계값(`key.XX`)은 **UI가 없고 설정 파일로만** 지정할 수 있다(CLAUDE.md "알려진 주의점", README). 앱에는 "설정 폴더 열기" 메뉴도 있다. 앱을 켠 채로 `key.41=120`을 추가하고 저장한 다음, 적용하려고 트레이 → 종료(또는 언어 변경, 통계 초기화)를 하면 `persist_live`가 `key.41`이 없는 스냅샷으로 파일을 덮어쓴다.
+- **영향:** 사용자가 직접 넣은 키별 임계값과 그 밖의 수동 편집이 조용히 사라진다. 재시작해도 적용되지 않는다. 사용자가 "앱을 먼저 종료한 뒤 편집"하면 피할 수 있다(문서화되어 있지 않음).
+- **근거:** `persist_live`에는 `config::load` 호출이 없다(168–177). `SAVED`는 `on_create`에서 `init.clone()`으로 한 번 설정되고, 이후 `on_save`(308)와 언어 변경(188)에서만 바뀐다.
+- **반증 확인:** Save 버튼을 한 번 누르면 `on_save`가 디스크를 다시 읽으므로 그 뒤의 `persist_live`는 안전하다. 하지만 "파일 편집 → 종료" 순서에는 이 보호가 작동하지 않는다. `.bak`은 바로 직전 세대만 보관하므로, 덮어쓰기 직후의 `.bak`에 편집본이 남긴 한다. 다만 load는 메인 파일이 비어 있을 때만 `.bak`을 읽으므로 자동으로 복구되지 않는다.
+- **호출/영향 범위:** `persist_live` ← `on_destroy`(모든 정상 종료, 업데이트 종료 포함), `MENU_RESET_STATS`, `on_language_changed`.
+- **권장 수정 방향:** `persist_live`도 `config::load()`를 기준으로 삼고, 앱이 소유한 필드(카운터·enabled·language)만 덮어쓰게 해 `on_save`와 같은 병합 의미로 통일한다. 또는 파일 mtime이 바뀐 경우에만 다시 읽는다. 아울러 `on_save`에서 `per_key_ms`를 디바운서에 즉시 적용하면 "편집 → Save로 반영"이라는 안전한 워크플로가 생긴다.
+- **필요한 회귀 테스트:** (단위, `with_isolated_appdata` 재사용) 기동 스냅샷 A를 저장하고, 파일에 `key.41=120`을 추가한 뒤 `persist_live` 등가 함수(순수화 필요)를 호출하면 `load().per_key_ms[0x41] == Some(120)`이어야 한다.
+
+---
+
+### [ISSUE-006] 업데이트 오류 메시지가 UI 언어와 무관하게 한국어로만 표시됨
+
+- **위치:** `src/updater/{http,manifest,staging}.rs`의 `UpdateError::Message("...")` 문자열, `src/ui/update.rs`(`err.to_string()`을 그대로 표시), `crates/kcfix-updater/src/lib.rs` `HelperError`, 헬퍼 `main.rs` 대화상자 제목 `"업데이트 실패"`
 - **우선순위:** Low
-- **신뢰도:** Confirmed (침묵 모드는 코드로 확정, 발생 빈도는 미측정)
-- **문제:** 디스크 가득 참·백신 잠금 등으로 저장이 실패해도 UI는 저장된 것처럼
-  보인다 (`SAVED`·`SHARED`는 메모리에서 이미 갱신됨, `on_save` 135~139행).
-  다음 시작 시 이전 설정이 부활해 사용자를 혼란스럽게 한다.
-- **발생 조건:** 저장 찰나의 I/O 실패 (저빈도).
-- **영향:** 설정 유실 (필터 자체는 계속 동작, 복구 가능).
-- **근거:** 에러를 삼키는 2곳이 코드에 그대로 있다. 원자 교체 + `.bak` 구조 자체는
-  정상이라 torn-write는 방어된다 (이전 감사 ISSUE-004의 수정이 유효).
-- **반증 확인:** 상위 호출자(`on_save`, `WM_DESTROY`)에 재시도·알림 없음.
-- **호출/영향 범위:** `on_save`·`WM_DESTROY` → 전 설정.
-- **권장 수정 방향:** `save() -> bool`로 결과 반환, 실패 시 상태바·메시지박스로 1회 알림.
-- **필요한 회귀 테스트:** 읽기 전용 디렉토리를 `APPDATA` 격리(`with_isolated_appdata`
-  패턴 재사용)에 걸고 `save`가 `false`를 반환하는지 단위 테스트.
+- **신뢰도:** Confirmed
+- **문제:** 영어 UI 사용자에게도 다운로드 실패, 서명 실패, 헬퍼 오류 등이 한국어로 나온다. CLAUDE.md는 "모든 가시 문자열은 한/영 쌍으로 존재"를 규칙으로 명시하고 있다.
+- **영향:** 영어 사용자는 실패 원인을 알 수 없다. 기능 자체에는 영향이 없다.
+- **반증 확인:** `classify_update_result`는 메시지를 가공하지 않고 그대로 전달한다(테스트 `classify_preserves_error_message`). 번역 계층이 없다.
+- **권장 수정 방향:** `UpdateError`를 의미 코드 enum(`DownloadFailed`, `SignatureInvalid`, `HelperVersionMismatch` …)으로 바꾸고 UI에서 `strings()`로 매핑한다. 헬퍼에는 `--lang`을 전달한다.
+- **필요한 회귀 테스트:** 각 `UpdateError` 변형마다 Ko/En 문자열이 모두 비어 있지 않은지 검사한다(기존 i18n 테스트 패턴 확장).
+
+---
 
 ## 5. Potential Functional Gaps
 
-- **Confirmed Gap — 세션 통계 미영속으로 Top 키 진단이 재시작마다 초기화.**
-  `bootstrap::init_shared`는 `total/blocked`만 복원하고(38~39행),
-  `per_key_presses/blocked` 배열과 `log_events`는 버린다. 총량은 누적되는데
-  "최다 채터링 키"는 매번 0에서 시작한다. 오동작은 아니나 텔레메트리 정합성 gap.
-- **Confirmed Gap — INI 왕복 시 미등록 키·주석 소실.**
-  `parse`는 알려준 키만 구조체에 담고 `save`는 구조체에서 재생성하므로,
-  사용자가 직접 적은 주석·예비용 키는 `on_save` 1회로 영구 삭제된다. Low.
-- **Confirmed Gap — `sLanguage` 미등록값의 침묵 한국어 폴백.**
-  `Language::from_code`가 `en` 외 전부를 `Ko`로 처리한다(11~16행).
-  오타(`EN ` 공백은 trim 처리되나 `eng` 등은 한국어행) 시 안내 없음. Low.
-- **Confirmed Gap — 불리언 파싱 규칙 불일치.**
-  `bFilterEnabled`/`bCloseToTray`/`bExcludeInjected`는 `!= "0"`,
-  `bPlaySound`/`bRecordAllKeypress`는 `== "1"`이다. `=2` 같은 비정상값의 해석이
-  키마다 다르다. 정상 범위(`0`/`1`)에서는 무해. Low.
-- **Likely Gap — 만료 타임스탬프 파싱 실패 시 fail-open.**
-  `manifest.rs` 127~131행: 서명은 유효하나 `expires_at` 형식이 깨지면 경고만
-  남기고 승인한다. 빌더가 형식을 통제하므로 현실 위험은 낮다. Low.
-- **추정 — 업데이트 아티팩트 전체 메모리 버퍼링.**
-  `download_and_verify`가 최대 512MB까지 `Vec`에 담는다. 실제 아티팩트는
-  수 MB라 현재는 문제없으나, 크기 상한과 메모리 사용의 연결이 명시돼 있지 않다.
-- **추정 — 청소 모드 해제 시 Enter `Up` 1건이 앱에 전달.**
-  훅이 해제 `Down`은 삼키지만(33~34행 항상 `LRESULT(1)`), 모드 종료 후의 `Up`은
-  정상 경로로 통과한다. 단독 `Up`은 대부분 앱이 무시하므로 실질 피해는 거의 없다.
+| # | 분류 | 내용 |
+|---|---|---|
+| G1 | **Confirmed Gap** | **훅 설치 실패를 무시한다.** `install_hook`이 `unwrap_or_default()`로 null HHOOK을 반환해도 그대로 진행한다. 이때 UI는 "보호 중"으로 표시되지만 필터는 동작하지 않는다(bootstrap.rs:113–114). 실패 가능성은 낮지만 알림이나 재시도가 없다. |
+| G2 | **Confirmed Gap** | **자동 시작 레지스트리 쓰기 결과를 무시한다.** `on_save`에서 `config::set_autostart(autostart)`의 bool을 버린다(settings_form.rs:271). 실패해도 토글은 켜진 것처럼 보이고, 다음 기동에서야 실제 상태가 드러난다. |
+| G3 | **Confirmed Gap** | **키별 임계값이 Save로 적용되지 않는다.** `on_save`는 디스크의 `per_key_ms`를 다시 저장만 하고 디바운서에는 적용하지 않는다(`set_key_threshold` 호출은 `init_shared`에만 있음). 재시작해야 반영된다. ISSUE-005와 결합된다. |
+| G4 | **Confirmed Gap** | **스테이징한 헬퍼 사본이 남는다.** 성공적인 업데이트 뒤에도 `%TEMP%\kcfix-updater_helper_*.exe`가 남는다. 헬퍼는 자신을 지울 수 없고, 앱도 기동 시 정리하지 않는다. 업데이트마다 한 개(수백 KB)씩 쌓인다. |
+| G5 | Likely Gap | **훅 생존 감시가 없다.** ISSUE-002와 별개로 다른 원인(세션 전환, 보안 소프트웨어)으로 훅이 제거되어도 알 수 없다. 기록 탭의 "마지막 이벤트 시각" 같은 지표나 주기적 재설치 옵션이 없다. |
+| G6 | 추정 | `bExcludeInjected=0`일 때 `VK_PACKET`(0xE7) 유니코드 주입 입력(화상 키보드, 비밀번호 관리자 자동 입력)은 모든 문자가 같은 vk를 공유하므로, 임계값 안에서 연속으로 들어오면 문자가 차단될 수 있다. 기본값(1)에서는 해당 없다. |
+| G7 | 추정 | 사운드 경로가 응답 없는 UNC 경로면 `resolve_sound_file`(`is_file`)이 UI 스레드를 수 초 막을 수 있고, 이것이 ISSUE-002를 유발한다. |
+| G8 | Confirmed(무해) | 헬퍼가 넘기는 `--minimized` 재실행 인자를 앱 CLI가 해석하지 않는다(`cli.rs`는 `--version`/`--check-update`만 처리). 현재는 넘기는 쪽도 없어 실제 영향은 없다. |
+| G9 | Likely Gap | `get_text` 버퍼가 1024 UTF-16 단위라 그보다 긴 사운드 경로는 잘린 채 저장된다. 긴 경로(`\\?\`)를 쓰는 경우에만 해당한다. |
+
+---
 
 ## 6. Documentation Mismatches
 
-- **README 국문 테스트 수 표기 만료 (Low).** 영문은 "65 unit & integration tests"로
-  실측 65개와 일치하나, 국문은 "50개 테스트 100% 검증"으로 만료되었다.
-  (이전 감사의 "24개" 표기는 양쪽 모두 수정됨.)
-- **게이트 설명과 실제 pre-push 훅의 불일치 (Low).**
-  `CLAUDE.md`·`GEMINI.md`는 게이트를 `fmt + clippy + test`로 적으나,
-  실제 `.githooks/pre-push`는 `fmt + clippy + check`를 실행한다.
-  `cargo test --workspace`는 CI(`windows-ci.yml`)에서만 돈다.
-  결과적으로 ISSUE-001의 실패는 로컬 푸시 게이트를 통과하고 CI에서만 터진다.
-- **`AGENTS.md` 없음.** 감사 지시가 확인을 요구해 명시한다.
-  루트에 `AGENTS.md`는 없고, 에이전트 규칙은 `CLAUDE.md`·`GEMINI.md`가 대신한다.
-  불일치가 아니라 부재이며, 별도 작성이 필요한지는 프로젝트 판단에 맡긴다.
-- **불일치 아님 (확인됨).** 아래는 이전 감사에서 지적됐으나 현재는 정상이다.
-  - `LICENSE` 파일 존재 (1087B, `version_sync::license_file_matches_manifests` 통과).
-  - "Mica" 과장 문구 제거됨 (`README.md`에 해당 단어 없음).
-  - 업데이트 사용법이 `README` 본문에 존재 ("Checking for Updates"·"업데이트 확인").
-  - `docs/UPDATE.md`의 `src/config.rs` 경로 서술이 현 구조와 일치
-    (`VERSION`·`UPDATE_PUBLIC_KEY_B64` 모두 `src/config.rs` 허브에 있음).
+| 문서 | 기술 | 실제 |
+|---|---|---|
+| `README.md` (EN 138행, KO 277행) | "79 Rust tests" / "79개 Rust 테스트" | `cargo test --workspace` 결과 **110개**(메인 90 + 헬퍼 12 + 통합 8) |
+| `src/input/hook.rs` 모듈 주석 | "Runs on the system hook thread" | LL 훅은 **설치한 스레드(UI 스레드)** 의 메시지 루프에서 실행됨(ISSUE-002) |
+| `CLAUDE.md` 핫패스 규칙 / `GEMINI.md` | 훅에서 "Win32 호출 금지" / "no Win32 calls" | 차단 시 `PlaySoundW`/`MessageBeep` 호출(같은 문서가 사운드 캐시 재생을 허용하므로 사실상 예외 조항 누락) |
+| `CLAUDE.md` 모듈 지도 | "모든 가시 문자열은 한/영 쌍으로 존재" | 업데이트·헬퍼 오류 메시지는 한국어 전용(ISSUE-006) |
+| `README.md` 기능 5 (EN) | "helper safely swaps binaries in `%TEMP%`" | `%TEMP%`는 스테이징 위치이고, 교체는 **설치 폴더**의 exe에서 일어남 |
+| `README.md` 기능 3 / `model.rs` 주석 | 키별 통계가 "재시작 후에도 유지" | OS 종료·로그오프 경로에서는 저장되지 않음(ISSUE-004) |
+| `docs/UPDATE.md` | 헬퍼를 릴리스 자산으로 배포한다고 기술 | 설치된 헬퍼를 갱신하는 경로는 없음. 후속 업데이트가 버전 불일치로 실패함(ISSUE-001). 사용자 수동 조치도 문서화되어 있지 않음 |
+
+---
 
 ## 7. Recommended Fix Plan
 
-### Phase 1 — Immediate (릴리스 게이트·장시간 안정)
+### Phase 1 — Immediate
+1. **ISSUE-001:** 헬퍼 호환성 판정을 프로토콜 버전 기반으로 바꾸거나, 새 앱이 헬퍼를 자체 갱신하게 한다. 다음 릴리스 **전에** 반드시 처리해야 한다. 이미 배포된 0.2.0 헬퍼가 0.3.0 앱을 거부하지 않으려면, 0.3.0 앱 쪽 검사를 완화하는 방식이어야 한다.
+2. **ISSUE-003:** 헬퍼 실행 직후 곧바로 종료하도록 순서를 바꾸고(안내는 Yes/No 확인에 통합), `--timeout-secs`를 명시한다.
+3. **ISSUE-002:** 훅을 전용 스레드로 분리한다(구조 변경이지만 핵심 기능의 무결성 문제라 Phase 1에 둠). 응답없음 원인 추적과 독립적으로 효과가 있다.
 
-1. ISSUE-001: 실패 테스트의 assert에 실제 `result`를 출력하고 CI 로그로 귀인 확정.
-   환경 문제면 readiness 창(400ms) 조정, 제품 문제면 롤백 파일 조작 수정.
-   침묵 `let _` 3곳에 `warn!` 로그 추가.
-2. ISSUE-002: `WM_CTLCOLOR*` 브러시 정적 캐싱 (`window.rs` 국소, 테마 변경 시 재생성).
+### Phase 2 — Stability
+4. **ISSUE-004:** `WM_ENDSESSION` 처리를 추가하고, 변경이 있을 때만 주기 저장한다.
+5. **ISSUE-005 + G3:** `persist_live`를 디스크 재읽기 병합 방식으로 바꾸고, `on_save`에서 `per_key_ms`를 즉시 적용한다.
+6. **G1/G2:** 훅 설치 실패와 자동 시작 등록 실패를 사용자에게 표시한다(기존 `save_failed`와 같은 패턴).
+7. **G4:** 기동 시 `%TEMP%\kcfix-updater_helper_*.exe` 중 오래된 것을 정리한다.
+8. `ShellExecuteW`와 사운드 경로 검증을 UI 스레드 밖으로 옮긴다(G7).
 
-### Phase 2 — Stability (예외·검증·상태)
+### Phase 3 — Structural
+9. **ISSUE-006:** `UpdateError`를 코드 enum으로 바꾸고 i18n 매핑을 적용한다. 헬퍼에 언어 인자를 전달한다.
+10. `wndproc` 분기를 "메시지 → 액션" 순수 함수로 추출해 수명주기(종료, 세션 종료, 업데이트 종료) 동작을 HWND 없이 테스트할 수 있게 한다.
+11. `persist_live`/`on_save`가 공유하는 "디스크 기준 + 앱 소유 필드 병합" 함수를 `config` 쪽 순수 함수로 만든다.
+12. 문서 정정: README 테스트 수, `hook.rs` 주석, CLAUDE/GEMINI 핫패스 규칙의 사운드 예외, UPDATE.md의 헬퍼 갱신 정책.
 
-3. ISSUE-004: `save() -> bool` + 실패 알림.
-4. 세션 통계 영속 여부 결정 (버리면 Top 키 설명 문구, 유지하면 `per_key_*` 저장).
-5. INI 불리언 파싱 통일 (`!= "0"` vs `== "1"` 중 하나로) + `sLanguage` 미등록값 경고.
-6. `expires_at` 파싱 실패를 fail-open에서 명시적 거부로 (빌더와 합의 후).
-
-### Phase 3 — Structural (테스트 가능성·책임 분리)
-
-7. ISSUE-003: 타이머 틱 시간 측정·재진입 가드 + 재현 시 스택 덤프 확보 절차 문서화.
-8. `README` 국문 테스트 수·게이트 문서(`CLAUDE.md`/`GEMINI.md`의 `check` 누락) 정정.
-9. 업데이트 E2E 시나리오(스테이징→헬퍼→롤백)를 CI 친화적 형태로 분리
-   (현재 테스트가 환경에 민감하므로, 파일 조작 단위와 프로세스 핸드셰이크 단위를 분리).
-
-실제 코드는 수정하지 않는다 (본 감사의 제약).
+---
 
 ## 8. Test Recommendations
 
-- **Regression — ISSUE-001 진단:** 실패 assert를
-  `assert!(matches!(result, Err(HelperError::RelaunchFailed(_))), "{result:?}")`로 강화.
-  입력: 현행 그대로. 기대: 실패 시 실제 변종이 로그에 남음.
-- **Integration — 롤백 원자성:** `update_executable_with` 실패 모드(exit/timeout)마다
-  종료 후 `current` 내용이 `b"previous-version"`과 바이트 동일하고
-  `*.old`·스테이징 잔해가 없음을 assert (부분적으로 존재 — 잔해 검사를 `ack` 외로 확장).
-- **Integration — 업데이트 단일 비행:** 두 스레드에서 `try_begin_update` 동시 호출 시
-  정확히 1곳만 `true`. 기대: `end_update` 후 재시도 가능.
-  (단일 스레드 버전 테스트는 존재 — `try_begin_update_parallel_exactly_one_winner`.)
-- **Unit — `config::load` 클램프·별칭:** `iThreshold=0`→1, `=5000`→1000,
-  `iLogLimit=3`→10, `key.GG` 무시, `bFilterStatus` 별칭 인식. 일부 존재하나
-  불리언 불일치(§5) 케이스 추가.
-- **Unit — `debounce` 경계:** `gap == threshold` 통과(존재), `min_chatter` 경계
-  (`gap == min_chatter`는 차단 판정으로 넘어감) 명시 테스트 추가.
-- **Unit — `stats` 성능 회귀:** `render_stats`+`diff_stats` 10,000회 반복의 시간 상한
-  assert (ISSUE-003의 타이머 경로 보호).
-- **Unit — 브러시 캐시:** 동일 `ThemeColors` 입력에 동일 핸들 반환 assert (ISSUE-002 수정 후).
-- **E2E — 릴리스 스모크:** 기존 CI의 패키징 `--version` 체크 유지.
-- **Concurrency — `SAVED`/`SHARED` 락 순서:** `on_save`와 `WM_DESTROY`의 락 획득 순서를
-  정적(assert 순서) 또는 동시 호출 스트레스로 검증. 현재는 중첩이 없어 교착 없음.
-- **Platform-specific — Win10 DWM:** 둥근 모서리 속성(33) 호출이 무시되고 창이 정상
-  생성되는지 스모크 (현재 반환값 무시 — 실기 1회 확인).
+### Unit
+- **헬퍼 호환성(ISSUE-001):** `helper_stamp_compatible`을 `(stamp, app_version)` 인자를 받는 순수 함수로 바꾼 뒤 `("0.2.0.0", "0.3.0") → true`(새 정책), `("9.0.0.0", "0.3.0") → false`(미래 헬퍼 거부 여부는 정책에 따라)를 검증한다.
+- **설정 병합(ISSUE-005):** 디스크에 `key.41=120`, `iThreshold=70`이 있고 메모리 스냅샷이 `iThreshold=50`·카운터 10일 때 병합 저장 결과가 `key.41=120`을 유지하고 카운터는 10이어야 한다. threshold의 우선순위는 정한 정책(디스크 우선 또는 메모리 우선)대로 검증한다.
+- **메시지 → 액션(ISSUE-004):** `WM_ENDSESSION(wParam=1)`은 `Persist`, `WM_ENDSESSION(wParam=0)`은 `None`, `WM_QUERYENDSESSION`은 `TRUE` 반환을 검증한다.
+- **update 인자(ISSUE-003):** `launch_helper`의 인자 조립을 분리해 `--timeout-secs <N>`(N ≥ 120)이 포함되는지 스냅샷으로 검증한다.
+- **i18n(ISSUE-006):** 모든 `UpdateError` 변형에 대해 `strings(Ko)`/`strings(En)` 매핑 결과가 비어 있지 않고 서로 다른지 검증한다.
+
+### Integration
+- **헬퍼 연속 업데이트:** 임시 폴더에 `app.exe`(스탬프 0.3.0 가정)와 옆에 `kcfix-updater.exe`(스탬프 0.2.0)를 두고 `resolve_helper`가 Ok를 반환하는지 확인한다(새 정책 기준).
+- **대기 시간 초과 정책:** 헬퍼 `update_executable_with`를 이미 종료된 pid와 `timeout=1s`로 호출하면 즉시 진행되는지 확인한다(기존). 살아 있는 pid로 `timeout=1s`를 준 뒤 그 pid를 종료하면, 새 정책에서 이전 버전 재실행 여부가 기대대로인지 확인한다.
+- **저장 실패 표면화:** `APPDATA`를 파일로 막은 상태에서 `on_save` 등가 순수 함수가 `written=false`를 반환하는지 확인한다(기존 `save_reports_failure_when_appdata_is_unusable` 확장).
+
+### End-to-End(수동, `APPDATA` 임시 폴더)
+- **연속 업데이트:** 테스트 서명키로 N → N+1 → N+2 매니페스트를 로컬 HTTP나 포크 릴리스에 올리고, 두 번 연속 인앱 업데이트가 성공해야 한다.
+- **늦은 확인:** 업데이트 "적용 중" 대화상자를 60초 방치한 뒤 OK를 누르면, 새 정책에서 업데이트가 적용되거나 이전 버전이 실행 중이어야 한다(필터 미실행 상태 금지).
+- **종료 경로:** 키 50회 입력 → `shutdown /l` → 재로그인 → 홈 탭 총 입력 수 ≥ 50.
+- **파일 편집 보존:** 실행 중 `key.41=120` 추가 → 트레이 종료 → 파일에 `key.41=120`이 남아 있어야 한다.
+
+### Concurrency
+- **훅 스레드 분리 후:** UI 스레드에서 2초 sleep을 주입하는 동안 다른 앱에 실제 키 입력을 하면 입력 지연이 없어야 하고, sleep 이후에도 채터링 차단 카운터가 계속 증가해야 한다.
+- `SHARED` 락: 훅 스레드와 UI 스레드가 동시에 `decide`/`set_log_limit`를 수행해도 로그 버퍼 용량이 늘지 않는지 확인한다(`log_events.capacity()` 불변, 단위 테스트에서 2스레드 × 10만 회).
+
+### Regression
+- 기존 `debounce` 경계 테스트(임계값 정확히 일치 = 통과, 1ms 미만 = 차단, 오토리핏 보존)는 훅 스레드 분리 뒤에도 모두 유지되어야 한다.
+- `torn_main_file_falls_back_to_backup`은 병합 저장 도입 후에도 유지되어야 한다.
+
+### Platform-specific
+- Windows 10 21H2 / Windows 11 24H2에서 `LowLevelHooksTimeout` 기본값으로 ISSUE-002 재현과 수정을 확인한다.
+- 설치 폴더 `C:\Program Files\...`(쓰기 불가)에서 업데이트하면 `BackupFailed` 뒤 이전 버전이 재실행되고 오류 안내가 영어/한국어로 표시되어야 한다.
+- 125%/150% DPI, 다크/라이트 전환은 기존 layout 테스트 범위로 충분하다(이번 감사에서 이슈 없음).
+
+---
 
 ## 9. Final Assessment
 
-| 영역 | 평가 | 근거 |
+| 항목 | 평가 | 근거 |
 |---|---|---|
-| Functional Correctness | Good | 디바운스 상태머신·서명 검증 정확, 79/79 테스트 통과 |
-| Runtime Stability | Acceptable | GDI 누수 해소·틱 가드 추가. 응답없음 근본 원인은 잔여 |
-| Data Integrity | Good | 원자 저장·`.bak` 폴백 + 저장 실패 알림 + 키별 통계 영속 |
-| Error Resilience | Acceptable | 롤백 재시도·서명 검증·스테이징 정리가 검증됨. 만료 타임스탬프는 fail-closed로 강화 |
-| Cross-platform Robustness | Acceptable | Windows 전용이 설계 의도. 비Windows 빌드 불가(`windows` 전용 import)가 의도와 일치 |
-| Test Confidence | Acceptable | 79/79 green. 행위 변경마다 단위 테스트 추가됨 |
+| Functional Correctness | **Acceptable** | 필터 핵심과 설정·서명 검증은 정확하다. 자동 업데이트가 1회용인 결함(ISSUE-001)과 키별 임계값 적용 경로의 공백(G3)이 있다. |
+| Runtime Stability | **Needs Work** | 훅이 UI 스레드에 묶여 있어 UI 정지가 곧 시스템 입력 지연과 필터 소실로 이어질 수 있다(ISSUE-002). 응답없음 이력의 원인도 확정되지 않았다. |
+| Data Integrity | **Acceptable** | 원자 저장과 `.bak` 폴백으로 파일 손상 경로는 없다. 다만 종료 경로 미저장(ISSUE-004)과 외부 편집 덮어쓰기(ISSUE-005)가 있다. |
+| Error Resilience | **Acceptable** | 업데이트는 서명·해시·롤백·이전 버전 재실행까지 견고하다. 대기 시간 초과 경로(ISSUE-003), 훅·자동 시작 실패 미표시(G1/G2)가 남아 있다. |
+| Cross-platform Robustness | **Acceptable** | 의도적인 Windows 전용이다. 경로 인용, UTF-16 인코딩, 레거시 경로 폴백이 처리되어 있다. 크로스플랫폼은 목표가 아니므로 감점하지 않았다. |
+| Test Confidence | **Acceptable** | 110 + 7개 모두 통과하고, 순수 로직 커버리지가 높다. 수명주기(세션 종료, 업데이트 연속성, 훅 스레드)는 테스트로 보호되지 않는다. 이번 이슈들이 모두 그 공백에 있다. |
 
-**먼저 수정할 3개:** ISSUE-001 업데이터 가드 실패 규명 → ISSUE-002 GDI 브러시 캐싱 →
-ISSUE-003 응답없음 추적(틱 시간 측정). 1·2번은 국소적이고 다음 릴리스 전에 들어가야
-업데이트 배포 신뢰도와 장시간 상주 신뢰도가 완성된다.
+### 실제로 먼저 수정할 문제 3개
+1. **[ISSUE-001]** 헬퍼 버전 검사 정책 수정 또는 헬퍼 자체 갱신 — 다음 릴리스 전에 처리하지 않으면 그 릴리스 이후 인앱 업데이트가 전부 실패한다.
+2. **[ISSUE-002]** 저수준 훅을 전용 스레드로 분리 — 필터가 보이지 않게 꺼지는 경로를 원천 차단하고, 응답없음 현상의 피해 범위를 UI로 한정한다.
+3. **[ISSUE-003]** 업데이트 종료 순서 수정(헬퍼 실행 직후 종료, `--timeout-secs` 명시) — 업데이트 중 필터가 실행되지 않는 상태로 남는 경로를 제거한다.
 
-## 10. Addendum — 감사 제안 적용 내역 (2026-10-17)
+---
 
-본문 §1~§9는 감사 시점의 스냅샷이며, 아래는 그 제안을 코드에 적용한 내역이다.
-`cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
-`cargo check --workspace --all-targets`, `cargo test --workspace` 모두 통과
-(79개 전부 green: 본체 59 + 스모크 2 + 버전 동기화 6 + 헬퍼 lib 2 + 헬퍼 통합 10).
+## 10. 적용 내역 (2026-10-17, 감사 후속 수정)
 
-- ISSUE-001: 실패 assert에 `mode`·`result`를 출력하도록 강화했더니 실제 값이
-  `Err(RollbackFailed("app exited before readiness: exit code: 17; ... (os error 5)"))`로
-  확인됐다. 판정 경로는 정상이고 롤백 rename이 일시적 Access Denied로 실패한 것이다.
-  `rollback_swap` 추출 + 4회·150ms 재시도 + 침묵 실패 3곳에 `warn!` 로그를 넣었다.
-  `rollback_swap` 단위 테스트 2건을 추가했고, 동일 통합 테스트가 1.50초 만에 통과한다.
-- ISSUE-002: `WM_CTLCOLOR*` 13곳을 색상별 캐시(`paint::cached_brush`)로 교체하고
-  `apply_window_chrome`(기동·`WM_SETTINGCHANGE`)에서 캐시를 비운다.
-  동일 색상은 동일 핸들임을 assert하는 단위 테스트를 추가했다.
-- ISSUE-003: `update_stats`에 재진입 가드(`StatsTickGuard`, 중첩 틱 드롭)와
-  250ms 초과 틱 `warn!` 측정을 넣고, `bootstrap::run`에 tracing subscriber를 초기화했다.
-  가드 단위 테스트 + 1만 회 render·diff 시간 상한 테스트를 추가했다. 근본 원인은 잔여.
-- ISSUE-004: `config::save() -> bool`로 바꾸고, `on_save` 실패 시 한/영 메시지박스로
-  알린다. 기존 왕복 테스트는 `assert!(save(..))`로 강화하고, 저장 불가 조건
-  (`APPDATA`가 파일인 경우) 테스트를 추가했다.
-- Gaps: 키별 누적 통계(`stat.XX=presses,blocked`, 0이 아닌 것만)를 영속화하고
-  기동·저장·종료 경로에 live 값을 합산하도록 연결했다(왕복 테스트 포함).
-  불리언 파싱을 `!= "0"`으로 통일하고(비정상값 테스트 포함),
-  `expires_at` 파싱 실패를 fail-closed로 바꿨다(서명 없는 합성 페이로드로 직접 테스트).
-  `min_chatter` 경계(`==`는 글리치 제외) 테스트를 추가했다.
-- Docs: `README` 테스트 수를 양 언어 모두 79개로 정정하고,
-  `CLAUDE.md`·`GEMINI.md` 게이트를 실제 pre-push(`fmt + clippy + check`)와 일치시켰다.
-  `AGENTS.md`는 여전히 없으며, 에이전트 규칙은 두 문서가 대신한다.
+| 항목 | 상태 | 변경 |
+|---|---|---|
+| ISSUE-001 헬퍼 1회용 | **해결** | `src/updater/staging.rs`: 정확한 버전 일치 대신 `ProductName == "Keyboard Chatter Fix Updater"` + 버전 `[HELPER_MIN_VERSION(0.2.0), 앱 VERSION]` 범위로 판정(`helper_compatible`, `file_stamp`). 헬퍼 CLI는 추가만 가능하다는 계약을 `docs/UPDATE.md`에 명문화 |
+| ISSUE-002 훅이 UI 스레드에 있음 | **해결** | `src/input/hook.rs`: `spawn_hook_thread` — 메시지 펌프만 도는 전용 스레드(우선순위 HIGHEST)에서 설치·해제. 창 생성 전에 설치하고, 메시지 루프가 끝난 뒤 `HookThread::stop`으로 해제. 독(poison)된 락에서도 패닉 없이 계속 필터링 |
+| ISSUE-003 업데이트 대기 시간 초과 | **해결** | `src/ui/update.rs`: "적용 중" 모달 제거(재시작 안내는 Yes/No 확인에 통합). 헬퍼 실행 직후 곧바로 `WM_UPDATE_EXIT`. `helper_args`가 `--timeout-secs 120`을 항상 전달 |
+| ISSUE-004 세션 종료 시 미저장 | **해결** | `src/ui/window.rs`: `WM_QUERYENDSESSION` 허용, `WM_ENDSESSION(TRUE)`에서 `persist_live` + 트레이 제거(`session_reply`). `settings_form::autosave_tick`: 5분마다 카운터·보호 상태가 바뀐 경우에만 저장 |
+| ISSUE-005 외부 편집 덮어쓰기 | **해결** | `Settings::adopt_file_only_fields` + `config::try_load`: `persist_live`가 저장 직전 디스크의 `key.XX`를 다시 읽어 병합. 파일을 읽지 못하면 메모리 값을 유지(삭제로 오인하지 않음) |
+| ISSUE-006 업데이트 오류 한국어 전용 | **해결** | `UpdateError::Failed { kind: UpdateErrorKind, detail }` + 한/영 문구 내장, UI는 `err.message(current_lang)`. 헬퍼는 `KCFIX_LANG` 환경 변수(구 헬퍼는 무시)로 언어를 받아 `HelperError::message` 표시 |
+| G1 훅 설치 실패 무시 | **해결** | 실패 시 경고 대화상자(`hook_failed`), 상태 표시는 `HOOK_ACTIVE`가 false면 "꺼짐" |
+| G2 자동 시작 실패 무시 | **해결** | 실패 시 토글을 실제 레지스트리 상태로 되돌리고 경고(`autostart_failed`) |
+| G3 키별 임계값 Save 미적용 | **해결** | `on_save`가 디스크의 `per_key_ms`를 디바운서에 즉시 적용 |
+| G4 `%TEMP%` 스테이징 잔재 | **해결** | 기동 시 백그라운드에서 `cleanup_stale_staging`(이름 패턴 `is_staging_file_name`만, 사용 중 파일은 건너뜀) |
+| G7 UI 스레드 차단 I/O | **해결** | 사운드 경로 검증은 워커 스레드(`apply_sound_async`, 세대 번호로 경합 방지), `ShellExecuteW`는 COM을 초기화한 워커 스레드 |
+| G5 훅 생존 감시 | 미적용 | 전용 스레드로 타임아웃 원인이 사라져 우선순위를 낮춤. 외부 요인(보안 SW 등)에 의한 제거 감지는 남은 과제 |
+| G6 `VK_PACKET`(주입 유니코드) | 미적용 | 기본 설정(`bExcludeInjected=1`)에서는 해당 없음. 추정 사항이라 동작 변경 보류 |
+| G8 `--minimized` 미해석 | 미적용 | 넘기는 쪽이 없어 무해 |
+| G9 1024자 경로 버퍼 | 미적용 | 영향이 매우 제한적 |
+| §6 문서 불일치 | **해결** | README 테스트 수 고정 표기 제거·`%TEMP%` 설명 정정, `hook.rs` 주석, CLAUDE/GEMINI 핫패스 규칙(사운드 예외·전용 스레드), UPDATE.md 헬퍼 호환성 정책 |
+
+### 검증
+- `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`: 통과
+- `cargo test --workspace`: **123 passed**(110 → 123). 새 테스트:
+  `helper_compatible_accepts_older_supported_helpers`, `helper_compatible_rejects_out_of_range_or_foreign`,
+  `file_stamp_reads_version_and_product_name`, `helper_args_pass_exit_timeout_and_hash`,
+  `staging_leftovers_are_recognized_by_name_only`, `hook_runs_on_a_dedicated_thread_and_stops`,
+  `session_end_persists_only_when_the_session_really_ends`, `autosave_waits_for_the_interval`,
+  `autosave_skips_when_nothing_changed`, `external_per_key_edit_survives_persisting_the_startup_snapshot`,
+  `removed_per_key_edit_is_not_resurrected`, `try_load_distinguishes_missing_from_empty_settings`,
+  `every_kind_has_distinct_korean_and_english_text`, `message_appends_detail_in_both_languages`,
+  `classify_renders_failure_in_ui_language`, `helper_lang_defaults_to_korean_and_localizes_english`
+- 디버그 바이너리를 임시 `APPDATA`로 4초간 기동해 창 생성, 응답(Responding=True), 정상 종료를 확인
+
+### 남은 수동 검증(실행하지 않음)
+- 실제 릴리스 N → N+1 → N+2 연속 인앱 업데이트 E2E
+- 로그오프·재로그인 후 통계 보존(`WM_ENDSESSION` 경로)
+- 실제 키보드로 채터링 차단 동작 확인(훅 스레드 분리 후)
+
+> 후속(2026-10-17): 위 수동 검증 중 연속 업데이트(게시된 v0.2.0 헬퍼 포함)·세션 종료 저장·UI 정지 중 훅 동작은
+> `scripts/e2e`로 실측해 통과했다. 실제 물리 키보드·실제 로그오프·실제 GitHub 게시 경로는 여전히 수동 항목이다.
+> 세부와 추가로 발견·수정한 회귀(UI-001)는 `PROJECT_AUDIT_UI_TESTS.md` 참조.
+
+> v0.2.1에서 §10의 "미적용" 중 G5(훅 생존 감시)를 제외한 후속 항목과 `PROJECT_AUDIT_UI_TESTS.md`의
+> 모든 수정 대상이 반영되었다. 릴리스 절차는 `docs/UPDATE.md` 참조.

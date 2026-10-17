@@ -5,7 +5,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::Value;
 
 use super::canonical::canonical_payload_python;
-use super::error::UpdateError;
+use super::error::{UpdateError, UpdateErrorKind};
 use super::model::{
     UpdateManifest, MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, RELEASE_DOWNLOAD_PREFIX,
 };
@@ -32,85 +32,74 @@ pub fn parse_and_verify_manifest(
     current_version: &str,
 ) -> Result<UpdateManifest, UpdateError> {
     if document.len() > MAX_MANIFEST_BYTES {
-        return Err(UpdateError::Message(
-            "업데이트 매니페스트가 올바르지 않습니다.".into(),
-        ));
+        return Err(UpdateError::new(UpdateErrorKind::ManifestInvalid));
     }
     let parsed: Value = serde_json::from_slice(document)
-        .map_err(|_| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?;
-    let payload = parsed.get("payload").cloned().ok_or_else(|| {
-        UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into())
-    })?;
+        .map_err(|_| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
+    let payload = parsed
+        .get("payload")
+        .cloned()
+        .ok_or_else(|| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
     let signature_b64 = parsed
         .get("signature")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into())
-        })?;
+        .ok_or_else(|| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
     let signature = base64::engine::general_purpose::STANDARD
         .decode(signature_b64)
-        .map_err(|_| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?;
+        .map_err(|_| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
     let public = base64::engine::general_purpose::STANDARD
         .decode(UPDATE_PUBLIC_KEY_B64)
-        .map_err(|_| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?;
+        .map_err(|_| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
     let key_bytes: [u8; 32] = public
         .as_slice()
         .try_into()
-        .map_err(|_| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?;
+        .map_err(|_| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
     let key = VerifyingKey::from_bytes(&key_bytes)
-        .map_err(|_| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?;
+        .map_err(|_| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
     let sig_bytes: [u8; 64] = signature
         .as_slice()
         .try_into()
-        .map_err(|_| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?;
+        .map_err(|_| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
     let sig = Signature::from_bytes(&sig_bytes);
     let canonical = canonical_payload_python(&payload)?;
     key.verify(&canonical, &sig)
-        .map_err(|_| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?;
+        .map_err(|_| UpdateError::new(UpdateErrorKind::SignatureInvalid))?;
 
     let version = payload
         .get("version")
         .and_then(Value::as_str)
-        .ok_or_else(|| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?
+        .ok_or_else(|| UpdateError::new(UpdateErrorKind::SignatureInvalid))?
         .to_string();
     let tag = payload
         .get("tag")
         .and_then(Value::as_str)
-        .ok_or_else(|| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?
+        .ok_or_else(|| UpdateError::new(UpdateErrorKind::SignatureInvalid))?
         .to_string();
     let artifact_url = payload
         .get("artifact_url")
         .and_then(Value::as_str)
-        .ok_or_else(|| UpdateError::Message("업데이트 서명 또는 형식 검증에 실패했습니다.".into()))?
+        .ok_or_else(|| UpdateError::new(UpdateErrorKind::SignatureInvalid))?
         .to_string();
     let sha256 = payload
         .get("sha256")
         .and_then(Value::as_str)
-        .ok_or_else(|| UpdateError::Message("업데이트 파일 정보가 올바르지 않습니다.".into()))?
+        .ok_or_else(|| UpdateError::new(UpdateErrorKind::FileInfoInvalid))?
         .to_lowercase();
     let size = payload
         .get("size")
         .and_then(Value::as_u64)
-        .ok_or_else(|| UpdateError::Message("업데이트 파일 정보가 올바르지 않습니다.".into()))?;
+        .ok_or_else(|| UpdateError::new(UpdateErrorKind::FileInfoInvalid))?;
     if !tag.starts_with('v') || tag[1..] != version {
-        return Err(UpdateError::Message(
-            "업데이트 태그 정보가 올바르지 않습니다.".into(),
-        ));
+        return Err(UpdateError::new(UpdateErrorKind::TagInvalid));
     }
     if !is_valid_artifact_url(&artifact_url, &tag) {
-        return Err(UpdateError::Message(
-            "업데이트 파일 위치가 올바르지 않습니다.".into(),
-        ));
+        return Err(UpdateError::new(UpdateErrorKind::LocationInvalid));
     }
     if sha256.len() != 64 || !sha256.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(UpdateError::Message(
-            "업데이트 파일 정보가 올바르지 않습니다.".into(),
-        ));
+        return Err(UpdateError::new(UpdateErrorKind::FileInfoInvalid));
     }
     if size == 0 || size > MAX_ARTIFACT_BYTES {
-        return Err(UpdateError::Message(
-            "업데이트 파일 크기가 허용 범위를 벗어났습니다.".into(),
-        ));
+        return Err(UpdateError::new(UpdateErrorKind::SizeOutOfRange));
     }
     check_expiry(&payload)?;
 
@@ -135,25 +124,38 @@ fn check_expiry(payload: &Value) -> Result<(), UpdateError> {
         return Ok(());
     };
     let Some(exp_ts) = parse_rfc3339_timestamp(expires_at_str) else {
-        return Err(UpdateError::Message(
-            "업데이트 매니페스트의 유효기간 형식이 올바르지 않습니다.".into(),
-        ));
+        return Err(UpdateError::new(UpdateErrorKind::ExpiryInvalid));
     };
     let now_ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     if exp_ts <= now_ts {
-        return Err(UpdateError::Message(
-            "업데이트 매니페스트가 만료되었습니다.".into(),
-        ));
+        return Err(UpdateError::new(UpdateErrorKind::Expired));
     }
     Ok(())
 }
 
 fn parse_rfc3339_timestamp(s: &str) -> Option<u64> {
     let s = s.trim();
-    if s.len() < 19 {
+    // ASCII only (byte slicing below must not split a character), and only
+    // UTC designators: an offset would shift the instant, and silently
+    // reading `+09:00` as UTC is how a stale manifest outlives its expiry.
+    if s.len() < 19 || !s.is_ascii() {
+        return None;
+    }
+    let rest = &s[19..];
+    let rest = match rest.strip_prefix('.') {
+        Some(frac) => {
+            let digits = frac.bytes().take_while(u8::is_ascii_digit).count();
+            if digits == 0 {
+                return None;
+            }
+            &frac[digits..]
+        }
+        None => rest,
+    };
+    if !matches!(rest, "Z" | "z" | "+00:00" | "-00:00") {
         return None;
     }
     let year: u64 = s[0..4].parse().ok()?;
@@ -248,6 +250,28 @@ mod tests {
     }
 
     #[test]
+    fn expiry_timestamp_accepts_only_utc_forms() {
+        let base = parse_rfc3339_timestamp("2036-10-13T07:13:12Z").unwrap();
+        assert_eq!(parse_rfc3339_timestamp("2036-10-13T07:13:12z"), Some(base));
+        assert_eq!(
+            parse_rfc3339_timestamp("2036-10-13T07:13:12+00:00"),
+            Some(base)
+        );
+        assert_eq!(
+            parse_rfc3339_timestamp("2036-10-13T07:13:12.250Z"),
+            Some(base)
+        );
+        // UG4: a real offset must not be read as UTC; no designator at all
+        // is ambiguous too.
+        assert_eq!(parse_rfc3339_timestamp("2036-10-13T16:13:12+09:00"), None);
+        assert_eq!(parse_rfc3339_timestamp("2036-10-13T07:13:12-05:00"), None);
+        assert_eq!(parse_rfc3339_timestamp("2036-10-13T07:13:12"), None);
+        assert_eq!(parse_rfc3339_timestamp("2036-10-13T07:13:12.Z"), None);
+        // Non-ASCII must be rejected, not panic on a char boundary.
+        assert_eq!(parse_rfc3339_timestamp("2036-10-13T07:13:1２Z"), None);
+    }
+
+    #[test]
     fn check_expiry_rejects_bad_and_past_timestamps() {
         use serde_json::json;
         // Missing timestamp predates the field: accepted.
@@ -256,9 +280,9 @@ mod tests {
         assert!(check_expiry(&json!({"expires_at": "2036-10-13T07:13:12Z"})).is_ok());
         // Past timestamp: expired.
         let err = check_expiry(&json!({"expires_at": "2000-01-01T00:00:00Z"})).unwrap_err();
-        assert!(err.to_string().contains("만료"), "{err}");
+        assert!(err.kind() == Some(UpdateErrorKind::Expired), "{err}");
         // Unparseable timestamp: fail closed, no silent acceptance.
         let err = check_expiry(&json!({"expires_at": "soon"})).unwrap_err();
-        assert!(err.to_string().contains("형식"), "{err}");
+        assert!(err.kind() == Some(UpdateErrorKind::ExpiryInvalid), "{err}");
     }
 }

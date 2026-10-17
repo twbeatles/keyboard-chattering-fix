@@ -1,66 +1,102 @@
-//! Window control IDs, tray menu IDs, and private window messages.
+//! Window control IDs, menu command IDs, and private window messages.
 //!
-//! The numeric layout mirrors the card order on the window (100s header,
-//! 200s telemetry, 300s settings, 400s options, 600s actions).
+//! The numeric layout mirrors the window: 100s chrome (header, tabs,
+//! footer), 200s Home, 250s cleaning overlay, 300s History, 400s Settings,
+//! 500s Advanced, 600s the shared save row, 1000s menu commands.
 
 use windows::Win32::UI::WindowsAndMessaging::WM_APP;
 
-// Control IDs.
+// Chrome.
 pub(crate) const ID_HEADER_TITLE: i32 = 100;
 pub(crate) const ID_HEADER_SUB: i32 = 101;
-pub(crate) const ID_HEADER_BADGE: i32 = 102;
-pub(crate) const ID_CLEAN_BANNER: i32 = 103;
+pub(crate) const ID_PILL: i32 = 102;
+pub(crate) const ID_TAB_HOME: i32 = 110;
+pub(crate) const ID_TAB_HISTORY: i32 = 111;
+pub(crate) const ID_TAB_SETTINGS: i32 = 112;
+pub(crate) const ID_TAB_ADVANCED: i32 = 113;
+pub(crate) const ID_FOOTER: i32 = 120;
 
-pub(crate) const ID_CARD1_TITLE: i32 = 200;
-pub(crate) const ID_STAT_TOTAL_LABEL: i32 = 201;
-pub(crate) const ID_STAT_TOTAL_VAL: i32 = 202;
-pub(crate) const ID_STAT_CHATTER_LABEL: i32 = 203;
-pub(crate) const ID_STAT_CHATTER_VAL: i32 = 204;
-pub(crate) const ID_STAT_RATIO_LABEL: i32 = 205;
-pub(crate) const ID_STAT_RATIO_VAL: i32 = 206;
-pub(crate) const ID_STATIC_LAST: i32 = 207;
-pub(crate) const ID_STATIC_TOP_CHATTER: i32 = 208;
+// Home.
+pub(crate) const ID_TOGGLE_ENABLE: i32 = 200;
+pub(crate) const ID_HOME_DESC: i32 = 201;
+pub(crate) const ID_STATS_TITLE: i32 = 202;
+pub(crate) const ID_STAT_TOTAL_LABEL: i32 = 203;
+pub(crate) const ID_STAT_TOTAL_VAL: i32 = 204;
+pub(crate) const ID_STAT_BLOCKED_LABEL: i32 = 205;
+pub(crate) const ID_STAT_BLOCKED_VAL: i32 = 206;
+pub(crate) const ID_STAT_RATIO_LABEL: i32 = 207;
+pub(crate) const ID_STAT_RATIO_VAL: i32 = 208;
+pub(crate) const ID_STAT_LAST: i32 = 209;
+pub(crate) const ID_STAT_TOP: i32 = 210;
+pub(crate) const ID_TOOLS_TITLE: i32 = 211;
+pub(crate) const ID_BTN_CLEAN_MODE: i32 = 212;
+pub(crate) const ID_BTN_RESET_STATS: i32 = 213;
+pub(crate) const ID_BTN_OPEN_CPL: i32 = 214;
+pub(crate) const ID_HOME_TIP: i32 = 215;
 
-pub(crate) const ID_CARD2_TITLE: i32 = 300;
-pub(crate) const ID_LABEL_THRESHOLD: i32 = 301;
-pub(crate) const ID_EDIT_THRESHOLD: i32 = 302;
-pub(crate) const ID_LABEL_UNIT: i32 = 303;
-pub(crate) const ID_CHECK_ENABLE: i32 = 304;
-pub(crate) const ID_CHECK_SOUND: i32 = 305;
-pub(crate) const ID_LABEL_SOUND_FILE: i32 = 306;
-pub(crate) const ID_EDIT_SOUND_FILE: i32 = 307;
-pub(crate) const ID_BTN_SOUND_TEST: i32 = 308;
-pub(crate) const ID_CHECK_AUTOSTART: i32 = 309;
-pub(crate) const ID_CHECK_MINIMIZE: i32 = 310;
-pub(crate) const ID_CHECK_CLOSE_TO_TRAY: i32 = 311;
-pub(crate) const ID_CHECK_RECORD_ALL: i32 = 312;
+// Cleaning-mode overlay.
+pub(crate) const ID_CLEAN_TITLE: i32 = 250;
+pub(crate) const ID_CLEAN_BODY: i32 = 251;
+pub(crate) const ID_BTN_CLEAN_END: i32 = 252;
 
-pub(crate) const ID_CARD3_TITLE: i32 = 400;
-pub(crate) const ID_BTN_CLEAN_MODE: i32 = 401;
-pub(crate) const ID_BTN_OPEN_CPL: i32 = 402;
+// History.
+pub(crate) const ID_HIST_VIEW: i32 = 300;
+pub(crate) const ID_HIST_SEARCH: i32 = 301;
+pub(crate) const ID_BTN_CLEAR_LOG: i32 = 302;
+pub(crate) const ID_HIST_LIST: i32 = 303;
+pub(crate) const ID_HIST_INFO: i32 = 304;
 
-pub(crate) const ID_CARD4_TITLE: i32 = 500;
+// Settings.
+pub(crate) const ID_THRESH_TITLE: i32 = 400;
+pub(crate) const ID_LABEL_THRESHOLD: i32 = 401;
+pub(crate) const ID_EDIT_THRESHOLD: i32 = 402;
+pub(crate) const ID_LABEL_UNIT: i32 = 403;
+pub(crate) const ID_THRESH_HINT: i32 = 404;
+pub(crate) const ID_SOUND_TITLE: i32 = 405;
+pub(crate) const ID_TOGGLE_SOUND: i32 = 406;
+pub(crate) const ID_BTN_SOUND_TEST: i32 = 407;
+pub(crate) const ID_EDIT_SOUND_FILE: i32 = 408;
+pub(crate) const ID_BTN_SOUND_BROWSE: i32 = 409;
+pub(crate) const ID_APP_TITLE: i32 = 410;
+pub(crate) const ID_TOGGLE_AUTOSTART: i32 = 411;
+pub(crate) const ID_TOGGLE_MINIMIZE: i32 = 412;
+pub(crate) const ID_TOGGLE_CLOSE_TO_TRAY: i32 = 413;
+pub(crate) const ID_LABEL_LANG: i32 = 414;
+pub(crate) const ID_COMBO_LANG: i32 = 415;
+
+// Advanced.
+pub(crate) const ID_DETECT_TITLE: i32 = 500;
 pub(crate) const ID_LABEL_MEASURE: i32 = 501;
 pub(crate) const ID_COMBO_MEASURE: i32 = 502;
-pub(crate) const ID_LABEL_LANG: i32 = 503;
-pub(crate) const ID_COMBO_LANG: i32 = 504;
-pub(crate) const ID_LABEL_MIN_CHATTER: i32 = 505;
-pub(crate) const ID_EDIT_MIN_CHATTER: i32 = 506;
-pub(crate) const ID_LABEL_MIN_UNIT: i32 = 507;
-pub(crate) const ID_CHECK_EXCLUDE_INJECTED: i32 = 508;
-pub(crate) const ID_LABEL_LOG_LIMIT: i32 = 509;
-pub(crate) const ID_EDIT_LOG_LIMIT: i32 = 510;
-pub(crate) const ID_LABEL_LOG_UNIT: i32 = 511;
+pub(crate) const ID_LABEL_MIN_CHATTER: i32 = 503;
+pub(crate) const ID_EDIT_MIN_CHATTER: i32 = 504;
+pub(crate) const ID_LABEL_MIN_UNIT: i32 = 505;
+pub(crate) const ID_MIN_HINT: i32 = 506;
+pub(crate) const ID_TOGGLE_EXCLUDE_INJECTED: i32 = 507;
+pub(crate) const ID_LOG_TITLE: i32 = 508;
+pub(crate) const ID_TOGGLE_RECORD_ALL: i32 = 509;
+pub(crate) const ID_LABEL_LOG_LIMIT: i32 = 510;
+pub(crate) const ID_EDIT_LOG_LIMIT: i32 = 511;
+pub(crate) const ID_LABEL_LOG_UNIT: i32 = 512;
+pub(crate) const ID_LOG_NOTE: i32 = 513;
 
-pub(crate) const ID_BTN_SAVE: i32 = 601;
-pub(crate) const ID_STATIC_HINT: i32 = 602;
+// Save row (Settings + Advanced).
+pub(crate) const ID_BTN_SAVE: i32 = 600;
+pub(crate) const ID_SAVE_STATUS: i32 = 601;
 
-// Tray menu IDs.
+// Menu commands (menu bar and tray share them).
 pub(crate) const MENU_SHOW: usize = 1001;
 pub(crate) const MENU_TOGGLE: usize = 1002;
 pub(crate) const MENU_CLEANING: usize = 1003;
 pub(crate) const MENU_EXIT: usize = 1004;
 pub(crate) const MENU_UPDATE: usize = 1005;
+pub(crate) const MENU_HIDE: usize = 1006;
+pub(crate) const MENU_RESET_STATS: usize = 1007;
+pub(crate) const MENU_CLEAR_LOG: usize = 1008;
+pub(crate) const MENU_OPEN_CPL: usize = 1009;
+pub(crate) const MENU_OPEN_CONFIG: usize = 1010;
+pub(crate) const MENU_HOMEPAGE: usize = 1011;
+pub(crate) const MENU_ABOUT: usize = 1012;
 
 pub(crate) const WM_TRAY: u32 = WM_APP + 1;
 /// Posted from the update worker thread after the helper is launched; the
@@ -68,3 +104,5 @@ pub(crate) const WM_TRAY: u32 = WM_APP + 1;
 /// the helper can replace the executable file).
 pub(crate) const WM_UPDATE_EXIT: u32 = WM_APP + 2;
 pub(crate) const TRAY_ID: u32 = 1;
+/// The 500 ms refresh timer.
+pub(crate) const TIMER_STATS: usize = 1;

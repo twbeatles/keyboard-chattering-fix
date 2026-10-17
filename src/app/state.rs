@@ -5,7 +5,7 @@
 //! and the UI thread always observe the same filter state.
 
 use std::{
-    sync::{atomic::AtomicIsize, Mutex, OnceLock},
+    sync::{atomic::AtomicBool, Mutex, OnceLock},
     time::Instant,
 };
 
@@ -26,5 +26,9 @@ pub(crate) struct Shared {
 
 pub(crate) static SHARED: OnceLock<Mutex<Shared>> = OnceLock::new();
 pub(crate) static START: OnceLock<Instant> = OnceLock::new();
-/// Raw `HHOOK` installed by the bootstrap; unhooked on `WM_DESTROY`.
-pub(crate) static HOOK: AtomicIsize = AtomicIsize::new(0);
+/// Local wall-clock time of day (ms since midnight) captured with `START`,
+/// so the History tab can show `HH:MM:SS` for monotonic event timestamps.
+pub(crate) static START_CLOCK_MS: OnceLock<u64> = OnceLock::new();
+/// Whether the keyboard hook is installed. False only when installing it
+/// failed at startup (G1), so the UI never claims protection it lacks.
+pub(crate) static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);

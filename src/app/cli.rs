@@ -21,6 +21,26 @@ pub(crate) fn handle_cli() -> bool {
         println!("keyboard-chattering-fix {}", crate::config::VERSION);
         return true;
     }
+    if args.iter().any(|a| a == "--check-helper") {
+        #[cfg(windows)]
+        attach_parent_console();
+        let described = std::env::current_exe()
+            .map_err(|e| {
+                crate::updater::UpdateError::with_detail(
+                    crate::updater::UpdateErrorKind::ExePath,
+                    e,
+                )
+            })
+            .and_then(|exe| crate::updater::describe_helper(&exe));
+        match described {
+            Ok(text) => println!("helper ok: {text}"),
+            Err(err) => {
+                eprintln!("{err}");
+                std::process::exit(1);
+            }
+        }
+        return true;
+    }
     if args.iter().any(|a| a == "--check-update") {
         #[cfg(windows)]
         attach_parent_console();

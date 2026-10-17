@@ -13,8 +13,10 @@
 2. 매니페스트의 Ed25519 서명을 `src/config.rs`의 `UPDATE_PUBLIC_KEY_B64`로
    검증하고, 아티팩트 URL이 이 저장소의 Releases 경로와 정확히 일치하는지,
    버전이 현재보다 새 버전인지 확인합니다.
-3. 새 EXE를 SHA-256으로 검증하면서 `%TEMP%`에 내려받고, 같은 폴더의
-   `kcfix-updater.exe`를 스테이징한 뒤 헬퍼를 실행하고 앱이 종료됩니다.
+3. 사용자가 확인하면(확인 대화상자가 재시작 안내를 겸함) 새 EXE를 SHA-256으로
+   검증하면서 `%TEMP%`에 내려받고, 같은 폴더의 `kcfix-updater.exe`를
+   스테이징한 뒤 헬퍼를 실행하고 앱이 **곧바로** 종료됩니다. 헬퍼에는
+   `--timeout-secs 120`과 UI 언어(`KCFIX_LANG` 환경 변수)를 넘깁니다.
 4. 헬퍼는 앱 종료를 기다렸다가 스테이징된 파일을 교체 직전 **다시**
    해시 검증하고, `KeyboardChatteringFix.exe`를 교체한 뒤 새 버전을 실행합니다.
    새 버전이 60초 안에 살아 있음을 증명하지 못하면 자동으로 롤백합니다.
@@ -36,12 +38,34 @@
    불일치하면 릴리즈가 중단됩니다. 워크플로는 `vX.Y.Z` 형태의 태그에만
    반응하므로(`v*` 오타 태그는 실행되지 않음), 태그 이름 오타에 주의하세요.
 3. GitHub Actions(`release`)가 자동으로 테스트 → 빌드 → 서명된 `update.json`
-   생성 → Release 에셋 업로드(`KeyboardChatteringFix.exe`,
-   `kcfix-updater.exe`, `KeyboardChatteringFix.zip`, `update.json`) →
-   게시된 매니페스트 재검증을 수행합니다.
+   생성 → 매니페스트와 빌드된 EXE 대조 → **초안(draft) 릴리스**로 에셋 업로드
+   (`KeyboardChatteringFix.exe`, `kcfix-updater.exe`, `KeyboardChatteringFix.zip`,
+   `update.json`) → 에셋 이름·크기 확인 → 공개(latest) → 공개된 매니페스트 재검증을
+   수행합니다. 공개 전에는 `releases/latest`가 이전 릴리스를 가리키므로 업로드
+   중에 업데이트를 확인한 사용자가 "게시된 업데이트 없음"을 보지 않습니다.
+   같은 태그로 다시 실행해도 안전합니다(남은 초안은 교체, 공개된 릴리스는 에셋만 갱신).
+4. 릴리스 전 수동 점검(Actions → `e2e` → Run workflow, 또는 로컬 `scripts/e2e`):
+   훅·UI 정지·세션 종료 저장, 헬퍼 연속 교체(직전에 게시된 헬퍼 포함).
 
 사용자는 설치 폴더에 두 EXE를 함께 두기만 하면 됩니다.
 헬퍼가 없으면 업데이트 확인 시 그 취지의 안내가 나옵니다.
+
+## 헬퍼 호환성 정책
+
+인앱 업데이트는 메인 EXE만 교체하고 **설치 폴더의 헬퍼는 그대로 둡니다.**
+따라서 첫 업데이트 이후에는 앱보다 오래된 헬퍼가 다음 업데이트를 수행합니다.
+
+- 앱은 헬퍼의 버전 리소스를 읽어 `ProductName`이
+  `Keyboard Chatter Fix Updater`이고 버전이
+  `[HELPER_MIN_VERSION, 앱 VERSION]` 범위인 경우에만 사용합니다
+  (`src/updater/staging.rs`). 버전 리소스가 없는 구형 헬퍼는 허용합니다.
+- 그래서 헬퍼 CLI(`--pid --current --replacement --sha256 --relaunch-arg
+  --timeout-secs`)는 **추가만 가능**합니다. 플래그를 없애거나 의미를 바꾸면
+  `HELPER_MIN_VERSION`을 올리고, 사용자가 릴리스 zip의 헬퍼로 교체해야 함을
+  릴리스 노트에 적으세요.
+- 새 정보는 플래그 대신 환경 변수로 넘깁니다(구 헬퍼는 모르는 플래그에서
+  실패하지만 환경 변수는 무시함). 예: `KCFIX_LANG`.
+- 성공한 업데이트 뒤 `%TEMP%`에 남는 헬퍼 사본은 앱이 다음 기동 때 정리합니다.
 
 ## 최초 1회 설정 (서명 비밀키)
 

@@ -24,6 +24,13 @@ impl Drop for InstanceGuard {
 /// already holds it.
 #[cfg(windows)]
 pub(crate) fn try_acquire_single_instance() -> Option<InstanceGuard> {
+    try_acquire_named("Local\\KeyboardChatteringFix_SingleInstance")
+}
+
+/// Claim the named mutex; split out so tests use their own name and never
+/// collide with a real running app.
+#[cfg(windows)]
+fn try_acquire_named(name: &str) -> Option<InstanceGuard> {
     use windows::{
         core::HSTRING,
         Win32::{
@@ -32,7 +39,7 @@ pub(crate) fn try_acquire_single_instance() -> Option<InstanceGuard> {
         },
     };
     unsafe {
-        let name = HSTRING::from("Local\\KeyboardChatteringFix_SingleInstance");
+        let name = HSTRING::from(name);
         match CreateMutexW(None, false, &name) {
             Ok(handle) => {
                 if GetLastError() == ERROR_ALREADY_EXISTS {
@@ -81,12 +88,16 @@ pub(crate) fn show_already_running(language: &crate::i18n::Language) {
 #[cfg(test)]
 mod tests {
     /// Second acquisition fails while the first guard is alive, so a double
-    /// launch can never install two hooks (ISSUE-001). NOTE: fails if a real
-    /// app instance holds the mutex — run on CI, not next to a live tray app.
+    /// launch can never install two hooks (ISSUE-001). Uses a per-test name,
+    /// so it also passes next to a live tray app.
     #[test]
     #[cfg(windows)]
     fn second_acquisition_fails_while_first_held() {
-        let _first = super::try_acquire_single_instance().expect("first acquisition");
-        assert!(super::try_acquire_single_instance().is_none());
+        let name = format!("Local\\kcfix_test_instance_{}", std::process::id());
+        let first = super::try_acquire_named(&name).expect("first acquisition");
+        assert!(super::try_acquire_named(&name).is_none());
+        // Released with the guard: a later launch may start again.
+        drop(first);
+        assert!(super::try_acquire_named(&name).is_some());
     }
 }

@@ -18,8 +18,9 @@ pipeline. Single binary + `kcfix-updater` helper (Cargo workspace). Reply in Kor
 
 ## Performance contracts (do not regress)
 
-1. **Hook**: lock + `decide` only — no allocation, no file I/O, no Win32 calls.
-   Sound uses the pre-encoded `Shared.sound_file.wide` buffer.
+1. **Hook**: runs on its own message-pump thread (`spawn_hook_thread`), never
+   the UI thread. Lock + `decide` only — no allocation, no file I/O; the only
+   Win32 calls are the block sound (pre-encoded `Shared.sound_file.wide`).
 2. **500 ms timer**: snapshot under a short lock → `render_stats` (pure) →
    `diff_stats` → update only changed controls. Never call Win32 while
    holding the shared lock.
@@ -51,6 +52,8 @@ cargo check --workspace --all-targets
 - Past report: GUI "not responding" right after launch (timer-tick
   `SetWindowTextW` path suspected). Recent changes shrink that surface
   (no Win32 under lock, diffed updates, tick re-entry guard, slow-tick logging) but the root cause is unconfirmed.
-- `second_acquisition_fails_while_first_held` fails next to a live tray app.
-- Per-key thresholds (`key.XX`) are config-file only; the event log buffer
-  is recorded but not displayed.
+- Manual pre-release E2E (real binaries, starts the GUI): `scripts/e2e/README.md`.
+- Per-key thresholds (`key.XX`) are config-file only; Save applies file
+  edits live, and every settings write re-reads them from disk first.
+- The update helper is never replaced by an in-app update: keep its CLI
+  append-only and pass new data via environment variables (`docs/UPDATE.md`).

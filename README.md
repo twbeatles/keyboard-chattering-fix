@@ -48,17 +48,20 @@ Featuring a native Windows 11 Fluent Card interface, real-time diagnostic teleme
 #### 2. Native Windows 11 Fluent UI
 - **Immersive Dark / Light Theme Sync**: Dynamically detects the system theme (`AppsUseLightTheme`) and applies dark titlebars (`DWMWA_USE_IMMERSIVE_DARK_MODE`).
 - **Rounded Corners & Dark Titlebar**: Native Windows 11 aesthetics with rounded window geometry (`DWMWA_WINDOW_CORNER_PREFERENCE = ROUND`).
-- **Modern Typography**: Clear, crisp font rendering using Segoe UI Variable and Malgun Gothic.
+- **Tabbed Layout + Menu Bar**: Home / History / Settings / Advanced tabs, plus File / Tools / Help menus (update check, About, open settings folder).
+- **Toggle Switches & Owner-Drawn Controls**: Windows 11-style switches and buttons that stay readable in both dark and light themes.
+- **DPI-Aware, Crisp Text**: Layout and fonts scale with the display (125% / 150%) instead of being bitmap-stretched.
 - **Double-Buffered Rendering**: Smooth rendering with zero flickering during real-time telemetry updates.
 
 #### 3. Real-Time Telemetry & Diagnostics
 - **Live Metrics**: Real-time display of total keystrokes, chatter intercepted count, and chatter ratio (%).
 - **Recent Blocked Key Badge**: Displays the exact virtual key name and observed gap in milliseconds (`Last blocked: Space (32ms)`).
 - **Top Problematic Key Detection**: Tracks keystrokes per key (0–255) to automatically diagnose your most degraded switch and its failure rate.
+- **History Tab**: Filter the event log by *blocked only* / *all input* / *per-key summary* and by key name; blocked rows are highlighted with their gap in ms.
 - **100+ Virtual Key Name Map**: Human-readable names for media keys, volume controls, numpad, F1–F24, and navigation keys.
 
 #### 4. Helpful Tools & Customization
-- **🧹 Keyboard Cleaning Mode**: Locks all keyboard inputs so you can clean and wipe keycaps safely. Press `Enter` to immediately unlock.
+- **🧹 Keyboard Cleaning Mode**: Locks all keyboard inputs so you can clean and wipe keycaps safely. Press `Enter` or click **Finish cleaning** to unlock.
 - **🔊 Custom Audio (.wav) & Tester**: Play custom `.wav` sounds or system beeps on chatter detection, complete with an in-app test button.
 - **⚙️ Windows Keyboard Control Panel**: One-click shortcut to launch Windows Keyboard Properties (`control.exe keyboard`) to calibrate repeat delays and rates.
 - **Per-Key Custom Overrides**: Set global thresholds (e.g. 50ms) while assigning dedicated thresholds to specific erratic keys.
@@ -66,7 +69,7 @@ Featuring a native Windows 11 Fluent Card interface, real-time diagnostic teleme
 
 #### 5. Secure Ed25519 Auto-Update Pipeline
 - **Cryptographic Verification**: Auto-update manifests (`update.json`) are verified using Ed25519 digital signatures and SHA-256 binary digests.
-- **Fail-Safe In-Place Replacement**: The dedicated companion helper (`kcfix-updater.exe`) safely swaps binaries in `%TEMP%` and automatically rolls back if health checks fail.
+- **Fail-Safe In-Place Replacement**: The update is staged and verified in `%TEMP%`; the companion helper (`kcfix-updater.exe`) then swaps the program in its install folder and automatically rolls back if the new version fails to start.
 
 ---
 
@@ -132,7 +135,7 @@ key.20=80              # Custom 80ms threshold for Spacebar (0x20)
 git clone https://github.com/twbeatles/keyboard-chattering-fix.git
 cd keyboard-chattering-fix
 
-# Run automated test suite (79 Rust tests)
+# Run the automated test suite
 cargo test --workspace
 
 # Release-script tests (needs Python, once per machine)
@@ -152,8 +155,9 @@ The compiled binary will be placed at `target/release/keyboard-chattering-fix.ex
 
 ### Checking for Updates
 
-- Right-click the system tray icon and choose **Check for Updates**.
+- **Help > Check for Updates…** in the window menu, or right-click the tray icon and choose **Check for Updates**.
 - From a terminal: `KeyboardChatteringFix.exe --check-update`.
+- `KeyboardChatteringFix.exe --check-helper` confirms the update helper next to the program is usable (exit 0).
 - Update manifests are Ed25519-signed and applied by `kcfix-updater.exe` (shipped next to the app). Maintainer docs: [docs/UPDATE.md](docs/UPDATE.md) (Korean).
 
 ---
@@ -184,17 +188,20 @@ The compiled binary will be placed at `target/release/keyboard-chattering-fix.ex
 #### 2. Windows 11 모던 Fluent UI 대시보드
 - **시스템 테마 실시간 동기화**: Windows 다크/라이트 모드(`AppsUseLightTheme`)를 감지하여 다크 타이틀바(`DWMWA_USE_IMMERSIVE_DARK_MODE`)와 테마를 자동 적용합니다.
 - **Windows 11 둥근 창 모서리**: `DWMWA_WINDOW_CORNER_PREFERENCE = ROUND`로 윈도우 11 특유의 미려한 둥근 창을 제공합니다.
-- **Segoe UI Variable & 맑은 고딕 모던 타이포그래피**: 고해상도 클리어타입 폰트를 계층별(Bold/Semibold/Regular)로 정밀 렌더링합니다.
+- **탭 + 메뉴 바 구성**: 홈 / 기록 / 설정 / 고급 탭과 파일 / 도구 / 도움말 메뉴(업데이트 확인, 프로그램 정보, 설정 폴더 열기)를 제공합니다.
+- **토글 스위치와 쉬운 용어**: Windows 11 스타일 스위치·버튼을 직접 그려 다크/라이트 모드 모두에서 또렷하며, 설정 이름을 기술 용어 대신 쉬운 말로 설명합니다.
+- **고해상도(DPI) 대응**: 125%/150% 배율에서도 글자가 흐려지지 않도록 레이아웃과 글꼴을 배율에 맞춰 그립니다.
 - **더블 버퍼링(Double Buffering)**: 실시간 수치 갱신이나 창 조작 시 화면 깜빡임(Flicker)이 전혀 없습니다.
 
 #### 3. 실시간 텔레메트리 및 스위치 수명 진단
 - **실시간 통계 그리드**: 총 타건 수, 차단된 채터링 횟수, 채터링 발생 비율(%)을 타일 카드로 시각화합니다.
 - **최근 차단 키 알림 칩**: 가장 최근 차단된 키와 실제 바운스 간격(`최근 차단: Space (32ms 간격)`)을 실시간 표시합니다.
 - **최다 불량 키(Top Chatter Key) 자동 진단**: 256개 가상키별 누적 타건수와 차단수를 분석하여 가장 상태가 나쁜 스위치와 불량 비율을 자동 추적합니다.
+- **기록 탭 (필터 보기)**: "막은 입력만 / 모든 입력 / 키별 통계" 보기와 키 이름 검색으로 차단 이력을 걸러 볼 수 있으며, 막은 입력은 간격(ms)과 함께 강조 표시됩니다.
 - **100+개 전체 가상키 이름 매핑**: 미디어 키, 볼륨, 넘패드, F1~F24, 방향키 등을 직관적인 이름으로 출력합니다.
 
 #### 4. 유용한 도구 및 편의 기능
-- **🧹 키보드 청소 모드 (Clean Keyboard)**: 키캡을 닦을 때 키가 잘못 입력되지 않도록 모든 키보드 입력을 일시 차단합니다. 청소 후 `Enter` 키를 누르면 즉시 잠금이 해제됩니다.
+- **🧹 키보드 청소 모드 (Clean Keyboard)**: 키캡을 닦을 때 키가 잘못 입력되지 않도록 모든 키보드 입력을 일시 차단합니다. 청소 후 `Enter` 키를 누르거나 **청소 끝내기** 버튼을 클릭하면 즉시 잠금이 해제됩니다.
 - **🔊 커스텀 알림음 (.wav) & 사운드 테스트**: 채터링 차단 시 기본 비프음 외에 사용자가 지정한 `.wav` 효과음을 재생할 수 있으며, UI에서 즉시 테스트 청취가 가능합니다.
 - **⚙️ Windows 키보드 설정 바로가기**: `control.exe keyboard`를 원클릭으로 호출하여 키 반복 속도 및 지연 시간을 조율합니다.
 - **키별 개별 임계값 (Per-Key Override)**: 전체 키에는 50ms 등 낮은 전역값을 두고, 말썽인 키에만 높은 임계값을 개별 할당할 수 있습니다.
@@ -268,7 +275,7 @@ key.20=80              # 스페이스바(0x20)에만 80ms 적용
 git clone https://github.com/twbeatles/keyboard-chattering-fix.git
 cd keyboard-chattering-fix
 
-# 단위 및 통합 테스트 실행 (79개 Rust 테스트 검증)
+# 단위 및 통합 테스트 실행
 cargo test --workspace
 
 # 릴리스 스크립트 테스트 (Python 필요, 머신당 1회)
@@ -288,8 +295,9 @@ cargo build --release
 
 ### 업데이트 확인
 
-- 시스템 트레이 아이콘 우클릭 → **업데이트 확인** 메뉴로 새 버전을 확인할 수 있습니다.
+- 창 메뉴의 **도움말 > 업데이트 확인**, 또는 시스템 트레이 아이콘 우클릭 → **업데이트 확인**으로 새 버전을 확인할 수 있습니다.
 - 터미널에서는 `KeyboardChatteringFix.exe --check-update`로 확인할 수 있습니다.
+- `KeyboardChatteringFix.exe --check-helper`로 프로그램 옆의 업데이트 헬퍼가 사용 가능한지 확인할 수 있습니다(정상이면 종료 코드 0).
 - 업데이트 파일은 Ed25519 서명으로 검증되며, 교체는 `kcfix-updater.exe`(앱과 같은 폴더)가 수행합니다. 배포 절차는 [docs/UPDATE.md](docs/UPDATE.md)를 참고하세요.
 
 ---

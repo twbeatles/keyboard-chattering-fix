@@ -5,7 +5,7 @@
 
 use std::{
     path::PathBuf,
-    sync::Mutex,
+    sync::{atomic::Ordering, Mutex},
     time::{Duration, Instant},
 };
 
@@ -15,7 +15,7 @@ use windows::Win32::{
 
 use super::{
     instance::{bring_existing_to_front, show_already_running, try_acquire_single_instance},
-    state::{SHARED, START},
+    state::{SHARED, START, START_CLOCK_MS},
 };
 use crate::{config, debounce::Debouncer, input};
 
@@ -40,7 +40,7 @@ fn init_shared(settings: &config::Settings) {
     debouncer.per_key_presses = settings.per_key_presses;
     debouncer.per_key_blocked = settings.per_key_blocked;
     debouncer.record_all_keys = settings.record_all_keys;
-    debouncer.log_limit = settings.log_limit;
+    debouncer.set_log_limit(settings.log_limit);
 
     let _ = SHARED.set(Mutex::new(super::state::Shared {
         debouncer,
@@ -50,6 +50,13 @@ fn init_shared(settings: &config::Settings) {
         exclude_injected: settings.exclude_injected,
     }));
     let _ = START.set(Instant::now());
+    let _ = START_CLOCK_MS.set(local_time_of_day_ms());
+}
+
+fn local_time_of_day_ms() -> u64 {
+    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+    ((t.wHour as u64 * 60 + t.wMinute as u64) * 60 + t.wSecond as u64) * 1000
+        + t.wMilliseconds as u64
 }
 
 /// Update-helper handshake: the helper relaunches this executable with
@@ -90,6 +97,8 @@ pub(crate) fn run(settings: config::Settings) {
     };
 
     acknowledge_update_handshake();
+    // Staging leftovers of earlier updates (G4); disk I/O off the UI thread.
+    std::thread::spawn(crate::updater::cleanup_stale_staging);
 
     unsafe {
         // High-precision multimedia timer (1ms resolution)
@@ -98,21 +107,41 @@ pub(crate) fn run(settings: config::Settings) {
         use windows::Win32::Foundation::HINSTANCE;
         let hmodule = GetModuleHandleW(None).expect("own module handle");
         let hinstance = HINSTANCE(hmodule.0);
+        // The hook pumps its own thread (ISSUE-002); this thread only runs
+        // UI. Installed before the window so the first frame shows the
+        // real protection state.
+        let hook = input::hook::spawn_hook_thread();
+        super::state::HOOK_ACTIVE.store(hook.is_some(), Ordering::Relaxed);
         let hwnd: HWND = crate::ui::create_window(hinstance, &settings);
         if hwnd.is_invalid() {
+            if let Some(hook) = hook {
+                hook.stop();
+            }
             timeEndPeriod(1);
             return;
         }
-        let hook = input::hook::install_hook(hinstance);
-        super::state::HOOK.store(hook.0 as isize, std::sync::atomic::Ordering::Relaxed);
         crate::ui::show_initial(hwnd, settings.minimize_on_launch);
+        if hook.is_none() {
+            // Never let the UI pretend to protect without a hook (G1).
+            crate::ui::show_hook_failed(hwnd);
+        }
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            // Dialog-style keyboard handling: Tab/Shift+Tab move between
+            // controls, Space toggles, Enter in a field saves (IDOK).
+            if IsDialogMessageW(hwnd, &msg).as_bool() {
+                continue;
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
 
+        // The window already flushed settings in WM_DESTROY; unhook last
+        // so keystrokes stay filtered until the very end.
+        if let Some(hook) = hook {
+            hook.stop();
+        }
         timeEndPeriod(1);
     }
 }

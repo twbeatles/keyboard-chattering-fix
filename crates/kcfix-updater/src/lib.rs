@@ -27,6 +27,72 @@ pub enum HelperError {
     ReplacementHashMismatch(String),
 }
 
+/// Language for user-facing helper text. The app passes it in the
+/// `KCFIX_LANG` environment variable ("ko" / "en"), which older apps simply
+/// do not set; Korean stays the default for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperLang {
+    Ko,
+    En,
+}
+
+impl HelperLang {
+    /// Environment variable the app sets when launching the helper.
+    pub const ENV: &'static str = "KCFIX_LANG";
+
+    pub fn from_code(code: Option<&str>) -> Self {
+        match code.map(|c| c.trim().to_ascii_lowercase()) {
+            Some(c) if c == "en" => Self::En,
+            _ => Self::Ko,
+        }
+    }
+
+    pub fn from_env() -> Self {
+        Self::from_code(std::env::var(Self::ENV).ok().as_deref())
+    }
+
+    pub fn failure_title(self) -> &'static str {
+        match self {
+            Self::Ko => "업데이트 실패",
+            Self::En => "Update failed",
+        }
+    }
+
+    pub fn relaunched_note(self) -> &'static str {
+        match self {
+            Self::Ko => "이전 버전으로 다시 실행했습니다.",
+            Self::En => "The previous version has been restarted.",
+        }
+    }
+}
+
+impl HelperError {
+    /// User-facing text in `lang` (the `Display` form stays Korean for logs
+    /// and compatibility).
+    pub fn message(&self, lang: HelperLang) -> String {
+        if lang == HelperLang::Ko {
+            return self.to_string();
+        }
+        match self {
+            Self::CurrentMissing(p) => format!("The program file does not exist: {}", p.display()),
+            Self::ReplacementMissing(p) => {
+                format!("The downloaded update does not exist: {}", p.display())
+            }
+            Self::ReplacementEmpty(p) => format!("The downloaded update is empty: {}", p.display()),
+            Self::WaitTimeout(pid) => {
+                format!("Timed out waiting for the running program (pid {pid}) to exit")
+            }
+            Self::BackupFailed(e) => format!("Could not back up the current version: {e}"),
+            Self::ReplaceFailed(e) => format!("Could not replace the program file: {e}"),
+            Self::RelaunchFailed(e) => format!("The new version did not start: {e}"),
+            Self::RollbackFailed(e) => format!("Restoring the previous version failed: {e}"),
+            Self::ReplacementHashMismatch(e) => {
+                format!("The downloaded update failed its integrity check: {e}")
+            }
+        }
+    }
+}
+
 /// Options for the swap. `expected_sha256` re-verifies the staged artifact just
 /// before it replaces the running EXE: the app hashed it at download time, but
 /// the helper is a separate process that starts later, so nothing had checked
@@ -368,6 +434,21 @@ mod tests {
         assert_eq!(std::fs::read(&current).unwrap(), b"PREVIOUS");
         assert!(!backup.exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn helper_lang_defaults_to_korean_and_localizes_english() {
+        assert_eq!(HelperLang::from_code(None), HelperLang::Ko);
+        assert_eq!(HelperLang::from_code(Some("ko")), HelperLang::Ko);
+        assert_eq!(HelperLang::from_code(Some(" EN ")), HelperLang::En);
+        let err = HelperError::WaitTimeout(7);
+        assert_eq!(err.message(HelperLang::Ko), err.to_string());
+        let en = err.message(HelperLang::En);
+        assert!(en.contains("pid 7") && en.is_ascii(), "{en}");
+        assert_ne!(
+            HelperLang::Ko.failure_title(),
+            HelperLang::En.failure_title()
+        );
     }
 
     #[test]

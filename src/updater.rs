@@ -27,13 +27,13 @@ mod staging;
 mod version;
 
 pub use canonical::{canonical_payload, canonical_payload_python};
-pub use error::UpdateError;
+pub use error::{UpdateError, UpdateErrorKind};
 pub use http::{check_for_update, download_and_verify, sha256_hex};
 pub use manifest::{expected_artifact_url, is_valid_artifact_url, parse_and_verify_manifest};
 pub use model::{StagedUpdate, UpdateManifest, MANIFEST_URL, RELEASE_DOWNLOAD_PREFIX, USER_AGENT};
 pub use staging::{
-    apply_update, discard_staged, end_update, launch_helper, prepare_update, relaunch_args_from,
-    resolve_helper, stage_helper, try_begin_update, unique_staging_path, unix_now,
-    update_in_progress,
+    apply_update, cleanup_stale_staging, describe_helper, discard_staged, end_update, helper_args,
+    launch_helper, prepare_update, relaunch_args_from, resolve_helper, stage_helper,
+    try_begin_update, unique_staging_path, unix_now, update_in_progress,
 };
 pub use version::{is_newer, version_tuple};
