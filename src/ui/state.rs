@@ -5,23 +5,20 @@
 //! live filter state itself lives in `app::state`.
 
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
+    atomic::{AtomicUsize, Ordering},
     Mutex, OnceLock,
 };
 
 use crate::{config::Settings, i18n::Language};
 
-static LANG: AtomicU8 = AtomicU8::new(0);
+/// Index into `Language::ALL` of the language being shown.
+static LANG: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static SAVED: OnceLock<Mutex<Settings>> = OnceLock::new();
 
 pub(crate) fn current_lang() -> Language {
-    if LANG.load(Ordering::Relaxed) == 1 {
-        Language::En
-    } else {
-        Language::Ko
-    }
+    Language::from_index(LANG.load(Ordering::Relaxed)).unwrap_or(Language::FALLBACK)
 }
 
 pub(crate) fn set_lang(lang: Language) {
-    LANG.store(if lang == Language::En { 1 } else { 0 }, Ordering::Relaxed);
+    LANG.store(lang.index(), Ordering::Relaxed);
 }

@@ -3,7 +3,10 @@
 //! Serialization lives in `storage`; startup integration in `autostart`;
 //! sound-path validation in `sound`.
 
-use crate::{debounce::MeasureFrom, i18n::Language};
+use crate::{
+    debounce::MeasureFrom,
+    i18n::{system_language, Language, LanguagePref},
+};
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -13,7 +16,8 @@ pub struct Settings {
     pub sound_file: Option<String>,
     pub minimize_on_launch: bool,
     pub close_to_tray: bool,
-    pub language: Language,
+    /// The picker choice: follow Windows (default) or a fixed language.
+    pub language: LanguagePref,
     /// Per-key threshold overrides in ms, indexed by virtual-key code.
     pub per_key_ms: [Option<u64>; 256],
     pub measure_from: MeasureFrom,
@@ -30,6 +34,11 @@ pub struct Settings {
 }
 
 impl Settings {
+    /// The language to display now: the fixed choice, or Windows' own.
+    pub fn ui_language(&self) -> Language {
+        self.language.resolve(system_language())
+    }
+
     /// Take the file-only fields from `disk`, the settings file as it is
     /// now. Per-key thresholds (`key.XX`) have no UI and are edited in the
     /// file while the app runs; writing the in-memory copy without this
@@ -49,7 +58,7 @@ impl Default for Settings {
             sound_file: None,
             minimize_on_launch: false,
             close_to_tray: true,
-            language: Language::Ko,
+            language: LanguagePref::Auto,
             per_key_ms: [None; 256],
             measure_from: MeasureFrom::Release,
             min_chatter_ms: 0,

@@ -18,6 +18,9 @@ jobs:
       - name: Hook, UI freeze and session-end persistence
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\e2e\hook_session_e2e.ps1
+      - name: UI language selection
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\scripts\e2e\language_e2e.ps1
       - name: Update swap with the freshly built helper
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\scripts\e2e\update_swap_e2e.ps1

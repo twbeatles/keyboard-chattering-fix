@@ -384,3 +384,20 @@ GitHub Releases(`releases/latest/download/update.json`)에 의존한다.
 
 > v0.2.1에서 §10의 "미적용" 중 G5(훅 생존 감시)를 제외한 후속 항목과 `PROJECT_AUDIT_UI_TESTS.md`의
 > 모든 수정 대상이 반영되었다. 릴리스 절차는 `docs/UPDATE.md` 참조.
+
+---
+
+## 11. v0.2.2 — 언어 자동 인식과 UI 다듬기
+
+**언어(i18n)**
+- 설정 `sLanguage`: `auto`(기본) / 언어 코드. 자동은 Windows 표시 언어의 첫 항목(`GetUserPreferredUILanguages`, 실패 시 `GetUserDefaultLocaleName`)이 한국어면 한국어, 그 외는 영어. v0.2.1 이하가 저장한 `ko`/`en`은 고정으로 유지된다(파일만으로는 사용자가 고른 값인지 기본값인지 구분할 수 없음 — 설정 > 언어에서 "자동"을 고르면 된다).
+- 확장 구조: `Language::ALL` 레지스트리(`code`/`native_name`/`from_code`), `LanguagePref { Auto, Fixed }`. 모든 `match`가 exhaustive여서 새 언어 추가 시 컴파일러가 누락 지점을 알려준다. 선택기는 "자동 + 등록된 모든 언어"를 자동 생성. 헬퍼는 모르는 언어 코드에 영어를 사용. 절차는 `src/i18n/language.rs` 상단 주석.
+- 검증: `strings.rs`가 모든 언어를 영어 기준으로 검사(빈 문구, 플레이스홀더 수, 목록 길이, 긴 문구의 번역 누락; `define_strings!` 매크로가 필드 목록을 자동 생성), 레지스트리·로케일 매핑·설정 파싱 단위 테스트, `--check-language` 스모크, `scripts/e2e/language_e2e.ps1`(실제 창에서 ko/en/auto/레거시/알 수 없는 값, 비한국어 시스템(`KCFIX_LOCALE`), 선택기 변경의 즉시 번역·저장)
+- 진단: `--check-language`, 환경 변수 `KCFIX_LOCALE`(예: `de-DE`)
+
+**UI (실제 창을 캡처해 점검)**
+- 기록 탭 목록 헤더 글자가 다크 테마에서 검정(거의 안 보임) → 헤더를 서브클래싱해 직접 그림(리스트뷰가 헤더의 커스텀 드로우 결과를 무시하는 것을 실측으로 확인).
+- 다크 테마에서 메뉴 바만 흰색 → 메뉴 바 전용 그리기 메시지(`WM_UAHDRAWMENU`/`ITEM`)와 하단 1px 선을 다크로 처리(라이트 테마는 시스템 기본).
+- 시작 직후 탭 버튼의 점선 포커스 박스 → 키보드를 쓰기 전까지 숨김(`WM_CHANGEUISTATE`).
+- 언어 선택기의 "자동" 문구가 잘리던 문제 → 문구 단축.
+- 한계: 메뉴 드롭다운·트레이 메뉴는 시스템 기본(밝은) 스타일 유지(문서화되지 않은 uxtheme API 없이는 어두운 팝업 메뉴를 만들 수 없어 보류). 라이트 테마는 캡처로 확인하지 못함(시스템 설정을 바꾸지 않기 위해).

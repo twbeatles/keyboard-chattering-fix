@@ -21,6 +21,19 @@ pub(crate) fn handle_cli() -> bool {
         println!("keyboard-chattering-fix {}", crate::config::VERSION);
         return true;
     }
+    if args.iter().any(|a| a == "--check-language") {
+        #[cfg(windows)]
+        attach_parent_console();
+        // What "Auto" resolves to on this PC (support aid and E2E hook).
+        let name = crate::i18n::system_locale_name();
+        let lang = crate::i18n::system_language();
+        println!(
+            "system language: {} -> {}",
+            name.as_deref().unwrap_or("unknown"),
+            lang.code()
+        );
+        return true;
+    }
     if args.iter().any(|a| a == "--check-helper") {
         #[cfg(windows)]
         attach_parent_console();

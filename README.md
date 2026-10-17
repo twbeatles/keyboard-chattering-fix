@@ -49,6 +49,7 @@ Featuring a native Windows 11 Fluent Card interface, real-time diagnostic teleme
 - **Immersive Dark / Light Theme Sync**: Dynamically detects the system theme (`AppsUseLightTheme`) and applies dark titlebars (`DWMWA_USE_IMMERSIVE_DARK_MODE`).
 - **Rounded Corners & Dark Titlebar**: Native Windows 11 aesthetics with rounded window geometry (`DWMWA_WINDOW_CORNER_PREFERENCE = ROUND`).
 - **Tabbed Layout + Menu Bar**: Home / History / Settings / Advanced tabs, plus File / Tools / Help menus (update check, About, open settings folder).
+- **Automatic Language**: Follows your Windows language — Korean on a Korean system, English everywhere else — and can be pinned to Korean or English in Settings. The language list is a registry, so adding a language is a small, compiler-guided change (see `src/i18n/language.rs`).
 - **Toggle Switches & Owner-Drawn Controls**: Windows 11-style switches and buttons that stay readable in both dark and light themes.
 - **DPI-Aware, Crisp Text**: Layout and fonts scale with the display (125% / 150%) instead of being bitmap-stretched.
 - **Double-Buffered Rendering**: Smooth rendering with zero flickering during real-time telemetry updates.
@@ -112,7 +113,7 @@ bMinimizeOnLaunch=0    # Minimize to tray on startup (1=On, 0=Off)
 bCloseToTray=1         # Minimize to tray on window close (1=On, 0=Exit)
 bRecordAllKeypress=0   # Telemetry log: 1=record all keys, 0=blocked chatter only
 iLogLimit=100          # Maximum in-memory log buffer size
-sLanguage=en           # Interface language: "en" or "ko"
+sLanguage=auto         # Interface language: "auto" (default: Korean on a Korean Windows, otherwise English), "ko" or "en"
 sMeasureFrom=release   # Measurement baseline: "release" or "press"
 iMinChatterMs=0        # Ignore chatter intervals below this limit (ms)
 bExcludeInjected=1     # Ignore synthetic events from AHK/IME/macros (1=On)
@@ -189,6 +190,7 @@ The compiled binary will be placed at `target/release/keyboard-chattering-fix.ex
 - **시스템 테마 실시간 동기화**: Windows 다크/라이트 모드(`AppsUseLightTheme`)를 감지하여 다크 타이틀바(`DWMWA_USE_IMMERSIVE_DARK_MODE`)와 테마를 자동 적용합니다.
 - **Windows 11 둥근 창 모서리**: `DWMWA_WINDOW_CORNER_PREFERENCE = ROUND`로 윈도우 11 특유의 미려한 둥근 창을 제공합니다.
 - **탭 + 메뉴 바 구성**: 홈 / 기록 / 설정 / 고급 탭과 파일 / 도구 / 도움말 메뉴(업데이트 확인, 프로그램 정보, 설정 폴더 열기)를 제공합니다.
+- **언어 자동 인식**: Windows 언어를 따라 한국어 Windows에서는 한국어, 그 외에는 영어로 시작하며, 설정에서 한국어/영어로 고정할 수도 있습니다. 언어 목록이 한 곳(`src/i18n/language.rs`)에 모여 있어 새 언어를 추가하기 쉽습니다.
 - **토글 스위치와 쉬운 용어**: Windows 11 스타일 스위치·버튼을 직접 그려 다크/라이트 모드 모두에서 또렷하며, 설정 이름을 기술 용어 대신 쉬운 말로 설명합니다.
 - **고해상도(DPI) 대응**: 125%/150% 배율에서도 글자가 흐려지지 않도록 레이아웃과 글꼴을 배율에 맞춰 그립니다.
 - **더블 버퍼링(Double Buffering)**: 실시간 수치 갱신이나 창 조작 시 화면 깜빡임(Flicker)이 전혀 없습니다.
@@ -252,7 +254,7 @@ bMinimizeOnLaunch=0    # 실행 시 트레이로 최소화 (1=켜짐, 0=꺼짐)
 bCloseToTray=1         # 창 닫기(X) 시 트레이로 최소화 (1=켜짐, 0=완전 종료)
 bRecordAllKeypress=0   # 모든 키 누름 로깅 (1=모든 키, 0=차단된 채터링만)
 iLogLimit=100          # 메모리 내 실시간 로그 보관 수
-sLanguage=ko           # 인터페이스 언어 ("ko" 또는 "en")
+sLanguage=auto         # 인터페이스 언어 ("auto"=기본값: 한국어 Windows면 한국어, 그 외는 영어 / "ko" / "en")
 sMeasureFrom=release   # 간격 측정 기준 ("release" 또는 "press")
 iMinChatterMs=0        # 이 값보다 작은 간격은 결함 입력으로 간주하여 통과
 bExcludeInjected=1     # 외부 매크로/IME 합성 입력 제외 (1=권장)

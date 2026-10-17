@@ -24,7 +24,7 @@ use super::{
     ids::{ID_HIST_INFO, ID_HIST_LIST, ID_HIST_SEARCH, ID_HIST_VIEW},
     keys::{key_matches, vk_name},
     layout::{current_page, sc, showing_cleaning, Page},
-    paint::{theme_is_dark, ThemeColors},
+    paint::{cached_brush, theme_is_dark, ThemeColors},
     state::current_lang,
     text::{fill_combo, get_text, set_text, to_wide},
 };
@@ -233,6 +233,11 @@ pub(crate) unsafe fn init(hwnd: HWND) {
             Some(LPARAM(ex as isize)),
         );
     }
+    if let Some(lv) = list(hwnd) {
+        let header =
+            HWND(SendMessageW(lv, LVM_GETHEADER, Some(WPARAM(0)), Some(LPARAM(0))).0 as *mut _);
+        dark_header::install(header);
+    }
     apply_theme(hwnd);
 }
 
@@ -261,6 +266,7 @@ pub(crate) unsafe fn apply_theme(hwnd: HWND) {
         let _ = SetWindowTheme(header, PCWSTR::null(), PCWSTR::null());
     }
     let _ = InvalidateRect(Some(lv), None, true);
+    let _ = InvalidateRect(Some(header), None, true);
 }
 
 unsafe fn rebuild_columns(hwnd: HWND, view: HistoryView) {
@@ -398,6 +404,130 @@ pub(crate) unsafe fn refresh(hwnd: HWND, force: bool) {
         let _ = InvalidateRect(Some(lv), None, false);
     }
     set_text(hwnd, ID_HIST_INFO, &render_info(s, view, count, key.3));
+}
+
+/// Dark-mode column headers. The themed header ignores `SetTextColor`
+/// (black text on the dark list) and the list view swallows custom-draw
+/// results for it, so the header is subclassed and painted here whenever
+/// the app theme is dark. Light mode defers to the system look.
+mod dark_header {
+    use windows::{
+        core::PWSTR,
+        Win32::{
+            Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+            Graphics::Gdi::{
+                BeginPaint, CreatePen, DeleteObject, DrawTextW, EndPaint, FillRect, LineTo,
+                MoveToEx, SelectObject, SetBkMode, SetTextColor, DT_END_ELLIPSIS, DT_LEFT,
+                DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HFONT, PAINTSTRUCT, PS_SOLID,
+                TRANSPARENT,
+            },
+            UI::{
+                Controls::*,
+                Shell::{DefSubclassProc, SetWindowSubclass},
+                WindowsAndMessaging::{GetClientRect, WM_ERASEBKGND, WM_GETFONT, WM_PAINT},
+            },
+        },
+    };
+
+    use super::{cached_brush, sc, theme_is_dark, ThemeColors};
+
+    const SUBCLASS_ID: usize = 0x4B43_4844; // "KCHD"
+
+    pub(super) unsafe fn install(header: HWND) {
+        if !header.is_invalid() {
+            let _ = SetWindowSubclass(header, Some(proc), SUBCLASS_ID, 0);
+        }
+    }
+
+    unsafe extern "system" fn proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _id: usize,
+        _data: usize,
+    ) -> LRESULT {
+        if theme_is_dark() {
+            match msg {
+                WM_ERASEBKGND => return LRESULT(1),
+                WM_PAINT => {
+                    let mut ps = PAINTSTRUCT::default();
+                    let hdc = BeginPaint(hwnd, &mut ps);
+                    paint(hwnd, hdc);
+                    let _ = EndPaint(hwnd, &ps);
+                    return LRESULT(0);
+                }
+                _ => {}
+            }
+        }
+        DefSubclassProc(hwnd, msg, wparam, lparam)
+    }
+
+    unsafe fn paint(header: HWND, hdc: windows::Win32::Graphics::Gdi::HDC) {
+        let c = ThemeColors::new(true);
+        let mut client = RECT::default();
+        let _ = GetClientRect(header, &mut client);
+        // Background, including the strip right of the last column.
+        FillRect(hdc, &client, cached_brush(c.tab_track));
+
+        let font = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+            header,
+            WM_GETFONT,
+            Some(WPARAM(0)),
+            Some(LPARAM(0)),
+        );
+        let old_font = SelectObject(hdc, HFONT(font.0 as *mut _).into());
+        let _ = SetTextColor(hdc, c.text_secondary);
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let pen = CreatePen(PS_SOLID, 1, c.card_border);
+        let old_pen = SelectObject(hdc, pen.into());
+
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        let count = SendMessageW(header, HDM_GETITEMCOUNT, Some(WPARAM(0)), Some(LPARAM(0))).0;
+        for index in 0..count.max(0) as usize {
+            let mut item_rc = RECT::default();
+            SendMessageW(
+                header,
+                HDM_GETITEMRECT,
+                Some(WPARAM(index)),
+                Some(LPARAM(&mut item_rc as *mut _ as isize)),
+            );
+            let mut text = [0u16; 64];
+            let mut item = HDITEMW {
+                mask: HDI_TEXT | HDI_FORMAT,
+                pszText: PWSTR(text.as_mut_ptr()),
+                cchTextMax: text.len() as i32,
+                ..Default::default()
+            };
+            SendMessageW(
+                header,
+                HDM_GETITEMW,
+                Some(WPARAM(index)),
+                Some(LPARAM(&mut item as *mut _ as isize)),
+            );
+            let len = text.iter().position(|&u| u == 0).unwrap_or(text.len());
+            let mut rc = item_rc;
+            rc.left += sc(8);
+            rc.right -= sc(8);
+            let align = if item.fmt.0 & HDF_RIGHT.0 != 0 {
+                DT_RIGHT
+            } else {
+                DT_LEFT
+            };
+            DrawTextW(
+                hdc,
+                &mut text[..len],
+                &mut rc,
+                align | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+            );
+            // Thin divider on the item's right edge.
+            let _ = MoveToEx(hdc, item_rc.right - 1, item_rc.top + sc(4), None);
+            let _ = LineTo(hdc, item_rc.right - 1, item_rc.bottom - sc(4));
+        }
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(pen.into());
+        SelectObject(hdc, old_font);
+    }
 }
 
 /// `WM_NOTIFY` from the list: serve cell text and color blocked rows.

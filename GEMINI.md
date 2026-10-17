@@ -44,7 +44,7 @@ cargo check --workspace --all-targets
 - `config::VERSION` == `Cargo.toml` version == `v{VERSION}` tag (`version_sync.rs`).
 - No `KCFIX_DBG_*`/ad-hoc log code in commits; no GUI-opening tests
   (they freeze the runner — only `--version`/`-V` smoke tests).
-- Re-export only what is used; every visible string needs KO+EN.
+- Re-export only what is used; every visible string needs every shipped language (registry in `src/i18n/language.rs`; `sLanguage=auto` follows Windows: Korean on a Korean system, else English; `--check-language`, `KCFIX_LOCALE` for diagnostics).
 - Prefer tightening an existing assertion over adding a hollow test.
 
 ## Open risks

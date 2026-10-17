@@ -36,7 +36,7 @@ use crate::{
     app::state::SHARED,
     config::{self, Settings},
     debounce::{MeasureFrom, LOG_LIMIT_MAX, LOG_LIMIT_MIN},
-    i18n::{strings, Language},
+    i18n::{strings, system_language, LanguagePref},
     input::sound::{play_notification_sound, play_path_for_preview},
 };
 
@@ -276,14 +276,19 @@ fn apply_sound_async(path: Option<String>) {
 
 /// Language combo: switch the UI right away and remember the choice.
 pub(crate) unsafe fn on_language_changed(hwnd: HWND) {
-    let lang = Language::from_combo_index(combo_sel(hwnd, ID_COMBO_LANG));
+    // Row 0 is "Automatic" (follow Windows); the rest are fixed languages.
+    let pref = LanguagePref::from_combo_index(combo_sel(hwnd, ID_COMBO_LANG));
+    if let Some(saved) = SAVED.get() {
+        saved.lock().unwrap().language = pref;
+    }
+    let lang = pref.resolve(system_language());
     if lang == current_lang() {
+        // Only the stored choice changed (e.g. Automatic -> the language it
+        // already resolves to): remember it, nothing to retranslate.
+        persist_live();
         return;
     }
     set_lang(lang);
-    if let Some(saved) = SAVED.get() {
-        saved.lock().unwrap().language = lang;
-    }
     persist_live();
     apply_language(hwnd);
     refresh_status(hwnd);
@@ -382,7 +387,7 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
     new_settings.close_to_tray = close_to_tray;
     new_settings.record_all_keys = record_all;
     new_settings.measure_from = measure;
-    new_settings.language = current_lang();
+    new_settings.language = LanguagePref::from_combo_index(combo_sel(hwnd, ID_COMBO_LANG));
     new_settings.min_chatter_ms = min_chatter;
     new_settings.exclude_injected = exclude_injected;
     new_settings.log_limit = log_limit;

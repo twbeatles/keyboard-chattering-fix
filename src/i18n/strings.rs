@@ -5,134 +5,147 @@
 
 use super::language::Language;
 
-pub struct Strings {
-    // Window chrome
-    pub title: &'static str,
-    pub subtitle: &'static str,
-    pub status_on: &'static str,
-    pub status_off: &'static str,
-    pub tab_home: &'static str,
-    pub tab_history: &'static str,
-    pub tab_settings: &'static str,
-    pub tab_advanced: &'static str,
-    pub footer_tray: &'static str,
-    pub footer_exit: &'static str,
+/// Declares `Strings` and, for tests, a listing of every field, so
+/// "no empty/missing translation" is checked for all fields without a
+/// hand-kept list that could drift.
+macro_rules! define_strings {
+    (
+        texts: [$($text:ident),* $(,)?],
+        lists: [$($list:ident),* $(,)?] $(,)?
+    ) => {
+        pub struct Strings {
+            $(pub $text: &'static str,)*
+            $(pub $list: &'static [&'static str],)*
+        }
 
-    // Home
-    pub enable_filter: &'static str,
-    pub home_desc: &'static str,
-    pub card_stats: &'static str,
-    pub stat_total: &'static str,
-    pub stat_blocked: &'static str,
-    pub stat_ratio: &'static str,
-    pub last_blocked_fmt: &'static str,
-    pub last_blocked_none: &'static str,
-    pub top_chattered_fmt: &'static str,
-    pub top_chattered_none: &'static str,
-    pub card_tools: &'static str,
-    pub clean_mode_btn: &'static str,
-    pub reset_stats_btn: &'static str,
-    pub open_cpl_btn: &'static str,
-    pub home_tip: &'static str,
+        #[cfg(test)]
+        impl Strings {
+            /// (field name, text) for every single-line field.
+            pub fn texts(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($text), self.$text)),*]
+            }
 
-    // Cleaning mode overlay
-    pub clean_title: &'static str,
-    pub clean_body: &'static str,
-    pub clean_end_btn: &'static str,
-
-    // History
-    pub history_views: &'static [&'static str],
-    pub history_search_cue: &'static str,
-    pub history_clear_btn: &'static str,
-    pub col_time: &'static str,
-    pub col_key: &'static str,
-    pub col_result: &'static str,
-    pub col_gap: &'static str,
-    pub col_presses: &'static str,
-    pub col_blocked: &'static str,
-    pub col_rate: &'static str,
-    pub col_threshold: &'static str,
-    pub result_blocked: &'static str,
-    pub result_passed: &'static str,
-    pub threshold_custom_fmt: &'static str,
-    pub history_count_fmt: &'static str,
-    pub history_note_blocked: &'static str,
-    pub history_note_all_off: &'static str,
-    pub history_note_all_on: &'static str,
-    pub history_note_keys: &'static str,
-
-    // Settings
-    pub card_threshold: &'static str,
-    pub threshold_label: &'static str,
-    pub unit_ms: &'static str,
-    pub threshold_hint: &'static str,
-    pub card_sound: &'static str,
-    pub play_sound: &'static str,
-    pub sound_test: &'static str,
-    pub sound_file_cue: &'static str,
-    pub sound_browse: &'static str,
-    pub sound_filter: &'static str,
-    pub card_app: &'static str,
-    pub autostart: &'static str,
-    pub minimize_on_launch: &'static str,
-    pub close_to_tray: &'static str,
-    pub language_label: &'static str,
-    pub save: &'static str,
-    pub status_saved: &'static str,
-    pub status_dirty: &'static str,
-    pub save_failed: &'static str,
-
-    // Advanced
-    pub card_detect: &'static str,
-    pub measure_from_label: &'static str,
-    pub measure_options: &'static [&'static str],
-    pub min_chatter_label: &'static str,
-    pub min_chatter_unit: &'static str,
-    pub min_chatter_hint: &'static str,
-    pub exclude_injected: &'static str,
-    pub card_log: &'static str,
-    pub record_all_keys: &'static str,
-    pub log_limit_label: &'static str,
-    pub log_limit_unit: &'static str,
-    pub log_note: &'static str,
-
-    // Menu bar
-    pub menu_file: &'static str,
-    pub menu_hide: &'static str,
-    pub menu_tools: &'static str,
-    pub menu_protect: &'static str,
-    pub menu_clear_log: &'static str,
-    pub menu_open_config: &'static str,
-    pub menu_help: &'static str,
-    pub menu_homepage: &'static str,
-    pub menu_about: &'static str,
-    pub about_fmt: &'static str,
-
-    // Tray
-    pub tray_tip_on: &'static str,
-    pub tray_tip_off: &'static str,
-    pub tray_balloon: &'static str,
-    pub menu_show: &'static str,
-    pub menu_disable: &'static str,
-    pub menu_enable: &'static str,
-    pub menu_cleaning: &'static str,
-    pub menu_update: &'static str,
-    pub menu_exit: &'static str,
-
-    // Dialogs
-    pub already_running: &'static str,
-    pub reset_confirm: &'static str,
-    pub update_title: &'static str,
-    pub update_failed_title: &'static str,
-    pub update_latest: &'static str,
-    pub update_available: &'static str,
-    pub hook_failed: &'static str,
-    pub autostart_failed: &'static str,
-    pub update_busy: &'static str,
+            /// (field name, items) for every list field.
+            pub fn lists(&self) -> Vec<(&'static str, &'static [&'static str])> {
+                vec![$((stringify!($list), self.$list)),*]
+            }
+        }
+    };
 }
 
-/// Language names are shown in their own language, so they never change.
-pub const LANGUAGE_NAMES: &[&str] = &["한국어", "English"];
+define_strings! {
+    texts: [
+        title,
+        subtitle,
+        status_on,
+        status_off,
+        tab_home,
+        tab_history,
+        tab_settings,
+        tab_advanced,
+        footer_tray,
+        footer_exit,
+        enable_filter,
+        home_desc,
+        card_stats,
+        stat_total,
+        stat_blocked,
+        stat_ratio,
+        last_blocked_fmt,
+        last_blocked_none,
+        top_chattered_fmt,
+        top_chattered_none,
+        card_tools,
+        clean_mode_btn,
+        reset_stats_btn,
+        open_cpl_btn,
+        home_tip,
+        clean_title,
+        clean_body,
+        clean_end_btn,
+        history_search_cue,
+        history_clear_btn,
+        col_time,
+        col_key,
+        col_result,
+        col_gap,
+        col_presses,
+        col_blocked,
+        col_rate,
+        col_threshold,
+        result_blocked,
+        result_passed,
+        threshold_custom_fmt,
+        history_count_fmt,
+        history_note_blocked,
+        history_note_all_off,
+        history_note_all_on,
+        history_note_keys,
+        card_threshold,
+        threshold_label,
+        unit_ms,
+        threshold_hint,
+        card_sound,
+        play_sound,
+        sound_test,
+        sound_file_cue,
+        sound_browse,
+        sound_filter,
+        card_app,
+        autostart,
+        minimize_on_launch,
+        close_to_tray,
+        language_label,
+        language_auto,
+        save,
+        status_saved,
+        status_dirty,
+        save_failed,
+        card_detect,
+        measure_from_label,
+        min_chatter_label,
+        min_chatter_unit,
+        min_chatter_hint,
+        exclude_injected,
+        card_log,
+        record_all_keys,
+        log_limit_label,
+        log_limit_unit,
+        log_note,
+        menu_file,
+        menu_hide,
+        menu_tools,
+        menu_protect,
+        menu_clear_log,
+        menu_open_config,
+        menu_help,
+        menu_homepage,
+        menu_about,
+        about_fmt,
+        tray_tip_on,
+        tray_tip_off,
+        tray_balloon,
+        menu_show,
+        menu_disable,
+        menu_enable,
+        menu_cleaning,
+        menu_update,
+        menu_exit,
+        already_running,
+        reset_confirm,
+        update_title,
+        update_failed_title,
+        update_latest,
+        update_available,
+        hook_failed,
+        autostart_failed,
+        update_busy,
+    ],
+    lists: [
+        history_views,
+        measure_options,
+    ],
+}
 
 static KO: Strings = Strings {
     title: "키보드 채터링 방지",
@@ -201,6 +214,7 @@ static KO: Strings = Strings {
     minimize_on_launch: "실행할 때 창 없이 트레이로 시작",
     close_to_tray: "닫기(X)를 눌러도 트레이에서 계속 실행",
     language_label: "언어 (Language)",
+    language_auto: "자동 (Windows 언어)",
     save: "저장",
     status_saved: "✓ 저장했어요",
     status_dirty: "저장하지 않은 변경 사항이 있어요",
@@ -318,6 +332,7 @@ static EN: Strings = Strings {
     minimize_on_launch: "Start hidden in the tray",
     close_to_tray: "Keep running in the tray when closed (X)",
     language_label: "Language (언어)",
+    language_auto: "Auto (Windows language)",
     save: "Save",
     status_saved: "✓ Saved",
     status_dirty: "You have unsaved changes",
@@ -402,40 +417,82 @@ mod tests {
         s.matches("{}").count()
     }
 
-    /// Both languages must agree on every format string's placeholder count,
-    /// otherwise one language silently drops or misplaces a value.
+    fn others() -> impl Iterator<Item = Language> {
+        Language::ALL
+            .iter()
+            .copied()
+            .filter(|l| *l != Language::FALLBACK)
+    }
+
+    /// Every field of every language is filled in. A forgotten placeholder
+    /// such as an empty string would otherwise show up as a blank label.
     #[test]
-    fn format_strings_have_matching_placeholders() {
-        let (ko, en) = (strings(Language::Ko), strings(Language::En));
-        for (k, e, n) in [
-            (ko.last_blocked_fmt, en.last_blocked_fmt, 2),
-            (ko.top_chattered_fmt, en.top_chattered_fmt, 3),
-            (ko.threshold_custom_fmt, en.threshold_custom_fmt, 1),
-            (ko.history_count_fmt, en.history_count_fmt, 1),
-            (ko.footer_tray, en.footer_tray, 1),
-            (ko.footer_exit, en.footer_exit, 1),
-            (ko.about_fmt, en.about_fmt, 3),
-            (ko.update_latest, en.update_latest, 1),
-            (ko.update_available, en.update_available, 2),
-        ] {
-            assert_eq!(placeholders(k), n, "ko: {k}");
-            assert_eq!(placeholders(e), n, "en: {e}");
+    fn every_text_of_every_language_is_filled_in() {
+        for lang in Language::ALL {
+            let s = strings(*lang);
+            for (name, text) in s.texts() {
+                assert!(!text.trim().is_empty(), "{lang:?}.{name} is empty");
+            }
+            for (name, items) in s.lists() {
+                assert!(!items.is_empty(), "{lang:?}.{name} has no items");
+                assert!(
+                    items.iter().all(|i| !i.trim().is_empty()),
+                    "{lang:?}.{name}"
+                );
+            }
+        }
+    }
+
+    /// A translation must carry the same `{}` placeholders as the English
+    /// reference, otherwise a value is silently dropped or misplaced.
+    #[test]
+    fn every_language_keeps_the_reference_placeholders() {
+        let reference = strings(Language::FALLBACK);
+        for lang in others() {
+            let s = strings(lang);
+            for ((name, want), (_, got)) in reference.texts().into_iter().zip(s.texts()) {
+                assert_eq!(
+                    placeholders(got),
+                    placeholders(want),
+                    "{lang:?}.{name}: {got}"
+                );
+            }
+        }
+    }
+
+    /// Every field is translated, not copied from English. Short brand-like
+    /// or numeric texts may legitimately match (`Home`/`홈` aside), so only
+    /// sentence-length text is required to differ.
+    #[test]
+    fn long_texts_are_actually_translated() {
+        let reference = strings(Language::FALLBACK);
+        for lang in others() {
+            let s = strings(lang);
+            for ((name, want), (_, got)) in reference.texts().into_iter().zip(s.texts()) {
+                if want.chars().count() > 24 {
+                    assert_ne!(got, want, "{lang:?}.{name} is still the English text");
+                }
+            }
         }
     }
 
     #[test]
-    fn option_lists_have_same_length_in_both_languages() {
-        let (ko, en) = (strings(Language::Ko), strings(Language::En));
-        assert_eq!(ko.history_views.len(), 3);
-        assert_eq!(en.history_views.len(), 3);
-        assert_eq!(ko.measure_options.len(), 2);
-        assert_eq!(en.measure_options.len(), 2);
+    fn option_lists_have_same_length_in_every_language() {
+        let reference = strings(Language::FALLBACK);
+        for lang in others() {
+            let s = strings(lang);
+            for ((name, want), (_, got)) in reference.lists().into_iter().zip(s.lists()) {
+                assert_eq!(got.len(), want.len(), "{lang:?}.{name}");
+            }
+        }
+        assert_eq!(reference.history_views.len(), 3);
+        assert_eq!(reference.measure_options.len(), 2);
     }
 
     #[test]
     fn tray_tip_fits_notify_icon_buffer() {
         // NOTIFYICONDATAW.szTip holds 128 UTF-16 units including the NUL.
-        for lang in [Language::Ko, Language::En] {
+        for lang in Language::ALL.iter().copied() {
             let s = strings(lang);
             for tip in [s.tray_tip_on, s.tray_tip_off] {
                 assert!(tip.encode_utf16().count() < 128, "{tip}");

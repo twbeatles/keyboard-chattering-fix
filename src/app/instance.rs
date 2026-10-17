@@ -72,12 +72,12 @@ pub(crate) fn bring_existing_to_front() {
 
 /// Tell the user a previous instance is already filtering input.
 #[cfg(windows)]
-pub(crate) fn show_already_running(language: &crate::i18n::Language) {
+pub(crate) fn show_already_running(language: crate::i18n::Language) {
     use windows::{
         core::HSTRING,
         Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK},
     };
-    let s = crate::i18n::strings(*language);
+    let s = crate::i18n::strings(language);
     let text = HSTRING::from(s.already_running);
     let title = HSTRING::from(s.title);
     unsafe {

@@ -40,10 +40,14 @@ impl HelperLang {
     /// Environment variable the app sets when launching the helper.
     pub const ENV: &'static str = "KCFIX_LANG";
 
+    /// `None` is a pre-`KCFIX_LANG` app, which only ever spoke Korean. Any
+    /// code the helper has no text for (a language added to the app later)
+    /// gets English rather than Korean.
     pub fn from_code(code: Option<&str>) -> Self {
         match code.map(|c| c.trim().to_ascii_lowercase()) {
-            Some(c) if c == "en" => Self::En,
-            _ => Self::Ko,
+            None => Self::Ko,
+            Some(c) if c == "ko" => Self::Ko,
+            Some(_) => Self::En,
         }
     }
 
@@ -441,6 +445,8 @@ mod tests {
         assert_eq!(HelperLang::from_code(None), HelperLang::Ko);
         assert_eq!(HelperLang::from_code(Some("ko")), HelperLang::Ko);
         assert_eq!(HelperLang::from_code(Some(" EN ")), HelperLang::En);
+        // A language the app gains later still gets readable English.
+        assert_eq!(HelperLang::from_code(Some("ja")), HelperLang::En);
         let err = HelperError::WaitTimeout(7);
         assert_eq!(err.message(HelperLang::Ko), err.to_string());
         let en = err.message(HelperLang::En);

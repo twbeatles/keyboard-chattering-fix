@@ -9,7 +9,7 @@ Windows 저수준 키보드 훅(`WH_KEYBOARD_LL`) 기반 채터링 방지 상주
 - `src/input/` — `hook`(전용 훅 스레드 `spawn_hook_thread` + 키별 `decide`, 훅에서 할당·파일 I/O 금지), `sound`(캐시된 WAV 재생)
 - `src/config/` — `model`(`Settings`), `storage`(원자적 INI 저장·`.bak` 폴백), `autostart`(Run 인용 경로), `sound`(`ValidatedSound`: 경로 검증 + UTF-16 사전 인코딩)
 - `src/debounce.rs` — 시간 기반 필터 코어 (O(1)/이벤트)
-- `src/i18n/` — `language` + `strings` (모든 가시 문자열은 한/영 쌍으로 존재)
+- `src/i18n/` — `language`(`Language::ALL` 레지스트리, `LanguagePref`=자동/고정, `system_language()` Windows 언어 감지) + `strings`(모든 가시 문자열은 **지원 언어 전부**에 존재). 새 언어 추가 절차는 `language.rs` 상단 주석: 변형 추가 → `ALL`/`code`/`native_name` → `strings.rs` 표 + `strings()` 분기 → `updater/error.rs` 분기(컴파일러가 빠뜨린 곳을 알려줌). `strings.rs` 테스트가 모든 언어의 빈 문구·플레이스홀더·번역 누락을 영어 기준으로 검사
 - `src/ui/` — `layout`(선언적 컨트롤 표: 페이지·논리 좌표·텍스트 바인딩, DPI 스케일 `sc()`; 생성/번역/색/페이지 전환이 모두 이 표를 순회), `window`(메시지 디스패치·페인트·페이지 전환), `widgets`(오너드로 토글/버튼/탭/상태 알약), `stats`(홈 통계: 스냅샷→렌더→diff), `history`(기록 탭: 순수 렌더 + 가상 ListView), `keys`(VK 이름·키 필터), `commands`(메뉴바·트레이·버튼 공용 동작), `menu`(메뉴 바), `tray`, `settings_form`(폼 로드·변경 표시·저장), `update`(워커 스레드), `paint`(테마 캐시·폰트·컨트롤 테마), `text`, `controls`, `dialog`, `ids`, `state`
 - `src/updater/` + `crates/kcfix-updater/` — Ed25519 서명 매니페스트, 핀 고정 URL, 이중 SHA-256 검증, 헬퍼 교체/롤백. 오류는 `UpdateErrorKind`(한/영 문구 내장)로 표현하고 UI는 `err.message(lang)`로 표시
 
@@ -42,11 +42,13 @@ cargo check --workspace --all-targets
 - `KCFIX_DBG_*`·`dlog` 같은 임시 진단 코드는 커밋 금지 (과거 응답없음 진단 잔재 — 완전히 제거됨).
 - `pub use` 허브 재수출은 실제로 쓰이는 것만 (`unused_imports` 경고 대상).
 - 테스트는 개수 채우기 금지: `CARGO_BIN_EXE_*` 스모크, 경계값·폴백 단위 테스트, 기존 약한 assertion 강화(`<= 11` → `== 10` 같은) 위주.
+- 새 가시 문자열은 모든 지원 언어에 추가 (`strings.rs` 테스트가 강제).
 - GUI를 여는 테스트 금지 (러너가 멈춤). `--version`/`-V` 경로만 실행 테스트.
 
 ## 알려진 주의점
 
 - GUI 기동 직후 응답없음 리포트 이력 있음 — 타이머 `SetWindowTextW` 경로 의심. 현재 변경분(락 밖 Win32 호출·diff 갱신·틱 재진입 가드·느린 틱 로깅)이 노출 면적을 줄였으나 원인 확정 전. 훅은 전용 스레드로 분리되어 UI가 멈춰도 필터는 계속 동작함.
+- 언어 설정(`sLanguage`)은 `auto`(기본: Windows 언어 따라가기, 한국어면 한국어·그 외 영어) 또는 언어 코드. `KeyboardChatteringFix.exe --check-language`가 자동 선택 결과를 출력하고, 환경 변수 `KCFIX_LOCALE=de-DE`로 다른 PC의 언어를 재현·테스트할 수 있음. v0.2.1 이하가 파일에 저장해 둔 `ko`/`en`은 고정 언어로 유지됨.
 - 단일 인스턴스 테스트는 고유 뮤텍스 이름을 써서 실제 트레이 앱 옆에서도 통과함. `hook_runs_on_a_dedicated_thread_and_stops`는 테스트 중 실제 LL 훅을 잠깐 설치함(전부 통과시킴, 데스크톱 없는 세션에서는 건너뜀).
 - 키별 임계값(`key.XX`)은 설정 파일 전용, UI 없음. 파일 편집 후 **Save**를 누르면 즉시 적용, 아니면 재시작 시 적용.
 - 업데이트 헬퍼는 인앱 업데이트로 교체되지 않음 → 헬퍼 CLI는 추가만 가능, 새 정보는 환경 변수로 전달(`docs/UPDATE.md` "헬퍼 호환성 정책").

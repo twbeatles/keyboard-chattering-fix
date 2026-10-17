@@ -10,7 +10,7 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use super::model::Settings;
 use crate::{
     debounce::{MeasureFrom, LOG_LIMIT_MAX, LOG_LIMIT_MIN},
-    i18n::Language,
+    i18n::LanguagePref,
 };
 
 pub fn config_path() -> PathBuf {
@@ -103,7 +103,7 @@ fn parse(text: &str) -> Settings {
         }
     }
     if let Some(v) = map.get("sLanguage") {
-        s.language = Language::from_code(v);
+        s.language = LanguagePref::from_setting(v);
     }
     if let Some(v) = map.get("sMeasureFrom") {
         s.measure_from = if v.eq_ignore_ascii_case("press") {
@@ -173,7 +173,7 @@ pub fn save(s: &Settings) -> bool {
         if s.close_to_tray { 1 } else { 0 },
         if s.record_all_keys { 1 } else { 0 },
         s.log_limit,
-        s.language.code(),
+        s.language.setting_value(),
         match s.measure_from {
             MeasureFrom::Press => "press",
             MeasureFrom::Release => "release",
@@ -214,6 +214,7 @@ pub fn save(s: &Settings) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Language;
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static DIR_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -254,12 +255,70 @@ mod tests {
             assert!(s.play_sound);
             assert_eq!(s.sound_file.as_deref(), Some(r"C:\s.wav"));
             assert_eq!(s.log_limit, 10);
-            assert_eq!(s.language, Language::En);
+            assert_eq!(s.language, LanguagePref::Fixed(Language::En));
             assert_eq!(s.measure_from, MeasureFrom::Press);
             assert_eq!(s.min_chatter_ms, 1000);
             assert!(!s.exclude_injected);
             assert_eq!((s.total_presses, s.blocked_presses), (7, 2));
             assert_eq!(s.per_key_ms[0x41], Some(200));
+        });
+    }
+
+    #[test]
+    fn language_defaults_to_automatic_and_round_trips() {
+        with_isolated_appdata(|dir| {
+            let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+            std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+            // A settings file without the key (fresh install, hand-made file)
+            // follows the Windows language.
+            std::fs::write(
+                &ini,
+                "[KeyboardChatteringFix]
+iThreshold=60
+",
+            )
+            .unwrap();
+            assert_eq!(load().language, LanguagePref::Auto);
+            // No file at all is the same.
+            std::fs::remove_file(&ini).unwrap();
+            assert_eq!(load().language, LanguagePref::Auto);
+
+            for (text, want) in [
+                ("auto", LanguagePref::Auto),
+                ("ko", LanguagePref::Fixed(Language::Ko)),
+                ("en", LanguagePref::Fixed(Language::En)),
+                // v0.2.x wrote the code of the resolved language; still honoured.
+                ("KO", LanguagePref::Fixed(Language::Ko)),
+                ("klingon", LanguagePref::Auto),
+            ] {
+                std::fs::write(
+                    &ini,
+                    format!(
+                        "[KeyboardChatteringFix]
+sLanguage={text}
+"
+                    ),
+                )
+                .unwrap();
+                assert_eq!(load().language, want, "{text}");
+            }
+
+            for pref in [LanguagePref::Auto, LanguagePref::Fixed(Language::Ko)] {
+                let s = Settings {
+                    language: pref,
+                    ..Default::default()
+                };
+                assert!(save(&s));
+                assert_eq!(load().language, pref);
+            }
+            let saved = std::fs::read_to_string(&ini).unwrap();
+            assert!(
+                saved.contains(
+                    "sLanguage=ko
+"
+                ),
+                "{saved}"
+            );
         });
     }
 
@@ -285,7 +344,7 @@ mod tests {
                 sound_file: Some(r"D:\audio\blip.wav".to_string()),
                 minimize_on_launch: true,
                 close_to_tray: false,
-                language: Language::En,
+                language: LanguagePref::Fixed(Language::En),
                 per_key_ms,
                 measure_from: MeasureFrom::Press,
                 min_chatter_ms: 9,
@@ -318,7 +377,7 @@ mod tests {
             assert_eq!(back.sound_file.as_deref(), Some(r"D:\audio\blip.wav"));
             assert!(back.minimize_on_launch);
             assert!(!back.close_to_tray);
-            assert_eq!(back.language, Language::En);
+            assert_eq!(back.language, LanguagePref::Fixed(Language::En));
             assert_eq!(back.per_key_ms[0x20], Some(80));
             assert_eq!(back.measure_from, MeasureFrom::Press);
             assert_eq!(back.min_chatter_ms, 9);

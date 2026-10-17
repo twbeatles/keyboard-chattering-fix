@@ -96,3 +96,22 @@ fn check_helper_accepts_the_workspace_helper() {
         "{stdout}"
     );
 }
+
+/// `--check-language` reports what "Auto" resolves to: a locale name (or
+/// "unknown") and a shipped language code. Never opens the GUI.
+#[test]
+fn check_language_reports_the_automatic_language() {
+    let exe = env!("CARGO_BIN_EXE_keyboard-chattering-fix");
+    let output = Command::new(exe)
+        .arg("--check-language")
+        .output()
+        .expect("launch the built executable");
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .find(|l| l.starts_with("system language: "))
+        .unwrap_or_else(|| panic!("unexpected output: {stdout:?}"));
+    let code = line.rsplit("-> ").next().unwrap().trim();
+    assert!(code == "ko" || code == "en", "{line}");
+}

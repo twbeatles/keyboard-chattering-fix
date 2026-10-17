@@ -11,7 +11,7 @@ use windows::{
 use super::{history, ids::*, layout::SPECS, menu, state::current_lang, stats, tray};
 use crate::{
     config,
-    i18n::{fill, strings, LANGUAGE_NAMES},
+    i18n::{fill, strings, Language},
 };
 
 pub(crate) fn to_wide(s: &str) -> Vec<u16> {
@@ -105,7 +105,10 @@ pub(crate) unsafe fn apply_language(hwnd: HWND) {
     let measure = combo_sel(hwnd, ID_COMBO_MEASURE);
     fill_combo(hwnd, ID_COMBO_MEASURE, s.measure_options, measure);
     let lang = combo_sel(hwnd, ID_COMBO_LANG);
-    fill_combo(hwnd, ID_COMBO_LANG, LANGUAGE_NAMES, lang);
+    // "Automatic" first, then every shipped language in its own name.
+    let mut options: Vec<&str> = vec![s.language_auto];
+    options.extend(Language::ALL.iter().map(|l| l.native_name()));
+    fill_combo(hwnd, ID_COMBO_LANG, &options, lang);
     set_cue(hwnd, ID_EDIT_SOUND_FILE, s.sound_file_cue);
 
     let close_to_tray = super::state::SAVED

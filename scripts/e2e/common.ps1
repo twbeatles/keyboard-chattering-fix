@@ -21,6 +21,10 @@ public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
 public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, uint msg, UIntPtr wParam, IntPtr lParam, uint flags, uint timeoutMs, out UIntPtr result);
 [DllImport("user32.dll")]
 public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+[DllImport("user32.dll")]
+public static extern IntPtr GetDlgItem(IntPtr hwnd, int id);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern IntPtr SendMessageW(IntPtr hwnd, uint msg, IntPtr wParam, System.Text.StringBuilder lParam);
 [DllImport("kernel32.dll")]
 public static extern IntPtr OpenThread(uint access, bool inherit, uint threadId);
 [DllImport("kernel32.dll")]
@@ -124,6 +128,33 @@ function Send-Key {
     [KcfixE2E.Native]::keybd_event($Vk, 0, 0, [UIntPtr]::Zero)
     Start-Sleep -Milliseconds $HoldMs
     [KcfixE2E.Native]::keybd_event($Vk, 0, 2, [UIntPtr]::Zero)   # KEYEVENTF_KEYUP
+}
+
+# Text of a child control of the app's main window (WM_GETTEXT, cross-process safe).
+function Get-ControlText {
+    param([IntPtr]$Hwnd, [int]$Id)
+    $child = [KcfixE2E.Native]::GetDlgItem($Hwnd, $Id)
+    if ($child -eq [IntPtr]::Zero) { throw "control $Id not found" }
+    $sb = New-Object Text.StringBuilder 512
+    [void][KcfixE2E.Native]::SendMessageW($child, 0x000D, [IntPtr]512, $sb)   # WM_GETTEXT
+    $sb.ToString()
+}
+
+# Run the app's console flags (--version, --check-language, ...) and capture
+# stdout. The app is a GUI-subsystem exe, so `& exe` would neither wait nor capture.
+function Invoke-AppCli {
+    param([string]$Exe, [string[]]$Arguments, [hashtable]$Environment = @{})
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    foreach ($k in $Environment.Keys) { $psi.EnvironmentVariables[$k] = $Environment[$k] }
+    $psi.FileName = $Exe
+    $psi.Arguments = ($Arguments -join " ")
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $p = [Diagnostics.Process]::Start($psi)
+    $out = $p.StandardOutput.ReadToEnd()
+    [void]$p.WaitForExit(30000)
+    [PSCustomObject]@{ ExitCode = $p.ExitCode; Output = $out.Trim() }
 }
 
 function Stop-AppProcess([Diagnostics.Process]$Process) {

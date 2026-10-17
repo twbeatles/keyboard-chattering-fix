@@ -3,5 +3,5 @@
 mod language;
 mod strings;
 
-pub use language::Language;
-pub use strings::{fill, strings, Strings, LANGUAGE_NAMES};
+pub use language::{system_language, system_locale_name, Language, LanguagePref};
+pub use strings::{fill, strings, Strings};

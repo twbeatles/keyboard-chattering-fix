@@ -91,7 +91,7 @@ pub(crate) fn run(settings: config::Settings) {
         Some(guard) => guard,
         None => {
             bring_existing_to_front();
-            show_already_running(&settings.language);
+            show_already_running(settings.ui_language());
             return;
         }
     };
