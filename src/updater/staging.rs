@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::error::{UpdateError, UpdateErrorKind};
 use super::http::download_and_verify;
@@ -325,19 +325,43 @@ fn is_staging_file_name(name: &str) -> bool {
             || lower.starts_with("keyboardchatteringfix_update_"))
 }
 
+/// Staging files younger than this are never deleted: no update step holds
+/// one longer than a few minutes (helper wait 120 s + readiness 60 s), so a
+/// younger file may belong to an update that is still in flight — e.g. after
+/// the user relaunched the app while the helper waited (ISSUE-004).
+const STAGING_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
 /// Remove staging leftovers in %TEMP%: the helper copy always survives a
 /// successful update (a running helper cannot delete itself), and a crash can
 /// strand a replacement (G4). Runs once at startup, after the single-instance
-/// guard, so no update of this process is in flight. A helper that is still
+/// guard. Only files older than [`STAGING_MAX_AGE`] go: a younger file may
+/// belong to an update that is still in flight. A helper that is still
 /// running keeps its image locked and is simply skipped.
 pub fn cleanup_stale_staging() {
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+    cleanup_staging_dir(&std::env::temp_dir(), STAGING_MAX_AGE);
+}
+
+fn cleanup_staging_dir(dir: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let now = SystemTime::now();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        if is_staging_file_name(&name.to_string_lossy()) && entry.path().is_file() {
-            if let Err(err) = std::fs::remove_file(entry.path()) {
+        let path = entry.path();
+        if !is_staging_file_name(&name.to_string_lossy()) || !path.is_file() {
+            continue;
+        }
+        // A missing mtime or a fresh file may be an update still in flight:
+        // keep it.
+        let stale = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age >= max_age);
+        if stale {
+            if let Err(err) = std::fs::remove_file(&path) {
                 tracing::debug!(%err, file = ?name, "staging leftover still in use");
             }
         }
@@ -391,6 +415,30 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .contains("0.2.0"));
+    }
+
+    #[test]
+    fn cleanup_keeps_fresh_staging_and_drops_only_old() {
+        let dir = std::env::temp_dir().join(format!(
+            "kcfix_staging_age_{}_{}",
+            std::process::id(),
+            STAGING_SEQ.fetch_add(1, Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fresh = dir.join("keyboardchatteringfix_update_0.9.9_1_2_3.exe");
+        let other = dir.join("unrelated.exe");
+        std::fs::write(&fresh, b"fake").unwrap();
+        std::fs::write(&other, b"fake").unwrap();
+        // An hour's grace: a fresh in-flight file survives (ISSUE-004).
+        cleanup_staging_dir(&dir, Duration::from_secs(3600));
+        assert!(fresh.exists());
+        assert!(other.exists());
+        // Zero grace: the leftover is recognized and removed, others kept.
+        cleanup_staging_dir(&dir, Duration::ZERO);
+        assert!(!fresh.exists());
+        assert!(other.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

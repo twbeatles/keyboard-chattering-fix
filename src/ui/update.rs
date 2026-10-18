@@ -9,7 +9,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::*,
 };
 
-use super::{dialog::msg_box, ids::WM_UPDATE_EXIT, state::current_lang};
+use super::{dialog::msg_box, ids::WM_UPDATE_EXIT, state::current_lang, window::update_exit_nonce};
 use crate::i18n::{fill, strings, Language};
 
 /// Pure classification of an update-check result for the tray flow, split
@@ -125,7 +125,12 @@ pub(crate) fn spawn_update_check(hwnd: HWND) {
         // could strand the update with no filter running (ISSUE-003).
         // (Single-flight flag intentionally left set.)
         unsafe {
-            let _ = PostMessageW(Some(hwnd), WM_UPDATE_EXIT, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(
+                Some(hwnd),
+                WM_UPDATE_EXIT,
+                WPARAM(update_exit_nonce() as usize),
+                LPARAM(0),
+            );
         }
     });
 }

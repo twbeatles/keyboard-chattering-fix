@@ -89,7 +89,10 @@ unsafe fn input_since(since: u32) -> bool {
     GetLastInputInfo(&mut info).as_bool() && info.dwTime.wrapping_sub(since) as i32 > 0
 }
 
-unsafe fn send_probe() {
+/// Send one watchdog probe. Returns whether it left this process: a probe
+/// that never left cannot come back, so the caller must not arm a wait for
+/// it (ISSUE-001).
+unsafe fn send_probe() -> bool {
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
@@ -102,7 +105,7 @@ unsafe fn send_probe() {
             },
         },
     };
-    let _ = SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+    SendInput(&[input], std::mem::size_of::<INPUT>() as i32) != 0
 }
 
 /// Timer tick (UI thread). Returns whether the hook was restarted.
@@ -118,6 +121,7 @@ pub(crate) unsafe fn tick() -> bool {
             st.hooked = HOOK_EVENTS.load(Ordering::Relaxed);
             drop(st);
             tracing::warn!("keyboard hook missed its probe; restarting it");
+            super::diag::log_line("hook probe missed; restarting hook");
             let ok = restart();
             if ok {
                 *LAST_RESTART.lock().unwrap() = Some(clock_hh_mm());
@@ -143,9 +147,13 @@ pub(crate) unsafe fn tick() -> bool {
         return false;
     }
     if check(hooked, input_since(since)) == Step::Probe {
-        st.probe = Some((0, PROBES_SEEN.load(Ordering::Relaxed)));
+        let sent_at = PROBES_SEEN.load(Ordering::Relaxed);
         drop(st);
-        send_probe();
+        // Arm the wait only when the probe actually left: otherwise the next
+        // check retries instead of restarting a healthy hook (ISSUE-001).
+        if send_probe() {
+            STATE.lock().unwrap().probe = Some((0, sent_at));
+        }
     }
     false
 }

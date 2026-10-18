@@ -108,6 +108,7 @@ pub(crate) const ID_KEYS_EDIT: i32 = 705;
 pub(crate) const ID_KEYS_UNIT: i32 = 706;
 pub(crate) const ID_BTN_KEY_SET: i32 = 707;
 pub(crate) const ID_BTN_KEY_RESET: i32 = 708;
+pub(crate) const ID_BTN_KEY_STATS: i32 = 711;
 pub(crate) const ID_KEYS_ADVICE: i32 = 709;
 pub(crate) const ID_KEYS_NOTE: i32 = 710;
 
@@ -131,9 +132,11 @@ pub(crate) const MENU_RUN_ELEVATED: usize = 1016;
 pub(crate) const MENU_ELEVATED_AUTOSTART: usize = 1017;
 
 pub(crate) const WM_TRAY: u32 = WM_APP + 1;
-/// Posted from the update worker thread after the helper is launched; the
-/// window must be destroyed on the UI thread (this process has to exit so
-/// the helper can replace the executable file).
+/// Posted from the update/elevation worker threads after the helper is
+/// launched (or the elevated copy approved); the window must be destroyed on
+/// the UI thread (this process has to exit so the helper can replace the
+/// executable file). Carries this process's exit nonce in `wParam`: the id
+/// alone proves nothing, anyone in the session can post it (SEC-001).
 pub(crate) const WM_UPDATE_EXIT: u32 = WM_APP + 2;
 pub(crate) const TRAY_ID: u32 = 1;
 /// `RegisterHotKey` ids.

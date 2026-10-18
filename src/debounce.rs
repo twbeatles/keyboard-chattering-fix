@@ -190,6 +190,23 @@ impl Debouncer {
         self.clear_log();
     }
 
+    /// Forget one key's counters, measured gaps, and log rows (per-key
+    /// statistics reset, e.g. after replacing a switch). Global totals are
+    /// decremented to match, saturating at zero. Thresholds are kept.
+    pub fn clear_key_stats(&mut self, vk: u8) {
+        let i = vk as usize;
+        self.total_presses = self.total_presses.saturating_sub(self.per_key_presses[i]);
+        self.blocked_presses = self.blocked_presses.saturating_sub(self.per_key_blocked[i]);
+        self.per_key_presses[i] = 0;
+        self.per_key_blocked[i] = 0;
+        self.gap_hist[i] = [0; GAP_BUCKETS];
+        if self.last_blocked.is_some_and(|(b, _)| b == vk) {
+            self.last_blocked = None;
+        }
+        self.log_events.retain(|e| e.vk != vk);
+        self.log_seq += 1;
+    }
+
     /// Effective threshold for `vk` in ms and whether it is a per-key
     /// override (`key.XX` in the settings file) rather than the global one.
     pub fn key_threshold_ms(&self, vk: u8) -> (u64, bool) {
@@ -463,6 +480,35 @@ mod tests {
         assert!(d.decide(0x41, KeyEventKind::Down, ms(10)));
         assert_eq!(d.total_presses, 1);
         assert_eq!(d.blocked_presses, 0);
+    }
+
+    #[test]
+    fn clear_key_stats_forgets_one_key_only() {
+        let mut d = Debouncer::new(50);
+        d.record_all_keys = true;
+        // A and B chatter alike: one pass and one block each.
+        for (vk, t) in [(0x41, 0), (0x42, 100)] {
+            assert!(d.decide(vk, KeyEventKind::Down, ms(t)));
+            assert!(d.decide(vk, KeyEventKind::Up, ms(t + 10)));
+            assert!(!d.decide(vk, KeyEventKind::Down, ms(t + 20)));
+        }
+        assert_eq!((d.total_presses, d.blocked_presses), (4, 2));
+        assert_eq!(d.last_blocked.map(|(vk, _)| vk), Some(0x42));
+
+        d.clear_key_stats(0x41);
+        assert_eq!((d.per_key_presses[0x41], d.per_key_blocked[0x41]), (0, 0));
+        assert_eq!((d.per_key_presses[0x42], d.per_key_blocked[0x42]), (2, 1));
+        assert_eq!((d.total_presses, d.blocked_presses), (2, 1));
+        // Another key's "last blocked" survives.
+        assert_eq!(d.last_blocked.map(|(vk, _)| vk), Some(0x42));
+        assert!(d.gap_histogram(0x41).iter().all(|&n| n == 0));
+        assert!(!d.gap_histogram(0x42).iter().all(|&n| n == 0));
+        assert!(d.log_events.iter().all(|e| e.vk != 0x41));
+        assert_eq!(d.log_events.iter().filter(|e| e.vk == 0x42).count(), 2);
+        // Thresholds are kept.
+        d.set_key_threshold(0x41, Some(120));
+        d.clear_key_stats(0x41);
+        assert_eq!(d.key_threshold_ms(0x41), (120, true));
     }
 
     #[test]

@@ -699,6 +699,13 @@ pub(crate) static SPECS: &[Spec] = &[
         (32, 232, 300, 20),
         Some(|s| s.card_keys),
     ),
+    c(
+        ID_BTN_KEY_STATS,
+        Kind::Button,
+        KEYS,
+        (352, 226, 96, 29),
+        Some(|s| s.key_stats_btn),
+    ),
     c(ID_KEYS_LIST, Kind::List, KEYS, (32, 258, 416, 222), None),
     c(ID_KEYS_COMBO, Kind::Combo, KEYS, (32, 490, 150, 240), None),
     c(

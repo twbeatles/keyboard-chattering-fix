@@ -224,6 +224,8 @@ impl Drop for StatsTickGuard {
                 elapsed_ms = elapsed_ms,
                 "slow stats tick; investigate for UI hang (ISSUE-003)"
             );
+            // The GUI has no console: keep the evidence in the file log.
+            super::diag::log_line(&format!("slow stats tick: {elapsed_ms} ms"));
         }
     }
 }
@@ -536,7 +538,8 @@ mod tests {
     #[test]
     fn render_and_diff_sustained_tick_load() {
         // The 500 ms timer path must stay cheap: 10k render+diff cycles must
-        // finish far inside one tick budget (ISSUE-003 regression guard).
+        // finish far inside one tick budget (ISSUE-003 regression guard,
+        // PERF-002: the old 10 s bound could not catch a real regression).
         let rendered = render_stats(strings(Language::Ko), &idle_snapshot());
         let started = std::time::Instant::now();
         for _ in 0..10_000 {
@@ -544,7 +547,7 @@ mod tests {
             assert_eq!(diff_stats(&rendered, &next), StatsChanges::default());
         }
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(10),
+            started.elapsed() < std::time::Duration::from_secs(1),
             "render+diff too slow: {:?}",
             started.elapsed()
         );

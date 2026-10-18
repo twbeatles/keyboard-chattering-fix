@@ -427,6 +427,18 @@ pub(crate) unsafe fn clear_override(hwnd: HWND) {
     after_change(hwnd, vk, written);
 }
 
+/// "Clear stats": forget the picked key's counters and measured gaps.
+pub(crate) unsafe fn clear_key_stats(hwnd: HWND) {
+    let Some(vk) = picked_vk(hwnd) else {
+        return;
+    };
+    if let Some(shared) = SHARED.get() {
+        shared.lock().unwrap().debouncer.clear_key_stats(vk);
+    }
+    let written = settings_form::persist_live();
+    after_change(hwnd, vk, written);
+}
+
 pub(crate) unsafe fn on_mouse_toggled(hwnd: HWND, on: bool) {
     if !settings_form::set_mouse_filter(on) {
         let s = strings(current_lang());

@@ -13,14 +13,17 @@ pipeline. Single binary + `kcfix-updater` helper (Cargo workspace). Reply in Kor
 | Settings | `src/config/`: `model`, `storage`, `autostart`, `sound` |
 | Filter core | `src/debounce.rs` |
 | Strings (KO+EN pairs) | `src/i18n/` |
-| Window/tray/paint | `src/ui/`: `window`, `stats`, `text`, `settings_form`, `tray`, `update`, `paint`, … |
+| Window/tray/paint | `src/ui/`: `window`, `stats`, `text`, `settings_form`, `tray`, `update`, `paint`, `diag` (file log), … |
 | Update client/helper | `src/updater/`, `crates/kcfix-updater/` |
 
 ## Performance contracts (do not regress)
 
 1. **Hook**: runs on its own message-pump thread (`spawn_hook_thread`), never
    the UI thread. Lock + `decide` only — no allocation, no file I/O; the only
-   Win32 calls are the block sound (pre-encoded `Shared.sound_file.wide`).
+   Win32 calls are the block sound (pre-encoded `Shared.sound_file.wide`) and
+   the release-delay timer/message (`SetTimer`/`PostThreadMessageW`, one
+   timer). `SendInput` stays on the injector thread; diagnostics go to
+   `%TEMP%/kcfix-diag.log` (`ui::diag`), never from the hook.
 2. **500 ms timer**: snapshot under a short lock → `render_stats` (pure) →
    `diff_stats` → update only changed controls. Never call Win32 while
    holding the shared lock.

@@ -8,7 +8,7 @@
 //! release-update flow.
 
 use std::sync::{
-    atomic::{AtomicU32, Ordering},
+    atomic::{AtomicU32, AtomicU64, Ordering},
     Mutex,
 };
 
@@ -55,6 +55,55 @@ use crate::config::Settings;
 
 /// `TaskbarCreated`: Explorer restarted and dropped every tray icon.
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+/// Secret posted with `WM_UPDATE_EXIT`: a constant message id can be sent by
+/// any process in the session, but only the holder of this process's nonce
+/// (our own update/elevation worker) may exit it for replacement (SEC-001).
+static UPDATE_EXIT_NONCE: AtomicU64 = AtomicU64::new(0);
+
+/// Nonce for this process's `WM_UPDATE_EXIT`, for the two worker threads
+/// that post it (`update`, `elevation`). Zero until `on_create` mints one.
+pub(crate) fn update_exit_nonce() -> u64 {
+    UPDATE_EXIT_NONCE.load(Ordering::Acquire)
+}
+
+/// Whether `wparam` carries this process's exit nonce (SEC-001).
+fn update_exit_authenticated(wparam: usize) -> bool {
+    let nonce = UPDATE_EXIT_NONCE.load(Ordering::Acquire);
+    nonce != 0 && wparam as u64 == nonce
+}
+
+/// 64-bit secret from the OS RNG (`None` when unavailable).
+fn system_nonce() -> Option<u64> {
+    use windows::Win32::Security::Cryptography::{
+        BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+    };
+    let mut bytes = [0u8; 8];
+    unsafe {
+        if BCryptGenRandom(None, &mut bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG).is_err() {
+            return None;
+        }
+    }
+    Some(u64::from_ne_bytes(bytes))
+}
+
+/// Mint the exit nonce once, at window creation (UI thread, before any
+/// worker can post). Falls back to hashed process-unique values when the
+/// OS RNG is unavailable; never zero.
+fn mint_update_exit_nonce() {
+    let nonce = system_nonce().unwrap_or_else(|| {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        hasher.write_u64(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0),
+        );
+        hasher.finish()
+    });
+    UPDATE_EXIT_NONCE.store(if nonce == 0 { 1 } else { nonce }, Ordering::Release);
+}
 
 unsafe fn style_for(kind: Kind) -> WINDOW_STYLE {
     let tab = WS_TABSTOP.0;
@@ -164,6 +213,7 @@ unsafe fn on_create(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         Ordering::Relaxed,
     );
     let _ = SAVED.set(Mutex::new(init.clone()));
+    mint_update_exit_nonce();
 
     apply_window_chrome(hwnd);
     create_controls(hwnd, cs.hInstance);
@@ -334,6 +384,7 @@ unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
         (ID_KEYS_COMBO, CBN_SELCHANGE) => keys_page::on_combo_changed(hwnd),
         (ID_BTN_KEY_SET, BN_CLICKED) => keys_page::apply_override(hwnd),
         (ID_BTN_KEY_RESET, BN_CLICKED) => keys_page::clear_override(hwnd),
+        (ID_BTN_KEY_STATS, BN_CLICKED) => keys_page::clear_key_stats(hwnd),
         _ => {}
     }
 }
@@ -600,8 +651,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         _ if msg == WM_UPDATE_EXIT => {
-            // Update helper launched: exit so the executable can be replaced.
-            // WM_DESTROY persists counters and removes the tray icon.
+            // Anyone in the session can post the constant id: only the
+            // holder of this process's nonce exits it (SEC-001).
+            if !update_exit_authenticated(wparam.0) {
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            // Update helper launched (or elevated copy approved): exit so the
+            // executable can be replaced. WM_DESTROY persists counters and
+            // removes the tray icon.
             let _ = DestroyWindow(hwnd);
             LRESULT(0)
         }
@@ -721,5 +778,15 @@ mod tests {
         assert_eq!(session_reply(WM_QUERYENDSESSION, 0), SessionReply::AllowEnd);
         assert_eq!(session_reply(WM_ENDSESSION, 1), SessionReply::PersistNow);
         assert_eq!(session_reply(WM_ENDSESSION, 0), SessionReply::Ignore);
+    }
+
+    #[test]
+    fn update_exit_needs_this_process_nonce() {
+        UPDATE_EXIT_NONCE.store(0x1234_5678_9ABC_DEF0, Ordering::Relaxed);
+        assert!(update_exit_authenticated(0x1234_5678_9ABC_DEF0));
+        assert!(!update_exit_authenticated(0));
+        assert!(!update_exit_authenticated(0xDEAD_BEEF));
+        UPDATE_EXIT_NONCE.store(0, Ordering::Relaxed);
+        assert!(!update_exit_authenticated(0x1234_5678_9ABC_DEF0));
     }
 }

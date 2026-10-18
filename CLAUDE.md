@@ -11,7 +11,7 @@ Windows 저수준 키보드 훅(`WH_KEYBOARD_LL`) 기반 채터링 방지 상주
 - `src/debounce.rs` — 시간 기반 필터 코어 (O(1)/이벤트, 떼기 확인 만료 검사만 512칸 순회). `decide_event`가 `Decision`(Pass/Block/Defer/Flush) 반환. 타이밍은 물리 키 슬롯(`slot_of`: vk + 확장 플래그, 512칸), 통계·임계값은 vk(256). 차단된 Down 뒤에는 `held`를 세워 다음 오토리핏을 통과시킴(누르는 중 바운스), `VK_PACKET`/`VK_PROCESSKEY`는 항상 통과·미집계, 청소 모드에서 Up은 통과, 키별 간격 히스토그램(`gap_histogram`, 생성 시 1회 할당·훅은 증가만)
 - `src/recommend.rs` — 히스토그램 → 키별 권장 기준(`Advice`). 순수 함수, 단위 테스트
 - `src/i18n/` — `language`(`Language::ALL` 레지스트리, `LanguagePref`=자동/고정, `system_language()` Windows 언어 감지) + `strings`(모든 가시 문자열은 **지원 언어 전부**에 존재). 새 언어 추가 절차는 `language.rs` 상단 주석: 변형 추가 → `ALL`/`code`/`native_name` → `strings.rs` 표 + `strings()` 분기 → `updater/error.rs` 분기(컴파일러가 빠뜨린 곳을 알려줌). `strings.rs` 테스트가 모든 언어의 빈 문구·플레이스홀더·번역 누락을 영어 기준으로 검사
-- `src/ui/` — `layout`(선언적 컨트롤 표: 페이지·논리 좌표·텍스트 바인딩, DPI 스케일 `sc()`; 생성/번역/색/페이지 전환이 모두 이 표를 순회), `window`(메시지 디스패치·페인트·페이지 전환), `widgets`(오너드로 토글/버튼/탭/상태 알약), `stats`(홈 통계: 스냅샷→렌더→diff), `history`(기록 탭: 순수 렌더 + 가상 ListView, 리스트 공용 헬퍼 `setup_list`/`set_columns`/`write_cell`), `keys_page`(키·마우스 탭: 마우스 스위치·키별 기준·권장값. 변경은 `settings_form::set_key_override`/`set_mouse_filter`로 즉시 적용·저장), `keys`(VK 이름·키 필터·선택 목록), `foreground`(자동 일시 중지·관리자 창 감지: 전경 창이 바뀔 때만 프로세스 조회, 훅은 `Shared.suspended`만 읽음), `hotkeys`(단축키 파싱·등록), `watchdog`(훅 감시: 사용자 활동 중 훅 무소식이면 프로브 → 실패 시 `hook::restart`), `elevation`(관리자 권한 재실행·작업 스케줄러), `files`(CSV·설정 내보내기/가져오기), `commands`(메뉴바·트레이·버튼 공용 동작), `menu`(메뉴 바), `tray`, `settings_form`(폼 로드·변경 표시·저장), `update`(워커 스레드), `paint`(테마 캐시·폰트·컨트롤 테마), `text`, `controls`, `dialog`, `ids`, `state`
+- `src/ui/` — `layout`(선언적 컨트롤 표: 페이지·논리 좌표·텍스트 바인딩, DPI 스케일 `sc()`; 생성/번역/색/페이지 전환이 모두 이 표를 순회), `window`(메시지 디스패치·페인트·페이지 전환), `widgets`(오너드로 토글/버튼/탭/상태 알약), `stats`(홈 통계: 스냅샷→렌더→diff), `history`(기록 탭: 순수 렌더 + 가상 ListView, 리스트 공용 헬퍼 `setup_list`/`set_columns`/`write_cell`), `keys_page`(키·마우스 탭: 마우스 스위치·키별 기준·권장값. 변경은 `settings_form::set_key_override`/`set_mouse_filter`로 즉시 적용·저장), `keys`(VK 이름·키 필터·선택 목록), `foreground`(자동 일시 중지·관리자 창 감지: 전경 창이 바뀔 때만 프로세스 조회, 훅은 `Shared.suspended`만 읽음), `hotkeys`(단축키 파싱·등록), `watchdog`(훅 감시: 사용자 활동 중 훅 무소식이면 프로브 → 실패 시 `hook::restart`), `elevation`(관리자 권한 재실행·작업 스케줄러), `files`(CSV·설정 내보내기/가져오기), `commands`(메뉴바·트레이·버튼 공용 동작), `menu`(메뉴 바), `tray`, `settings_form`(폼 로드·변경 표시·저장), `update`(워커 스레드), `paint`(테마 캐시·폰트·컨트롤 테마), `text`, `controls`, `diag`(콘솔 없는 GUI용 파일 진단 로그), `dialog`, `ids`, `state`
 - `src/updater/` + `crates/kcfix-updater/` — Ed25519 서명 매니페스트, 핀 고정 URL, 이중 SHA-256 검증, 헬퍼 교체/롤백. 오류는 `UpdateErrorKind`(한/영 문구 내장)로 표현하고 UI는 `err.message(lang)`로 표시
 
 ## 핫패스 규칙 (성능)
@@ -23,7 +23,7 @@ Windows 저수준 키보드 훅(`WH_KEYBOARD_LL`) 기반 채터링 방지 상주
 - 기록 탭은 기록 탭이 보일 때만, `log_seq`가 바뀐 틱에만 다시 렌더. 리스트는 `LVS_OWNERDATA`라 행 문자열은 `LVN_GETDISPINFOW`에서 꺼내 씀.
 - 로그 버퍼 용량은 `Debouncer::set_log_limit`(UI 스레드)에서 미리 예약 → 훅의 `push_log`는 재할당하지 않음. `log_limit` 필드를 직접 쓰지 말 것.
 - 사운드 경로 검증(`resolve_sound_file`, 디스크 I/O)은 `SHARED` 락 밖, 워커 스레드에서(`apply_sound_async`, 세대 번호로 늦게 끝난 검증 무시). `ShellExecuteW`도 워커 스레드(COM 초기화 포함).
-- 설정 쓰기는 `persist_live`(종료·세션 종료·5분 자동 저장·통계 초기화·언어 변경)와 `on_save`뿐. 둘 다 디스크의 파일 전용 필드(`key.XX`)를 다시 읽어 병합(`Settings::adopt_file_only_fields`)하므로 실행 중 파일 편집이 보존됨.
+- 설정 쓰기는 `persist_live`(종료·세션 종료·5분 자동 저장·통계 초기화·언어 변경)와 `on_save`뿐. 둘 다 디스크의 파일 전용 필드(`key.XX`)를 다시 읽어 병합(`Settings::adopt_file_only_fields`)하므로 실행 중 파일 편집이 보존됨. 예외: 가져오기(`files::import_settings`)는 직접 저장 1회 후 `on_save`로 확정한다.
 - 새 컨트롤 추가 = `layout::SPECS` 한 줄 + (필요 시) `ids.rs`. `layout` 테스트가 ID 중복·겹침·카드 이탈·빈 문구를 잡음.
 
 ## 게이트 (푸시 전 자동 실행됨: `.githooks/pre-push`)
@@ -48,7 +48,7 @@ cargo check --workspace --all-targets
 
 ## 알려진 주의점
 
-- GUI 기동 직후 응답없음 리포트 이력 있음 — 타이머 `SetWindowTextW` 경로 의심. 현재 변경분(락 밖 Win32 호출·diff 갱신·틱 재진입 가드·느린 틱 로깅)이 노출 면적을 줄였으나 원인 확정 전. 훅은 전용 스레드로 분리되어 UI가 멈춰도 필터는 계속 동작함.
+- GUI 기동 직후 응답없음 리포트 이력 있음 — 타이머 `SetWindowTextW` 경로 의심. 현재 변경분(락 밖 Win32 호출·diff 갱신·틱 재진입 가드·느린 틱 로깅)이 노출 면적을 줄였으나 원인 확정 전. 훅은 전용 스레드로 분리되어 UI가 멈춰도 필터는 계속 동작함. 재발 시 `%TEMP%\kcfix-diag.log`(느린 틱·훅 재시작 기록, `ui::diag`)를 먼저 확인할 것.
 - 언어 설정(`sLanguage`)은 `auto`(기본: Windows 언어 따라가기, 한국어면 한국어·그 외 영어) 또는 언어 코드. `KeyboardChatteringFix.exe --check-language`가 자동 선택 결과를 출력하고, 환경 변수 `KCFIX_LOCALE=de-DE`로 다른 PC의 언어를 재현·테스트할 수 있음. v0.2.1 이하가 파일에 저장해 둔 `ko`/`en`은 고정 언어로 유지됨.
 - 단일 인스턴스 테스트는 고유 뮤텍스 이름을 써서 실제 트레이 앱 옆에서도 통과함. `hook_runs_on_a_dedicated_thread_and_stops`는 테스트 중 실제 LL 훅을 잠깐 설치함(전부 통과시킴, 데스크톱 없는 세션에서는 건너뜀).
 - 키별 임계값(`key.XX`)은 [키·마우스] 탭에서 바꾸면 즉시 적용·파일 기록(디스크 값을 다시 읽어 그 키만 바꿈). 파일을 직접 편집한 경우 **Save**를 누르면 즉시 적용, 아니면 재시작 시 적용. 파일이 per-key 값의 원본이라는 전제(`adopt_file_only_fields`)를 깨지 말 것.

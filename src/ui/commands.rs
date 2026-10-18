@@ -61,6 +61,11 @@ pub(crate) unsafe fn set_cleaning(hwnd: HWND, on: bool) {
     if let Some(g) = SHARED.get() {
         g.lock().unwrap().debouncer.cleaning_mode = on;
     }
+    if on {
+        // Held-back releases go out now, before input freezes: cleaning must
+        // not start with keys that look stuck down (ISSUE-002).
+        crate::input::hook::flush_deferred_releases();
+    }
     *CLEANING_SINCE.lock().unwrap() = on.then(Instant::now);
     if on {
         show_window(hwnd);

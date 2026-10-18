@@ -13,6 +13,7 @@
 //! - `menu`: window menu bar
 //! - `tray`: system-tray icon, tooltip, balloon, and context menu
 //! - `dialog`: modal dialogs owned by the main window
+//! - `diag`: diagnostic file log (the GUI has no console)
 //! - `files`: File menu (history CSV export, settings export/import)
 //! - `foreground`: pause for listed/full-screen apps, elevated-window notice
 //! - `hotkeys`: global hotkeys (parse + register)
@@ -29,6 +30,7 @@
 
 mod commands;
 mod controls;
+mod diag;
 mod dialog;
 mod elevation;
 mod files;

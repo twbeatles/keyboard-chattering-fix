@@ -110,10 +110,20 @@ pub struct UpdateOptions {
     pub readiness_timeout: Option<Duration>,
 }
 
+/// SHA-256 of a file, streamed in chunks: constant memory regardless of
+/// artifact size (PERF-001).
 fn sha256_file(path: &Path) -> std::io::Result<String> {
-    let bytes = std::fs::read(path)?;
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::new(file);
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut reader, &mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -466,6 +476,27 @@ mod tests {
         std::fs::write(&current, b"BROKEN").unwrap();
         let err = rollback_swap(&current, &backup).unwrap_err();
         assert!(!err.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn streamed_file_hash_matches_oneshot_hash() {
+        let dir = scratch_dir("hash");
+        std::fs::create_dir_all(&dir).unwrap();
+        // Multi-chunk input plus the empty file.
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let path = dir.join("data.bin");
+        std::fs::write(&path, &data).unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        assert_eq!(sha256_file(&path).unwrap(), hex::encode(hasher.finalize()));
+        let empty = dir.join("empty.bin");
+        std::fs::write(&empty, b"").unwrap();
+        assert_eq!(
+            sha256_file(&empty).unwrap(),
+            hex::encode(Sha256::digest(b""))
+        );
+        assert!(sha256_file(&dir.join("missing.bin")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

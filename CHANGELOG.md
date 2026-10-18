@@ -2,6 +2,21 @@
 
 이 프로젝트의 사용자에게 보이는 변경 사항입니다. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 따르고, 버전은 [유의적 버전](https://semver.org/lang/ko/)을 따릅니다.
 
+## [0.3.1] - 2026-10-19
+
+### 추가
+- **[키·마우스] 탭 통계 지우기**: 스위치를 교체한 뒤 그 키의 누적 타건·차단·간격 기록만 지울 수 있습니다(임계값은 유지).
+- **진단 로그**: 창이 응답하지 않을 때 원인 파악용으로 `%TEMP%\kcfix-diag.log`에 느린 UI 틱과 훅 재시작을 기록합니다(256KB 회전).
+
+### 변경
+- 워치독이 훅을 다시 설치할 때 진행 중이던 떼기 확인을 새 스레드가 인계합니다. 통계 이중 집계와 홀드 해제를 막았습니다.
+- 청소 모드 시작 때 보류 중이던 뗌을 즉시 내보내, 청소 중 키가 눌린 채로 보이지 않게 합니다.
+- 업데이트 전 임시 파일 정리는 1시간 지난 파일만 지워, 진행 중인 업데이트를 건드리지 않습니다.
+- 업데이트 파일 해시를 메모리에 통째로 올리지 않고 나눠서 계산합니다(앱·헬퍼 공통).
+
+### 보안
+- 종료 요청 메시지(`WM_UPDATE_EXIT`)에 프로세스 전용 인증값을 넣어, 다른 프로그램이 필터를 마음대로 종료할 수 없게 했습니다.
+
 ## [0.3.0] - 2026-10-17
 
 ### 추가
@@ -50,6 +65,7 @@
 ### 추가
 - 모듈 분할, 탭 UI와 설정 연결, Ed25519 서명 업데이트 파이프라인.
 
+[0.3.1]: https://github.com/twbeatles/keyboard-chattering-fix/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/twbeatles/keyboard-chattering-fix/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/twbeatles/keyboard-chattering-fix/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/twbeatles/keyboard-chattering-fix/compare/v0.2.0...v0.2.1

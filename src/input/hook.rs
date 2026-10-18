@@ -374,6 +374,35 @@ fn injector() -> &'static Mutex<mpsc::Sender<Vec<Injection>>> {
     })
 }
 
+/// Flush releases held back by the release delay right now, from any thread.
+///
+/// Used on cleaning-mode entry so applications see every key up before input
+/// freezes: no key may look stuck down afterwards (ISSUE-002). Delivery goes
+/// through the injector thread, never `SendInput` here.
+pub(crate) fn flush_deferred_releases() {
+    let batch = {
+        let (Some(shared), Some(start)) = (SHARED.get(), START.get()) else {
+            return;
+        };
+        let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut due = [0u16; SLOTS];
+        let n = g.debouncer.due_releases(start.elapsed(), true, &mut due);
+        for &slot in &due[..n] {
+            let scan = g.pending_scan[slot as usize];
+            g.inject.push(Injection {
+                slot,
+                down: false,
+                scan,
+            });
+        }
+        g.inject.take()
+    };
+    if !batch.is_empty() {
+        let tx = injector().lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = tx.send(batch);
+    }
+}
+
 /// Hook thread, outside the hook callbacks: turn due delayed releases into
 /// queued events and hand the queue to the injector. `flush_all` also sends
 /// releases whose delay has not run out (shutdown).
@@ -401,6 +430,10 @@ unsafe fn drain(flush_all: bool) -> Vec<Injection> {
                 let _ = KillTimer(None, id);
             }
         });
+    } else if !flush_all {
+        // In-flight delays adopted from a previous thread (see [`start`]):
+        // this thread owns no timer yet, so arm one (ISSUE-001).
+        ensure_defer_timer();
     }
     g.inject.take()
 }
@@ -412,6 +445,12 @@ const WM_KCFIX_MOUSE: u32 = WM_APP + 0x40;
 const WM_KCFIX_INJECT: u32 = WM_APP + 0x41;
 /// Win32 id of the running hook thread (0 when none).
 static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
+/// Generation of the hook thread: claimed on every spawn, retired on every
+/// [`HookThread::abandon`]. A thread that finds itself stale at exit
+/// (superseded by [`restart`]) must not flush releases the new thread owns
+/// now (ISSUE-001). Retiring up front (rather than only claiming in the new
+/// thread) closes the race where the old thread exits before the new spawn.
+static HOOK_GEN: AtomicU64 = AtomicU64::new(0);
 /// What the user chose, so a restarted hook thread gets it back.
 static MOUSE_WANTED: AtomicBool = AtomicBool::new(false);
 /// The hook thread of this process (see [`start`]).
@@ -437,6 +476,21 @@ pub(crate) fn start() -> bool {
     HOOK_ACTIVE.store(ok, Ordering::Relaxed);
     if ok && MOUSE_WANTED.load(Ordering::Relaxed) {
         set_mouse_filter(true);
+    }
+    if ok {
+        // Adopt deferred releases across a restart: the new thread owns no
+        // timer yet, so kick it to drain and re-arm (ISSUE-001).
+        let pending = SHARED.get().is_some_and(|s| {
+            s.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .debouncer
+                .has_pending_releases()
+        });
+        if pending {
+            unsafe {
+                wake_injector();
+            }
+        }
     }
     ok
 }
@@ -487,8 +541,11 @@ impl HookThread {
         let _ = self.handle.join();
     }
 
-    /// Tell the thread to quit without waiting for it.
+    /// Tell the thread to quit without waiting for it. Retires its
+    /// generation first, so even an immediate exit skips the flush that the
+    /// replacement thread now owns (ISSUE-001).
     fn abandon(self) {
+        HOOK_GEN.fetch_add(1, Ordering::AcqRel);
         self.quit();
     }
 }
@@ -498,6 +555,9 @@ impl HookThread {
 /// tell the user protection is not active instead of failing silently (G1).
 pub(crate) fn spawn_hook_thread() -> Option<HookThread> {
     let (tx, rx) = mpsc::channel::<Option<u32>>();
+    // Claimed up front so the thread knows its generation even if the
+    // parent never hears back (hook install failure).
+    let gen = HOOK_GEN.fetch_add(1, Ordering::AcqRel) + 1;
     let handle = std::thread::Builder::new()
         .name("kcfix-keyboard-hook".into())
         .spawn(move || unsafe {
@@ -560,8 +620,12 @@ pub(crate) fn spawn_hook_thread() -> Option<HookThread> {
             }
             let _ = UnhookWindowsHookEx(hook);
             // Unhooked: releases still held back can be sent from here
-            // without waiting for this thread to service them.
-            send(&drain(true));
+            // without waiting for this thread to service them. A thread
+            // superseded by `restart` skips this: the new thread owns the
+            // pending releases now (ISSUE-001).
+            if gen == HOOK_GEN.load(Ordering::Acquire) {
+                send(&drain(true));
+            }
         })
         .ok()?;
     match rx.recv() {
@@ -580,12 +644,37 @@ pub(crate) fn spawn_hook_thread() -> Option<HookThread> {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that own the process-wide hook state (`HOOK`,
+    /// `HOOK_THREAD_ID`, `SHARED`): they must not interleave.
+    static HOOK_SERIAL: Mutex<()> = Mutex::new(());
+
+    /// Process-wide filter state for hook-lifecycle tests. Protection stays
+    /// off so a running hook keeps forwarding everything, like the
+    /// uninitialized state other tests assume.
+    fn ensure_test_shared() {
+        use std::time::Instant;
+        START.get_or_init(Instant::now);
+        SHARED.get_or_init(|| {
+            Mutex::new(Shared {
+                debouncer: crate::debounce::Debouncer::new(50),
+                enabled: false,
+                play_sound: false,
+                sound_file: None,
+                exclude_injected: true,
+                suspended: false,
+                pending_scan: [0; SLOTS],
+                inject: Default::default(),
+            })
+        });
+    }
+
     /// The hook runs on its own thread, never on the caller's (UI) thread,
     /// and stops cleanly. Installing a LL hook needs no window and does not
     /// block other input while the test runs (it forwards everything:
-    /// `SHARED` is never initialized in unit tests).
+    /// protection is off in the test state, if any).
     #[test]
     fn hook_runs_on_a_dedicated_thread_and_stops() {
+        let _serial = HOOK_SERIAL.lock().unwrap();
         // Service sessions without an interactive desktop may refuse LL
         // hooks; the dedicated-thread contract is only checkable where the
         // hook installs at all.
@@ -604,6 +693,121 @@ mod tests {
         hook.stop();
         assert_eq!(HOOK_THREAD_ID.load(Ordering::Acquire), 0);
         set_mouse_filter(false);
+    }
+
+    /// A restart hands in-flight deferred releases to the new thread instead
+    /// of flushing them early, and leaves exactly one hook thread behind
+    /// (ISSUE-001).
+    #[test]
+    fn restart_hands_over_pending_releases_to_one_thread() {
+        let _serial = HOOK_SERIAL.lock().unwrap();
+        ensure_test_shared();
+        set_mouse_filter(false);
+        if !start() {
+            stop();
+            eprintln!("skipped: no interactive desktop for a LL keyboard hook");
+            return;
+        }
+        // One release held back with a long delay, via the filter API.
+        // (0x41 is this test's own slot; see the flush test's note.)
+        let now = START.get().unwrap().elapsed();
+        {
+            let mut g = SHARED
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            g.debouncer.set_release_defer_ms(60_000);
+            assert_eq!(
+                g.debouncer
+                    .decide_event(0x41, false, KeyEventKind::Down, now),
+                Decision::Pass
+            );
+            assert_eq!(
+                g.debouncer.decide_event(0x41, false, KeyEventKind::Up, now),
+                Decision::Defer
+            );
+        }
+        let old_gen = HOOK_GEN.load(Ordering::Acquire);
+        assert!(restart());
+        // Retire (abandon) + claim (spawn) moves the generation forward.
+        assert!(HOOK_GEN.load(Ordering::Acquire) > old_gen);
+        // The stale thread's exit flush must not have eaten the handoff.
+        {
+            let mut g = SHARED
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            assert!(g.debouncer.has_pending_releases());
+            g.debouncer.set_release_defer_ms(0);
+        }
+        assert_ne!(HOOK_THREAD_ID.load(Ordering::Acquire), 0);
+        stop();
+        assert_eq!(HOOK_THREAD_ID.load(Ordering::Acquire), 0);
+    }
+
+    /// Cleaning-mode entry flushes held-back releases at once, so no key
+    /// looks stuck down when input freezes (ISSUE-002). The stray key-up
+    /// below goes through the real injector; a release without a press is
+    /// ignored by applications.
+    #[test]
+    fn flush_deferred_releases_empties_pending() {
+        let _serial = HOOK_SERIAL.lock().unwrap();
+        ensure_test_shared();
+        // Own virtual key: the process-wide Debouncer is shared with the
+        // other lifecycle tests, and timing slots must not overlap.
+        let now = START.get().unwrap().elapsed();
+        {
+            let mut g = SHARED
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            g.debouncer.set_release_defer_ms(60_000);
+            assert_eq!(
+                g.debouncer
+                    .decide_event(0x42, false, KeyEventKind::Down, now),
+                Decision::Pass
+            );
+            assert_eq!(
+                g.debouncer.decide_event(0x42, false, KeyEventKind::Up, now),
+                Decision::Defer
+            );
+            assert!(g.debouncer.has_pending_releases());
+        }
+        flush_deferred_releases();
+        {
+            let mut g = SHARED
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            assert!(!g.debouncer.has_pending_releases());
+            g.debouncer.set_release_defer_ms(0);
+        }
+    }
+
+    /// Concurrent restarts never panic and leave one owned thread behind,
+    /// which still stops cleanly (ISSUE-001).
+    #[test]
+    fn concurrent_restarts_leave_one_hook_thread() {
+        let _serial = HOOK_SERIAL.lock().unwrap();
+        ensure_test_shared();
+        set_mouse_filter(false);
+        if !start() {
+            stop();
+            eprintln!("skipped: no interactive desktop for a LL keyboard hook");
+            return;
+        }
+        let (first, second) = std::thread::scope(|s| {
+            let a = s.spawn(restart);
+            let b = s.spawn(restart);
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert!(first && second);
+        stop();
+        assert_eq!(HOOK_THREAD_ID.load(Ordering::Acquire), 0);
     }
 
     #[test]

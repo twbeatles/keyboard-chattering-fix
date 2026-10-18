@@ -22,7 +22,7 @@ use windows::{
 
 use super::{
     dialog::msg_box, foreground::self_elevated, ids::WM_UPDATE_EXIT, state::current_lang,
-    text::to_wide,
+    text::to_wide, window::update_exit_nonce,
 };
 use crate::{config, i18n::strings};
 
@@ -76,7 +76,7 @@ pub(crate) fn relaunch_elevated(hwnd: HWND) {
             let _ = PostMessageW(
                 Some(HWND(raw as *mut _)),
                 WM_UPDATE_EXIT,
-                WPARAM(0),
+                WPARAM(update_exit_nonce() as usize),
                 LPARAM(0),
             );
         }

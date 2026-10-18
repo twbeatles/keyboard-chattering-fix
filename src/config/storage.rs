@@ -116,7 +116,7 @@ fn parse(text: &str) -> Settings {
         .get("bMinimizeOnLaunch")
         .or_else(|| map.get("bMinimizeWhenLaunch"))
     {
-        s.minimize_on_launch = v == "1";
+        s.minimize_on_launch = v != "0";
     }
     if let Some(v) = map.get("bCloseToTray") {
         s.close_to_tray = v != "0";
@@ -520,13 +520,14 @@ sLanguage={text}
             std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
             std::fs::write(
                 &ini,
-                "[KeyboardChatteringFix]\nbPlaySound=2\nbRecordAllKeypress=yes\nbFilterEnabled=0\n",
+                "[KeyboardChatteringFix]\nbPlaySound=2\nbRecordAllKeypress=yes\nbFilterEnabled=0\nbMinimizeOnLaunch=yes\n",
             )
             .unwrap();
             let s = load();
             assert!(s.play_sound);
             assert!(s.record_all_keys);
             assert!(!s.enabled);
+            assert!(s.minimize_on_launch);
         });
     }
 

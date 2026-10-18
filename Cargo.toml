@@ -3,7 +3,7 @@ members = ["crates/kcfix-updater"]
 resolver = "2"
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT"
 
@@ -21,6 +21,7 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Gdi",
     "Win32_Media",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_System_Com",
     "Win32_Storage_FileSystem",
     "Win32_System_Console",
