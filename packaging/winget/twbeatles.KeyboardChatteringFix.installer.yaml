@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 PackageIdentifier: twbeatles.KeyboardChatteringFix
-PackageVersion: 0.3.1
+PackageVersion: 0.3.2
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
@@ -9,7 +9,7 @@ NestedInstallerFiles:
 ReleaseDate: 2026-10-19
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/twbeatles/keyboard-chattering-fix/releases/download/v0.3.1/KeyboardChatteringFix.zip
-    InstallerSha256: 941DBAA2B543754A7BC1F64E18BAB720815DD373011B156E734D5623A74C7844
+    InstallerUrl: https://github.com/twbeatles/keyboard-chattering-fix/releases/download/v0.3.2/KeyboardChatteringFix.zip
+    InstallerSha256: EA84F33063BE7796DAEAC556994C1596AD1AE1037059DFE5235E5EB2D9C11FC8
 ManifestType: installer
 ManifestVersion: 1.6.0

@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
 PackageIdentifier: twbeatles.KeyboardChatteringFix
-PackageVersion: 0.3.1
+PackageVersion: 0.3.2
 PackageLocale: en-US
 Publisher: twbeatles
 PublisherUrl: https://github.com/twbeatles
@@ -19,6 +19,6 @@ Tags:
   - debounce
   - double-typing
   - mouse
-ReleaseNotesUrl: https://github.com/twbeatles/keyboard-chattering-fix/releases/tag/v0.3.1
+ReleaseNotesUrl: https://github.com/twbeatles/keyboard-chattering-fix/releases/tag/v0.3.2
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0
