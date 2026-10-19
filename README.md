@@ -61,7 +61,7 @@ Featuring a native Windows 11 Fluent Card interface, real-time diagnostic teleme
 - **Live Metrics**: Real-time display of total keystrokes, chatter intercepted count, and chatter ratio (%).
 - **Recent Blocked Key Badge**: Displays the exact virtual key name and observed gap in milliseconds (`Last blocked: Space (32ms)`).
 - **Top Problematic Key Detection**: Tracks keystrokes per key (0–255) to automatically diagnose your most degraded switch and its failure rate.
-- **History Tab**: Filter the event log by *blocked only* / *all input* / *per-key summary* and by key name; blocked rows are highlighted with their gap in ms. Double-click a per-key row to change that key's threshold. The **Clear stats** button on the Keys & Mouse tab forgets one key's counters after you replace its switch.
+- **History Tab**: Filter the event log by *blocked only* / *all input* / *per-key summary* and by key name; blocked rows are highlighted with their gap in ms. Double-click a per-key row to change that key's threshold. The **Clear key stats** button on the Keys & Mouse tab forgets one key's counters after you replace its switch.
 - **Threshold Suggestions**: For every key, the gaps between release and the next press are collected in a small histogram. When chatter (a few ms) and your real presses (tens of ms) are separated, the Keys & Mouse tab suggests a threshold just above the chatter; when they overlap, it tells you the switch needs cleaning or replacing.
 - **100+ Virtual Key Name Map**: Human-readable names for media keys, volume controls, numpad, F1–F24, and navigation keys.
 
@@ -164,7 +164,7 @@ The **Keys & Mouse** tab edits the same `key.XX` lines and writes them immediate
 
 - **Elevated windows**: a non-elevated low-level hook does not see input going to windows that run as administrator (Task Manager, admin terminals, some installers and game launchers), because of UIPI. The Home tab tells you when such a window is in front; **Tools > Run as administrator** covers it, and **Start as administrator at sign-in** keeps it that way.
 - **Secure desktop**: the sign-in screen, the lock screen, and UAC prompts are out of reach of any user-space filter.
-- **Games / anti-cheat**: this tool blocks input through a system-wide hook, which some online games' anti-cheat may object to. List the game in **Pause for apps** (or turn on the full-screen pause) so protection steps aside while it is in front.
+- **Games / anti-cheat**: this tool blocks input through a system-wide hook, which some online games' anti-cheat may object to. List the game in **Excluded apps** (Settings > Auto pause) (or turn on the full-screen pause) so protection steps aside while it is in front.
 - **Mouse drags / held keys**: a bounce while *holding* a button or key arrives as a release followed by a press. Without a release delay the press is blocked but the release already reached the application, so a drag can drop; set **Release delay** (20–40 ms) to fix it.
 - **Firmware first**: if your keyboard runs QMK/VIA, raising its `DEBOUNCE` value fixes chatter at the source. A software filter treats the symptom, and a failing switch tends to get worse.
 - **Remote desktop / IME / macros**: their input is injected and passes through untouched while "Leave input sent by other programs alone" is on (the default).
@@ -270,7 +270,7 @@ The compiled binary will be placed at `target/release/keyboard-chattering-fix.ex
 - **실시간 통계 그리드**: 총 타건 수, 차단된 채터링 횟수, 채터링 발생 비율(%)을 타일 카드로 시각화합니다.
 - **최근 차단 키 알림 칩**: 가장 최근 차단된 키와 실제 바운스 간격(`최근 차단: Space (32ms 간격)`)을 실시간 표시합니다.
 - **최다 불량 키(Top Chatter Key) 자동 진단**: 256개 가상키별 누적 타건수와 차단수를 분석하여 가장 상태가 나쁜 스위치와 불량 비율을 자동 추적합니다.
-- **기록 탭 (필터 보기)**: "막은 입력만 / 모든 입력 / 키별 통계" 보기와 키 이름 검색으로 차단 이력을 걸러 볼 수 있으며, 막은 입력은 간격(ms)과 함께 강조 표시됩니다. 키별 통계 행을 두 번 클릭하면 그 키의 기준을 바로 바꿀 수 있습니다. 스위치를 교체한 뒤에는 [키·마우스] 탭의 **통계 지우기** 버튼으로 그 키의 누적 기록을 지울 수 있습니다.
+- **기록 탭 (필터 보기)**: "막은 입력만 / 모든 입력 / 키별 통계" 보기와 키 이름 검색으로 차단 이력을 걸러 볼 수 있으며, 막은 입력은 간격(ms)과 함께 강조 표시됩니다. 키별 통계 행을 두 번 클릭하면 그 키의 기준을 바로 바꿀 수 있습니다. 스위치를 교체한 뒤에는 [키·마우스] 탭의 **이 키 통계 지우기** 버튼으로 그 키의 누적 기록을 지울 수 있습니다.
 - **권장 기준 자동 계산**: 키마다 "뗀 순간 → 다음 누름" 간격을 작은 히스토그램으로 모읍니다. 채터링(수 ms)과 평소 입력(수십 ms) 사이가 비어 있으면 [키·마우스] 탭이 채터링 바로 위의 기준을 권장하고, 둘이 겹치면 스위치 청소·교체를 안내합니다.
 - **100+개 전체 가상키 이름 매핑**: 미디어 키, 볼륨, 넘패드, F1~F24, 방향키 등을 직관적인 이름으로 출력합니다.
 
@@ -373,7 +373,7 @@ key.01=30              # 마우스 왼쪽 버튼에만 30ms 적용
 
 - **관리자 권한 창**: 관리자 권한 없이 실행된 저수준 훅은 관리자 권한으로 실행된 창(작업 관리자, 관리자 터미널, 일부 설치 프로그램·게임 런처)으로 가는 입력을 보지 못합니다(UIPI). 그런 창이 앞에 있으면 홈 화면에 안내가 나오며, **도구 > 관리자 권한으로 다시 실행**으로 해결하고 **로그인할 때 관리자 권한으로 자동 실행**으로 유지할 수 있습니다.
 - **보안 데스크톱**: 로그인 화면, 잠금 화면, UAC 확인 창에는 사용자 공간 필터가 닿지 않습니다.
-- **게임 / 안티치트**: 이 프로그램은 시스템 전역 훅으로 입력을 막기 때문에 일부 온라인 게임의 안티치트가 문제 삼을 수 있습니다. 게임을 **멈출 프로그램**에 넣거나 전체 화면 일시 중지를 켜면, 게임이 앞에 있는 동안 보호가 비켜 줍니다.
+- **게임 / 안티치트**: 이 프로그램은 시스템 전역 훅으로 입력을 막기 때문에 일부 온라인 게임의 안티치트가 문제 삼을 수 있습니다. 게임을 [설정] 탭 자동 일시 중지의 **제외할 프로그램**에 넣거나 전체 화면 일시 중지를 켜면, 게임이 앞에 있는 동안 보호가 비켜 줍니다.
 - **마우스 드래그 / 누르고 있는 키**: 버튼이나 키를 *누르고 있는 중*의 바운스는 "뗌 → 누름"으로 들어옵니다. 떼기 확인 시간이 0이면 누름은 막지만 뗌은 이미 앱에 전달되어 드래그가 끊길 수 있습니다. **떼기 확인 시간**을 20~40ms로 두면 해결됩니다.
 - **펌웨어 우선**: QMK/VIA 키보드라면 펌웨어의 `DEBOUNCE` 값을 올리는 것이 근본적인 해결입니다. 소프트웨어 필터는 증상을 막을 뿐이고, 고장 나는 스위치는 점점 나빠지는 경향이 있습니다.
 - **원격 데스크톱 / IME / 매크로**: 이들의 입력은 합성 입력이라 "다른 프로그램이 보낸 입력은 건드리지 않기"(기본값)가 켜져 있으면 그대로 통과합니다.

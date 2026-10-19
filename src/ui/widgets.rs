@@ -62,24 +62,141 @@ pub(crate) fn set_protection_on(on: bool) {
     PROTECTION_ON.store(on, Ordering::Relaxed);
 }
 
-unsafe fn rounded(hdc: HDC, rc: &RECT, fill: COLORREF, border: COLORREF, radius: i32) {
-    let pen = CreatePen(PS_SOLID, 1, border);
-    let old_pen = SelectObject(hdc, pen.into());
-    let old_brush = SelectObject(hdc, cached_brush(fill).into());
-    let _ = RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    let _ = DeleteObject(pen.into());
+/// One filled shape of an owner-drawn control, in device pixels.
+#[derive(Clone, Copy)]
+enum Shape {
+    /// Rounded rectangle with a 1-px border; `radius` is the corner diameter.
+    Round {
+        rc: RECT,
+        fill: COLORREF,
+        border: COLORREF,
+        radius: i32,
+    },
+    Ellipse {
+        rc: RECT,
+        fill: COLORREF,
+    },
 }
 
-unsafe fn ellipse(hdc: HDC, rc: &RECT, fill: COLORREF) {
-    let pen = CreatePen(PS_SOLID, 1, fill);
-    let old_pen = SelectObject(hdc, pen.into());
-    let old_brush = SelectObject(hdc, cached_brush(fill).into());
-    let _ = Ellipse(hdc, rc.left, rc.top, rc.right, rc.bottom);
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    let _ = DeleteObject(pen.into());
+/// Supersampling factor for [`paint_shapes`].
+const SS: i32 = 4;
+
+/// Paint `shapes` over `bg` inside `area` with smooth edges.
+///
+/// GDI draws `RoundRect`/`Ellipse` without anti-aliasing, so small curves
+/// (the toggle track and knob above all) look jagged in both themes. The
+/// shapes are drawn at `SS`× size into an off-screen bitmap and shrunk back
+/// with `HALFTONE` filtering, which averages the edge pixels. Falls back to
+/// direct (aliased) drawing if the bitmap cannot be created.
+unsafe fn paint_shapes(hdc: HDC, area: RECT, bg: COLORREF, shapes: &[Shape]) {
+    let (w, h) = (area.right - area.left, area.bottom - area.top);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let mem = CreateCompatibleDC(Some(hdc));
+    let bmp = if mem.is_invalid() {
+        HBITMAP::default()
+    } else {
+        CreateCompatibleBitmap(hdc, w * SS, h * SS)
+    };
+    if bmp.is_invalid() {
+        if !mem.is_invalid() {
+            let _ = DeleteDC(mem);
+        }
+        let _ = FillRect(hdc, &area, cached_brush(bg));
+        for shape in shapes {
+            draw_shape(hdc, shape, 1);
+        }
+        return;
+    }
+    let old_bmp = SelectObject(mem, bmp.into());
+    let full = RECT {
+        left: 0,
+        top: 0,
+        right: w * SS,
+        bottom: h * SS,
+    };
+    let _ = FillRect(mem, &full, cached_brush(bg));
+    // Shapes are given in `hdc` coordinates; the bitmap starts at `area`.
+    let _ = SetViewportOrgEx(mem, -area.left * SS, -area.top * SS, None);
+    for shape in shapes {
+        draw_shape(mem, shape, SS);
+    }
+    let _ = SetViewportOrgEx(mem, 0, 0, None);
+    let old_mode = SetStretchBltMode(hdc, HALFTONE);
+    let _ = SetBrushOrgEx(hdc, 0, 0, None);
+    let _ = StretchBlt(
+        hdc,
+        area.left,
+        area.top,
+        w,
+        h,
+        Some(mem),
+        0,
+        0,
+        w * SS,
+        h * SS,
+        SRCCOPY,
+    );
+    SetStretchBltMode(hdc, STRETCH_BLT_MODE(old_mode));
+    SelectObject(mem, old_bmp);
+    let _ = DeleteObject(bmp.into());
+    let _ = DeleteDC(mem);
+}
+
+/// Draw one shape scaled by `k` (coordinates multiplied, border kept at
+/// `k` pixels so it shrinks back to exactly one).
+unsafe fn draw_shape(hdc: HDC, shape: &Shape, k: i32) {
+    let scaled = |rc: &RECT| (rc.left * k, rc.top * k, rc.right * k, rc.bottom * k);
+    match *shape {
+        Shape::Round {
+            rc,
+            fill,
+            border,
+            radius,
+        } => {
+            // INSIDEFRAME keeps the wide pen inside the rectangle.
+            let pen = CreatePen(PS_INSIDEFRAME, k, border);
+            let old_pen = SelectObject(hdc, pen.into());
+            let old_brush = SelectObject(hdc, cached_brush(fill).into());
+            let (l, t, r, b) = scaled(&rc);
+            let _ = RoundRect(hdc, l, t, r, b, radius * k, radius * k);
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            let _ = DeleteObject(pen.into());
+        }
+        Shape::Ellipse { rc, fill } => {
+            let old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+            let old_brush = SelectObject(hdc, cached_brush(fill).into());
+            let (l, t, r, b) = scaled(&rc);
+            // A null pen leaves the right/bottom edge unpainted: add it back.
+            let _ = Ellipse(hdc, l, t, r + 1, b + 1);
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+        }
+    }
+}
+
+/// One rounded rectangle over `bg`, filling `rc`.
+unsafe fn rounded(
+    hdc: HDC,
+    rc: &RECT,
+    bg: COLORREF,
+    fill: COLORREF,
+    border: COLORREF,
+    radius: i32,
+) {
+    paint_shapes(
+        hdc,
+        *rc,
+        bg,
+        &[Shape::Round {
+            rc: *rc,
+            fill,
+            border,
+            radius,
+        }],
+    );
 }
 
 unsafe fn control_text(h: HWND) -> Vec<u16> {
@@ -146,14 +263,29 @@ pub(crate) unsafe fn draw_item(lparam: LPARAM) -> bool {
                 right: knob_left + knob_d,
                 bottom: top + sc(4) + knob_d,
             };
-            if on {
-                let fill = if pressed { c.accent_pressed } else { c.accent };
-                rounded(hdc, &track, fill, fill, th);
-                ellipse(hdc, &knob, c.on_accent);
+            let (fill, border, knob_fill) = if on {
+                let f = if pressed { c.accent_pressed } else { c.accent };
+                (f, f, c.on_accent)
             } else {
-                rounded(hdc, &track, parent_bg, c.toggle_off, th);
-                ellipse(hdc, &knob, c.toggle_off);
-            }
+                (parent_bg, c.toggle_off, c.toggle_off)
+            };
+            paint_shapes(
+                hdc,
+                track,
+                parent_bg,
+                &[
+                    Shape::Round {
+                        rc: track,
+                        fill,
+                        border,
+                        radius: th,
+                    },
+                    Shape::Ellipse {
+                        rc: knob,
+                        fill: knob_fill,
+                    },
+                ],
+            );
             let mut label = RECT {
                 left: track.right + sc(12),
                 ..rc
@@ -195,7 +327,7 @@ pub(crate) unsafe fn draw_item(lparam: LPARAM) -> bool {
                 };
                 (f, c.button_border, c.text_primary)
             };
-            rounded(hdc, &rc, fill, border, sc(8));
+            rounded(hdc, &rc, parent_bg, fill, border, sc(8));
             let mut inner = rc;
             draw_label(
                 hdc,
@@ -224,7 +356,14 @@ pub(crate) unsafe fn draw_item(lparam: LPARAM) -> bool {
                     right: rc.right - sc(2),
                     bottom: rc.bottom - sc(1),
                 };
-                rounded(hdc, &pill, c.tab_selected, c.card_border, sc(8));
+                rounded(
+                    hdc,
+                    &pill,
+                    c.tab_track,
+                    c.tab_selected,
+                    c.card_border,
+                    sc(8),
+                );
                 c.accent
             } else {
                 c.text_secondary
@@ -255,7 +394,7 @@ pub(crate) unsafe fn draw_item(lparam: LPARAM) -> bool {
                 (c.status_paused_fg, c.status_paused_bg)
             };
             let fill = if pressed { parent_bg } else { bg };
-            rounded(hdc, &rc, fill, fg, rc.bottom - rc.top);
+            rounded(hdc, &rc, parent_bg, fill, fg, rc.bottom - rc.top);
             let mut inner = rc;
             draw_label(
                 hdc,

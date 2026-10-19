@@ -52,7 +52,6 @@ pub(crate) const ID_HIST_INFO: i32 = 304;
 
 // Settings.
 pub(crate) const ID_THRESH_TITLE: i32 = 400;
-pub(crate) const ID_LABEL_THRESHOLD: i32 = 401;
 pub(crate) const ID_EDIT_THRESHOLD: i32 = 402;
 pub(crate) const ID_LABEL_UNIT: i32 = 403;
 pub(crate) const ID_THRESH_HINT: i32 = 404;
@@ -70,6 +69,7 @@ pub(crate) const ID_COMBO_LANG: i32 = 415;
 pub(crate) const ID_LABEL_AUTO_APPS: i32 = 416;
 pub(crate) const ID_EDIT_AUTO_APPS: i32 = 417;
 pub(crate) const ID_TOGGLE_AUTO_FULLSCREEN: i32 = 418;
+pub(crate) const ID_AUTO_TITLE: i32 = 419;
 
 // Advanced.
 pub(crate) const ID_DETECT_TITLE: i32 = 500;
@@ -93,6 +93,8 @@ pub(crate) const ID_DEFER_HINT: i32 = 517;
 pub(crate) const ID_LABEL_HOTKEYS: i32 = 518;
 pub(crate) const ID_EDIT_HOTKEY_TOGGLE: i32 = 519;
 pub(crate) const ID_EDIT_HOTKEY_CLEAN: i32 = 520;
+pub(crate) const ID_LABEL_HOTKEY_TOGGLE: i32 = 521;
+pub(crate) const ID_LABEL_HOTKEY_CLEAN: i32 = 522;
 
 // Save row (Settings + Advanced).
 pub(crate) const ID_BTN_SAVE: i32 = 600;

@@ -835,7 +835,7 @@ mod tests {
         assert_eq!(lines[1], "00:00:01.000,A,Passed,-");
         assert_eq!(lines[4], "00:00:03.000,B,Passed,-");
         assert_eq!(lines[5], "");
-        assert_eq!(lines[6], "Key,Presses,Blocked,Rate,Threshold");
+        assert_eq!(lines[6], "Key,Presses,Blocked,Rate,Block window");
         assert_eq!(lines[7], "Space,40,10,25.0%,80 ms (custom)");
         // Fields with separators or quotes are quoted.
         assert_eq!(csv_field("a,b"), "\"a,b\"");

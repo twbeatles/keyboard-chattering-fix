@@ -198,7 +198,20 @@ static SUPPRESS_SELECT: AtomicBool = AtomicBool::new(false);
 /// The picker's keys, in combo order.
 fn picker_vks() -> &'static [u8] {
     static VKS: OnceLock<Vec<u8>> = OnceLock::new();
-    VKS.get_or_init(selectable_vks)
+    VKS.get_or_init(|| picker_order(selectable_vks()))
+}
+
+/// Letters and digits first (the keys that usually chatter), then the
+/// other keys in code order, mouse buttons last: the picker starts on "A"
+/// instead of a mouse button in this keyboard-first tool.
+fn picker_order(mut vks: Vec<u8>) -> Vec<u8> {
+    vks.sort_by_key(|&vk| match vk {
+        0x41..=0x5A => 0,
+        0x30..=0x39 => 1,
+        0x01 | 0x02 | 0x04..=0x06 => 3,
+        _ => 2,
+    });
+    vks
 }
 
 unsafe fn list(hwnd: HWND) -> Option<HWND> {
@@ -517,6 +530,15 @@ mod tests {
     use super::*;
     use crate::debounce::GAP_BUCKET_MS;
     use crate::i18n::Language;
+
+    #[test]
+    fn picker_starts_on_letters_and_ends_on_mouse_buttons() {
+        let order = picker_order(selectable_vks());
+        assert_eq!(order.len(), selectable_vks().len());
+        assert_eq!(order[0], 0x41, "A comes first");
+        assert_eq!(order[26], 0x30, "digits follow Z");
+        assert_eq!(order[order.len() - 5..], [0x01, 0x02, 0x04, 0x05, 0x06]);
+    }
 
     fn snapshot() -> Box<KeysSnapshot> {
         let mut snap = KeysSnapshot::empty();
