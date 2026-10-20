@@ -32,11 +32,11 @@ pub(crate) fn try_acquire_single_instance() -> Option<InstanceGuard> {
 #[cfg(windows)]
 fn try_acquire_named(name: &str) -> Option<InstanceGuard> {
     use windows::{
-        core::HSTRING,
         Win32::{
-            Foundation::{GetLastError, ERROR_ALREADY_EXISTS},
+            Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
             System::Threading::CreateMutexW,
         },
+        core::HSTRING,
     };
     unsafe {
         let name = HSTRING::from(name);
@@ -60,7 +60,7 @@ fn try_acquire_named(name: &str) -> Option<InstanceGuard> {
 /// Bring the already-running instance's window to the front (best effort).
 #[cfg(windows)]
 pub(crate) fn bring_existing_to_front() {
-    use windows::{core::w, Win32::UI::WindowsAndMessaging::*};
+    use windows::{Win32::UI::WindowsAndMessaging::*, core::w};
     unsafe {
         // Must match the class registered in `ui::create_window`.
         if let Ok(hwnd) = FindWindowW(w!("KeyboardChatteringFixMain"), None) {
@@ -74,8 +74,8 @@ pub(crate) fn bring_existing_to_front() {
 #[cfg(windows)]
 pub(crate) fn show_already_running(language: crate::i18n::Language) {
     use windows::{
+        Win32::UI::WindowsAndMessaging::{MB_ICONINFORMATION, MB_OK, MessageBoxW},
         core::HSTRING,
-        Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONINFORMATION, MB_OK},
     };
     let s = crate::i18n::strings(language);
     let text = HSTRING::from(s.already_running);

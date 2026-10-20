@@ -8,8 +8,8 @@
 //! calls.
 
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
 };
 
 use windows::Win32::{
@@ -23,17 +23,17 @@ use super::{
     history::{set_columns, setup_list, theme_list, write_cell},
     ids::*,
     keys::{selectable_vks, vk_name},
-    layout::{current_page, showing_cleaning, Page},
-    paint::{theme_is_dark, ThemeColors},
+    layout::{Page, current_page, showing_cleaning},
+    paint::{ThemeColors, theme_is_dark},
     settings_form,
     state::current_lang,
     text::{combo_sel, fill_combo, get_text, set_text},
 };
 use crate::{
     app::state::SHARED,
-    debounce::{GapHistogram, GAP_BUCKETS},
-    i18n::{fill, strings, Strings},
-    recommend::{recommend, Advice},
+    debounce::{GAP_BUCKETS, GapHistogram},
+    i18n::{Strings, fill, strings},
+    recommend::{Advice, recommend},
 };
 
 /// Per-key data the tab shows, copied under one short lock.
@@ -215,7 +215,7 @@ fn picker_order(mut vks: Vec<u8>) -> Vec<u8> {
 }
 
 unsafe fn list(hwnd: HWND) -> Option<HWND> {
-    GetDlgItem(Some(hwnd), ID_KEYS_LIST).ok()
+    unsafe { GetDlgItem(Some(hwnd), ID_KEYS_LIST).ok() }
 }
 
 /// Copy everything the tab shows. The buffers are allocated before the
@@ -237,31 +237,37 @@ fn take_snapshot() -> Option<(RenderKey, Box<KeysSnapshot>)> {
 
 /// One-time setup after the controls exist.
 pub(crate) unsafe fn init(hwnd: HWND) {
-    if let Some(lv) = list(hwnd) {
-        setup_list(lv);
-    }
-    let names: Vec<String> = picker_vks().iter().map(|&vk| vk_name(vk)).collect();
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    fill_combo(hwnd, ID_KEYS_COMBO, &refs, 0);
-    if let Ok(edit) = GetDlgItem(Some(hwnd), ID_KEYS_EDIT) {
-        SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(4)), Some(LPARAM(0)));
+    unsafe {
+        if let Some(lv) = list(hwnd) {
+            setup_list(lv);
+        }
+        let names: Vec<String> = picker_vks().iter().map(|&vk| vk_name(vk)).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        fill_combo(hwnd, ID_KEYS_COMBO, &refs, 0);
+        if let Ok(edit) = GetDlgItem(Some(hwnd), ID_KEYS_EDIT) {
+            SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(4)), Some(LPARAM(0)));
+        }
     }
 }
 
 pub(crate) unsafe fn apply_theme(hwnd: HWND) {
-    if let Some(lv) = list(hwnd) {
-        theme_list(lv);
+    unsafe {
+        if let Some(lv) = list(hwnd) {
+            theme_list(lv);
+        }
     }
 }
 
 /// Retranslate the columns and every rendered text.
 pub(crate) unsafe fn apply_language(hwnd: HWND) {
-    if let Some(lv) = list(hwnd) {
-        set_columns(lv, &columns(strings(current_lang())));
+    unsafe {
+        if let Some(lv) = list(hwnd) {
+            set_columns(lv, &columns(strings(current_lang())));
+        }
+        STATE.lock().unwrap().advice_text.clear();
+        refresh(hwnd, true);
+        update_advice(hwnd);
     }
-    STATE.lock().unwrap().advice_text.clear();
-    refresh(hwnd, true);
-    update_advice(hwnd);
 }
 
 /// Force the next refresh to re-render (a window changed).
@@ -271,257 +277,279 @@ pub(crate) fn invalidate() {
 
 /// Re-render when this tab is visible and something changed.
 pub(crate) unsafe fn refresh(hwnd: HWND, force: bool) {
-    if current_page() != Page::Keys || showing_cleaning() {
-        return;
+    unsafe {
+        if current_page() != Page::Keys || showing_cleaning() {
+            return;
+        }
+        let last_key = STATE.lock().unwrap().last_key;
+        let Some(shared) = SHARED.get() else {
+            return;
+        };
+        let key = {
+            let g = shared.lock().unwrap();
+            let d = &g.debouncer;
+            (d.total_presses, d.blocked_presses, d.threshold_ms())
+        };
+        if !force && last_key == Some(key) {
+            return;
+        }
+        let Some((key, snap)) = take_snapshot() else {
+            return;
+        };
+        let rows = render_rows(strings(current_lang()), &snap);
+        let count = rows.len();
+        let selected_row = {
+            let mut st = STATE.lock().unwrap();
+            st.rows = rows;
+            st.snap = Some(snap);
+            st.last_key = Some(key);
+            st.selected
+                .and_then(|vk| st.rows.iter().position(|r| r.vk == vk))
+        };
+        if let Some(lv) = list(hwnd) {
+            SendMessageW(
+                lv,
+                LVM_SETITEMCOUNT,
+                Some(WPARAM(count)),
+                Some(LPARAM(LVSICF_NOSCROLL as isize)),
+            );
+            let _ = InvalidateRect(Some(lv), None, false);
+        }
+        // Rows may have moved: keep the highlight on the selected key.
+        select_row(hwnd, selected_row);
+        update_advice(hwnd);
     }
-    let last_key = STATE.lock().unwrap().last_key;
-    let Some(shared) = SHARED.get() else {
-        return;
-    };
-    let key = {
-        let g = shared.lock().unwrap();
-        let d = &g.debouncer;
-        (d.total_presses, d.blocked_presses, d.threshold_ms())
-    };
-    if !force && last_key == Some(key) {
-        return;
-    }
-    let Some((key, snap)) = take_snapshot() else {
-        return;
-    };
-    let rows = render_rows(strings(current_lang()), &snap);
-    let count = rows.len();
-    let selected_row = {
-        let mut st = STATE.lock().unwrap();
-        st.rows = rows;
-        st.snap = Some(snap);
-        st.last_key = Some(key);
-        st.selected
-            .and_then(|vk| st.rows.iter().position(|r| r.vk == vk))
-    };
-    if let Some(lv) = list(hwnd) {
-        SendMessageW(
-            lv,
-            LVM_SETITEMCOUNT,
-            Some(WPARAM(count)),
-            Some(LPARAM(LVSICF_NOSCROLL as isize)),
-        );
-        let _ = InvalidateRect(Some(lv), None, false);
-    }
-    // Rows may have moved: keep the highlight on the selected key.
-    select_row(hwnd, selected_row);
-    update_advice(hwnd);
 }
 
 /// Select (and scroll to) one list row, or clear the selection.
 unsafe fn select_row(hwnd: HWND, row: Option<usize>) {
-    let Some(lv) = list(hwnd) else {
-        return;
-    };
-    SUPPRESS_SELECT.store(true, Ordering::Relaxed);
-    let mask = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
-    let clear = LVITEMW {
-        stateMask: mask,
-        ..Default::default()
-    };
-    SendMessageW(
-        lv,
-        LVM_SETITEMSTATE,
-        Some(WPARAM(usize::MAX)),
-        Some(LPARAM(&clear as *const _ as isize)),
-    );
-    if let Some(row) = row {
-        let set = LVITEMW {
+    unsafe {
+        let Some(lv) = list(hwnd) else {
+            return;
+        };
+        SUPPRESS_SELECT.store(true, Ordering::Relaxed);
+        let mask = LIST_VIEW_ITEM_STATE_FLAGS(LVIS_SELECTED.0 | LVIS_FOCUSED.0);
+        let clear = LVITEMW {
             stateMask: mask,
-            state: mask,
             ..Default::default()
         };
         SendMessageW(
             lv,
             LVM_SETITEMSTATE,
-            Some(WPARAM(row)),
-            Some(LPARAM(&set as *const _ as isize)),
+            Some(WPARAM(usize::MAX)),
+            Some(LPARAM(&clear as *const _ as isize)),
         );
-        SendMessageW(lv, LVM_ENSUREVISIBLE, Some(WPARAM(row)), Some(LPARAM(0)));
+        if let Some(row) = row {
+            let set = LVITEMW {
+                stateMask: mask,
+                state: mask,
+                ..Default::default()
+            };
+            SendMessageW(
+                lv,
+                LVM_SETITEMSTATE,
+                Some(WPARAM(row)),
+                Some(LPARAM(&set as *const _ as isize)),
+            );
+            SendMessageW(lv, LVM_ENSUREVISIBLE, Some(WPARAM(row)), Some(LPARAM(0)));
+        }
+        SUPPRESS_SELECT.store(false, Ordering::Relaxed);
     }
-    SUPPRESS_SELECT.store(false, Ordering::Relaxed);
 }
 
 /// Rewrite the advice line for the selected key when its text changed.
 unsafe fn update_advice(hwnd: HWND) {
-    let s = strings(current_lang());
-    let text = {
-        let mut st = STATE.lock().unwrap();
-        let text = match (st.selected, st.snap.as_deref()) {
-            (Some(vk), Some(snap)) => advice_line(s, vk, recommend(&snap.hist[vk as usize])),
-            _ => s.advice_pick.to_string(),
+    unsafe {
+        let s = strings(current_lang());
+        let text = {
+            let mut st = STATE.lock().unwrap();
+            let text = match (st.selected, st.snap.as_deref()) {
+                (Some(vk), Some(snap)) => advice_line(s, vk, recommend(&snap.hist[vk as usize])),
+                _ => s.advice_pick.to_string(),
+            };
+            if text == st.advice_text {
+                return;
+            }
+            st.advice_text = text.clone();
+            text
         };
-        if text == st.advice_text {
-            return;
-        }
-        st.advice_text = text.clone();
-        text
-    };
-    set_text(hwnd, ID_KEYS_ADVICE, &text);
+        set_text(hwnd, ID_KEYS_ADVICE, &text);
+    }
 }
 
 /// Make `vk` the key being edited: picker, edit box, advice, and (when
 /// `sync_list`) the list selection follow.
 pub(crate) unsafe fn select_key(hwnd: HWND, vk: u8, sync_list: bool) {
-    if STATE.lock().unwrap().snap.is_none() {
-        if let Some((key, snap)) = take_snapshot() {
+    unsafe {
+        if STATE.lock().unwrap().snap.is_none()
+            && let Some((key, snap)) = take_snapshot()
+        {
             let mut st = STATE.lock().unwrap();
             st.snap = Some(snap);
             st.last_key = Some(key);
         }
-    }
-    let (prefill, row) = {
-        let mut st = STATE.lock().unwrap();
-        st.selected = Some(vk);
-        (
-            st.snap.as_deref().map(|snap| prefill_ms(snap, vk)),
-            st.rows.iter().position(|r| r.vk == vk),
-        )
-    };
-    if let Some(index) = picker_vks().iter().position(|&k| k == vk) {
-        if let Ok(combo) = GetDlgItem(Some(hwnd), ID_KEYS_COMBO) {
+        let (prefill, row) = {
+            let mut st = STATE.lock().unwrap();
+            st.selected = Some(vk);
+            (
+                st.snap.as_deref().map(|snap| prefill_ms(snap, vk)),
+                st.rows.iter().position(|r| r.vk == vk),
+            )
+        };
+        if let Some(index) = picker_vks().iter().position(|&k| k == vk)
+            && let Ok(combo) = GetDlgItem(Some(hwnd), ID_KEYS_COMBO)
+        {
             SendMessageW(combo, CB_SETCURSEL, Some(WPARAM(index)), Some(LPARAM(0)));
         }
+        if let Some(ms) = prefill {
+            set_text(hwnd, ID_KEYS_EDIT, &ms.to_string());
+        }
+        if sync_list {
+            select_row(hwnd, row);
+        }
+        update_advice(hwnd);
     }
-    if let Some(ms) = prefill {
-        set_text(hwnd, ID_KEYS_EDIT, &ms.to_string());
-    }
-    if sync_list {
-        select_row(hwnd, row);
-    }
-    update_advice(hwnd);
 }
 
 pub(crate) unsafe fn on_combo_changed(hwnd: HWND) {
-    if let Some(&vk) = picker_vks().get(combo_sel(hwnd, ID_KEYS_COMBO)) {
-        select_key(hwnd, vk, true);
+    unsafe {
+        if let Some(&vk) = picker_vks().get(combo_sel(hwnd, ID_KEYS_COMBO)) {
+            select_key(hwnd, vk, true);
+        }
     }
 }
 
 /// The key in the picker (always valid: the combo starts on its first item).
 unsafe fn picked_vk(hwnd: HWND) -> Option<u8> {
-    picker_vks().get(combo_sel(hwnd, ID_KEYS_COMBO)).copied()
+    unsafe { picker_vks().get(combo_sel(hwnd, ID_KEYS_COMBO)).copied() }
 }
 
 unsafe fn after_change(hwnd: HWND, vk: u8, written: bool) {
-    invalidate();
-    refresh(hwnd, true);
-    select_key(hwnd, vk, true);
-    if !written {
-        let s = strings(current_lang());
-        msg_box(hwnd, s.title, s.save_failed, MB_OK | MB_ICONWARNING);
+    unsafe {
+        invalidate();
+        refresh(hwnd, true);
+        select_key(hwnd, vk, true);
+        if !written {
+            let s = strings(current_lang());
+            msg_box(hwnd, s.title, s.save_failed, MB_OK | MB_ICONWARNING);
+        }
     }
 }
 
 /// "Apply": give the picked key the window in the edit box.
 pub(crate) unsafe fn apply_override(hwnd: HWND) {
-    let Some(vk) = picked_vk(hwnd) else {
-        return;
-    };
-    let Ok(ms) = get_text(hwnd, ID_KEYS_EDIT).parse::<u64>() else {
-        let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONWARNING);
-        return;
-    };
-    let written = settings_form::set_key_override(vk, Some(ms));
-    after_change(hwnd, vk, written);
+    unsafe {
+        let Some(vk) = picked_vk(hwnd) else {
+            return;
+        };
+        let Ok(ms) = get_text(hwnd, ID_KEYS_EDIT).parse::<u64>() else {
+            let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONWARNING);
+            return;
+        };
+        let written = settings_form::set_key_override(vk, Some(ms));
+        after_change(hwnd, vk, written);
+    }
 }
 
 /// "Default": the picked key follows the global window again.
 pub(crate) unsafe fn clear_override(hwnd: HWND) {
-    let Some(vk) = picked_vk(hwnd) else {
-        return;
-    };
-    let written = settings_form::set_key_override(vk, None);
-    after_change(hwnd, vk, written);
+    unsafe {
+        let Some(vk) = picked_vk(hwnd) else {
+            return;
+        };
+        let written = settings_form::set_key_override(vk, None);
+        after_change(hwnd, vk, written);
+    }
 }
 
 /// "Clear stats": forget the picked key's counters and measured gaps.
 pub(crate) unsafe fn clear_key_stats(hwnd: HWND) {
-    let Some(vk) = picked_vk(hwnd) else {
-        return;
-    };
-    if let Some(shared) = SHARED.get() {
-        shared.lock().unwrap().debouncer.clear_key_stats(vk);
+    unsafe {
+        let Some(vk) = picked_vk(hwnd) else {
+            return;
+        };
+        if let Some(shared) = SHARED.get() {
+            shared.lock().unwrap().debouncer.clear_key_stats(vk);
+        }
+        let written = settings_form::persist_live();
+        after_change(hwnd, vk, written);
     }
-    let written = settings_form::persist_live();
-    after_change(hwnd, vk, written);
 }
 
 pub(crate) unsafe fn on_mouse_toggled(hwnd: HWND, on: bool) {
-    if !settings_form::set_mouse_filter(on) {
-        let s = strings(current_lang());
-        msg_box(hwnd, s.title, s.save_failed, MB_OK | MB_ICONWARNING);
+    unsafe {
+        if !settings_form::set_mouse_filter(on) {
+            let s = strings(current_lang());
+            msg_box(hwnd, s.title, s.save_failed, MB_OK | MB_ICONWARNING);
+        }
     }
 }
 
 /// `WM_NOTIFY` from the list: cell text, row color, and user selection.
 pub(crate) unsafe fn on_notify(hwnd: HWND, lparam: LPARAM) -> Option<LRESULT> {
-    let hdr = &*(lparam.0 as *const NMHDR);
-    if hdr.idFrom != ID_KEYS_LIST as usize {
-        return None;
-    }
-    match hdr.code {
-        LVN_GETDISPINFOW => {
-            let info = &mut *(lparam.0 as *mut NMLVDISPINFOW);
-            if (info.item.mask & LVIF_TEXT).0 != 0
-                && !info.item.pszText.is_null()
-                && info.item.cchTextMax > 0
-            {
-                let st = STATE.lock().unwrap();
-                let text = st
-                    .rows
-                    .get(info.item.iItem as usize)
-                    .and_then(|r| r.cells.get(info.item.iSubItem as usize))
-                    .map(String::as_str)
-                    .unwrap_or("");
-                write_cell(info, text);
-            }
-            Some(LRESULT(0))
+    unsafe {
+        let hdr = &*(lparam.0 as *const NMHDR);
+        if hdr.idFrom != ID_KEYS_LIST as usize {
+            return None;
         }
-        NM_CUSTOMDRAW => {
-            let cd = &mut *(lparam.0 as *mut NMLVCUSTOMDRAW);
-            if cd.nmcd.dwDrawStage == CDDS_PREPAINT {
-                return Some(LRESULT(CDRF_NOTIFYITEMDRAW as isize));
-            }
-            if cd.nmcd.dwDrawStage == CDDS_ITEMPREPAINT {
-                let highlight = STATE
-                    .lock()
-                    .unwrap()
-                    .rows
-                    .get(cd.nmcd.dwItemSpec)
-                    .is_some_and(|r| r.highlight);
-                if highlight {
-                    cd.clrText = ThemeColors::new(theme_is_dark()).warn;
-                    return Some(LRESULT(CDRF_NEWFONT as isize));
+        match hdr.code {
+            LVN_GETDISPINFOW => {
+                let info = &mut *(lparam.0 as *mut NMLVDISPINFOW);
+                if (info.item.mask & LVIF_TEXT).0 != 0
+                    && !info.item.pszText.is_null()
+                    && info.item.cchTextMax > 0
+                {
+                    let st = STATE.lock().unwrap();
+                    let text = st
+                        .rows
+                        .get(info.item.iItem as usize)
+                        .and_then(|r| r.cells.get(info.item.iSubItem as usize))
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    write_cell(info, text);
                 }
+                Some(LRESULT(0))
             }
-            Some(LRESULT(CDRF_DODEFAULT as isize))
-        }
-        LVN_ITEMCHANGED => {
-            let nm = &*(lparam.0 as *const NMLISTVIEW);
-            let picked = !SUPPRESS_SELECT.load(Ordering::Relaxed)
-                && nm.iItem >= 0
-                && nm.uNewState & LVIS_SELECTED.0 != 0
-                && nm.uOldState & LVIS_SELECTED.0 == 0;
-            if picked {
-                let vk = STATE
-                    .lock()
-                    .unwrap()
-                    .rows
-                    .get(nm.iItem as usize)
-                    .map(|r| r.vk);
-                if let Some(vk) = vk {
-                    select_key(hwnd, vk, false);
+            NM_CUSTOMDRAW => {
+                let cd = &mut *(lparam.0 as *mut NMLVCUSTOMDRAW);
+                if cd.nmcd.dwDrawStage == CDDS_PREPAINT {
+                    return Some(LRESULT(CDRF_NOTIFYITEMDRAW as isize));
                 }
+                if cd.nmcd.dwDrawStage == CDDS_ITEMPREPAINT {
+                    let highlight = STATE
+                        .lock()
+                        .unwrap()
+                        .rows
+                        .get(cd.nmcd.dwItemSpec)
+                        .is_some_and(|r| r.highlight);
+                    if highlight {
+                        cd.clrText = ThemeColors::new(theme_is_dark()).warn;
+                        return Some(LRESULT(CDRF_NEWFONT as isize));
+                    }
+                }
+                Some(LRESULT(CDRF_DODEFAULT as isize))
             }
-            Some(LRESULT(0))
+            LVN_ITEMCHANGED => {
+                let nm = &*(lparam.0 as *const NMLISTVIEW);
+                let picked = !SUPPRESS_SELECT.load(Ordering::Relaxed)
+                    && nm.iItem >= 0
+                    && nm.uNewState & LVIS_SELECTED.0 != 0
+                    && nm.uOldState & LVIS_SELECTED.0 == 0;
+                if picked {
+                    let vk = STATE
+                        .lock()
+                        .unwrap()
+                        .rows
+                        .get(nm.iItem as usize)
+                        .map(|r| r.vk);
+                    if let Some(vk) = vk {
+                        select_key(hwnd, vk, false);
+                    }
+                }
+                Some(LRESULT(0))
+            }
+            _ => None,
         }
-        _ => None,
     }
 }
 

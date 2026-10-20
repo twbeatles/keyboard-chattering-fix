@@ -2,8 +2,8 @@
 
 use clap::Parser;
 use kcfix_updater::{
-    discard_replacement, relaunch_previous, should_relaunch_previous, update_executable_with,
-    HelperLang, UpdateOptions,
+    HelperLang, UpdateOptions, discard_replacement, relaunch_previous, should_relaunch_previous,
+    update_executable_with,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -41,8 +41,8 @@ struct Cli {
 fn show_error_dialog(message: &str, lang: HelperLang) {
     #[cfg(windows)]
     {
+        use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
         use windows::core::HSTRING;
-        use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
         let text = HSTRING::from(message);
         let title = HSTRING::from(lang.failure_title());
         unsafe {

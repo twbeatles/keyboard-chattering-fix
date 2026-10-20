@@ -5,7 +5,7 @@
 //! and the UI thread always observe the same filter state.
 
 use std::{
-    sync::{atomic::AtomicBool, Mutex, OnceLock},
+    sync::{Mutex, OnceLock, atomic::AtomicBool},
     time::Instant,
 };
 

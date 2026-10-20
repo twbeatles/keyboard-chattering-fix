@@ -7,7 +7,7 @@ use serde_json::Value;
 use super::canonical::canonical_payload_python;
 use super::error::{UpdateError, UpdateErrorKind};
 use super::model::{
-    UpdateManifest, MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, RELEASE_DOWNLOAD_PREFIX,
+    MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, RELEASE_DOWNLOAD_PREFIX, UpdateManifest,
 };
 use super::version::is_newer;
 use crate::config::UPDATE_PUBLIC_KEY_B64;

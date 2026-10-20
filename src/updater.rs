@@ -30,7 +30,7 @@ pub use canonical::{canonical_payload, canonical_payload_python};
 pub use error::{UpdateError, UpdateErrorKind};
 pub use http::{check_for_update, download_and_verify};
 pub use manifest::{expected_artifact_url, is_valid_artifact_url, parse_and_verify_manifest};
-pub use model::{StagedUpdate, UpdateManifest, MANIFEST_URL, RELEASE_DOWNLOAD_PREFIX, USER_AGENT};
+pub use model::{MANIFEST_URL, RELEASE_DOWNLOAD_PREFIX, StagedUpdate, USER_AGENT, UpdateManifest};
 pub use staging::{
     apply_update, cleanup_stale_staging, describe_helper, discard_staged, end_update, helper_args,
     launch_helper, prepare_update, relaunch_args_from, resolve_helper, stage_helper,

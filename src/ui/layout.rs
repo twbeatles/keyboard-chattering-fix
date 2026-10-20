@@ -850,7 +850,7 @@ pub(crate) fn sc(v: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::{strings, Language};
+    use crate::i18n::{Language, strings};
 
     #[test]
     fn control_ids_are_unique() {

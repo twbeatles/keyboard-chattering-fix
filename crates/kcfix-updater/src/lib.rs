@@ -136,7 +136,7 @@ pub fn wait_for_process_exit(pid: u32, timeout: Duration) -> Result<(), HelperEr
     {
         use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
         use windows::Win32::System::Threading::{
-            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+            OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
         };
 
         let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) };
@@ -304,10 +304,10 @@ pub fn update_executable_with(
 
     // 3. Prepare backup path
     let backup = current.with_extension("exe.old");
-    if backup.exists() {
-        if let Err(err) = std::fs::remove_file(&backup) {
-            warn!(%err, "could not remove stale update backup");
-        }
+    if backup.exists()
+        && let Err(err) = std::fs::remove_file(&backup)
+    {
+        warn!(%err, "could not remove stale update backup");
     }
 
     // 4. Rename current -> current.exe.old

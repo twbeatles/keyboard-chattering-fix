@@ -27,8 +27,9 @@
 use std::{
     cell::Cell,
     sync::{
+        Mutex, OnceLock, PoisonError,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        mpsc, Mutex, OnceLock, PoisonError,
+        mpsc,
     },
 };
 
@@ -45,7 +46,7 @@ use windows::Win32::{
 
 use super::sound::play_notification_sound;
 use crate::{
-    app::state::{Shared, HOOK_ACTIVE, SHARED, START},
+    app::state::{HOOK_ACTIVE, SHARED, START, Shared},
     debounce::{Decision, KeyEventKind, SLOTS},
 };
 
@@ -100,18 +101,22 @@ thread_local! {
 
 /// Arm the release-delay timer on the hook thread (the caller's thread).
 unsafe fn ensure_defer_timer() {
-    DEFER_TIMER.with(|t| {
-        if t.get() == 0 {
-            t.set(SetTimer(None, 0, USER_TIMER_MINIMUM, None));
-        }
-    });
+    unsafe {
+        DEFER_TIMER.with(|t| {
+            if t.get() == 0 {
+                t.set(SetTimer(None, 0, USER_TIMER_MINIMUM, None));
+            }
+        });
+    }
 }
 
 /// Ask the hook thread to drain the injection queue (from the hook itself).
 unsafe fn wake_injector() {
-    let id = HOOK_THREAD_ID.load(Ordering::Acquire);
-    if id != 0 {
-        let _ = PostThreadMessageW(id, WM_KCFIX_INJECT, WPARAM(0), LPARAM(0));
+    unsafe {
+        let id = HOOK_THREAD_ID.load(Ordering::Acquire);
+        if id != 0 {
+            let _ = PostThreadMessageW(id, WM_KCFIX_INJECT, WPARAM(0), LPARAM(0));
+        }
     }
 }
 
@@ -124,99 +129,103 @@ unsafe fn apply(
     scan: u16,
     kind: KeyEventKind,
 ) -> bool {
-    let drop_with_sound = |g: &Shared| {
-        if g.play_sound && kind == KeyEventKind::Down {
-            play_notification_sound(g.sound_file.as_ref().map(|s| s.wide.as_slice()));
-        }
-    };
-    match decision {
-        Decision::Pass => false,
-        Decision::Block => {
-            drop_with_sound(g);
-            true
-        }
-        Decision::Defer => {
-            g.pending_scan[slot] = scan;
-            ensure_defer_timer();
-            true
-        }
-        Decision::Flush { then_pass } => {
-            g.inject.push(Injection {
-                slot: slot as u16,
-                down: false,
-                scan: g.pending_scan[slot],
-            });
-            if then_pass {
+    unsafe {
+        let drop_with_sound = |g: &Shared| {
+            if g.play_sound && kind == KeyEventKind::Down {
+                play_notification_sound(g.sound_file.as_ref().map(|s| s.wide.as_slice()));
+            }
+        };
+        match decision {
+            Decision::Pass => false,
+            Decision::Block => {
+                drop_with_sound(g);
+                true
+            }
+            Decision::Defer => {
+                g.pending_scan[slot] = scan;
+                ensure_defer_timer();
+                true
+            }
+            Decision::Flush { then_pass } => {
                 g.inject.push(Injection {
                     slot: slot as u16,
-                    down: true,
-                    scan,
+                    down: false,
+                    scan: g.pending_scan[slot],
                 });
-            } else {
-                drop_with_sound(g);
+                if then_pass {
+                    g.inject.push(Injection {
+                        slot: slot as u16,
+                        down: true,
+                        scan,
+                    });
+                } else {
+                    drop_with_sound(g);
+                }
+                wake_injector();
+                true
             }
-            wake_injector();
-            true
         }
     }
 }
 
 unsafe extern "system" fn hook_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if ncode >= 0 {
-        let kind = match wparam.0 as u32 {
-            WM_KEYDOWN | WM_SYSKEYDOWN => Some(KeyEventKind::Down),
-            WM_KEYUP | WM_SYSKEYUP => Some(KeyEventKind::Up),
-            _ => None,
-        };
-        if let Some(kind) = kind {
-            HOOK_EVENTS.fetch_add(1, Ordering::Relaxed);
-            let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            // Our own re-sent events were decided when they first arrived;
-            // the watchdog's probe proves the hook alive and goes no further.
-            if kb.dwExtraInfo == INJECT_MARK {
-                if kb.vkCode == u32::from(PROBE_VK) {
-                    PROBES_SEEN.fetch_add(1, Ordering::Relaxed);
-                    return LRESULT(1);
-                }
-                return CallNextHookEx(None, ncode, wparam, lparam);
-            }
-            if let (Some(shared), Some(start)) = (SHARED.get(), START.get()) {
-                // A panic here would abort the process (it unwinds into the
-                // OS), so a poisoned lock keeps filtering with its data.
-                let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
-                let vk = kb.vkCode as usize;
-                let extended = (kb.flags & LLKHF_EXTENDED).0 != 0;
-                let slot = crate::debounce::slot_of(vk, extended);
-
-                // 1. Cleaning mode: presses dropped, Enter ends it.
-                if g.debouncer.cleaning_mode {
-                    let d = g
-                        .debouncer
-                        .decide_event(vk, extended, kind, start.elapsed());
-                    if d == Decision::Pass {
-                        return CallNextHookEx(None, ncode, wparam, lparam);
+    unsafe {
+        if ncode >= 0 {
+            let kind = match wparam.0 as u32 {
+                WM_KEYDOWN | WM_SYSKEYDOWN => Some(KeyEventKind::Down),
+                WM_KEYUP | WM_SYSKEYUP => Some(KeyEventKind::Up),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                HOOK_EVENTS.fetch_add(1, Ordering::Relaxed);
+                let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                // Our own re-sent events were decided when they first arrived;
+                // the watchdog's probe proves the hook alive and goes no further.
+                if kb.dwExtraInfo == INJECT_MARK {
+                    if kb.vkCode == u32::from(PROBE_VK) {
+                        PROBES_SEEN.fetch_add(1, Ordering::Relaxed);
+                        return LRESULT(1);
                     }
-                    return LRESULT(1);
-                }
-
-                // 2. Never touch synthesized input if exclude_injected is enabled
-                if g.exclude_injected && (kb.flags & LLKHF_INJECTED).0 != 0 {
                     return CallNextHookEx(None, ncode, wparam, lparam);
                 }
+                if let (Some(shared), Some(start)) = (SHARED.get(), START.get()) {
+                    // A panic here would abort the process (it unwinds into the
+                    // OS), so a poisoned lock keeps filtering with its data.
+                    let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    let vk = kb.vkCode as usize;
+                    let extended = (kb.flags & LLKHF_EXTENDED).0 != 0;
+                    let slot = crate::debounce::slot_of(vk, extended);
 
-                // 3. Debounce decision (not while paused for a foreground app)
-                if g.enabled && !g.suspended {
-                    let d = g
-                        .debouncer
-                        .decide_event(vk, extended, kind, start.elapsed());
-                    if apply(&mut g, d, slot, kb.scanCode as u16, kind) {
+                    // 1. Cleaning mode: presses dropped, Enter ends it.
+                    if g.debouncer.cleaning_mode {
+                        let d = g
+                            .debouncer
+                            .decide_event(vk, extended, kind, start.elapsed());
+                        if d == Decision::Pass {
+                            return CallNextHookEx(None, ncode, wparam, lparam);
+                        }
                         return LRESULT(1);
+                    }
+
+                    // 2. Never touch synthesized input if exclude_injected is enabled
+                    if g.exclude_injected && (kb.flags & LLKHF_INJECTED).0 != 0 {
+                        return CallNextHookEx(None, ncode, wparam, lparam);
+                    }
+
+                    // 3. Debounce decision (not while paused for a foreground app)
+                    if g.enabled && !g.suspended {
+                        let d = g
+                            .debouncer
+                            .decide_event(vk, extended, kind, start.elapsed());
+                        if apply(&mut g, d, slot, kb.scanCode as u16, kind) {
+                            return LRESULT(1);
+                        }
                     }
                 }
             }
         }
+        CallNextHookEx(None, ncode, wparam, lparam)
     }
-    CallNextHookEx(None, ncode, wparam, lparam)
 }
 
 /// Virtual-key code and direction of a mouse button message; `None` for
@@ -243,32 +252,34 @@ fn mouse_button(msg: u32, mouse_data: u32) -> Option<(usize, KeyEventKind)> {
 }
 
 unsafe extern "system" fn mouse_proc(ncode: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    // Movement arrives hundreds of times a second: it is classified here
-    // and passed on before the shared lock is ever touched.
-    if ncode >= 0 {
-        let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
-        if let Some((vk, kind)) = mouse_button(wparam.0 as u32, ms.mouseData) {
-            if ms.dwExtraInfo == INJECT_MARK {
-                return CallNextHookEx(None, ncode, wparam, lparam);
-            }
-            if let (Some(shared), Some(start)) = (SHARED.get(), START.get()) {
-                let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
-                // Cleaning mode keeps the mouse working: it is how the user
-                // clicks "Finish cleaning".
-                let skip = g.debouncer.cleaning_mode
-                    || !g.enabled
-                    || g.suspended
-                    || (g.exclude_injected && ms.flags & LLMHF_INJECTED != 0);
-                if !skip {
-                    let d = g.debouncer.decide_event(vk, false, kind, start.elapsed());
-                    if apply(&mut g, d, vk, 0, kind) {
-                        return LRESULT(1);
+    unsafe {
+        // Movement arrives hundreds of times a second: it is classified here
+        // and passed on before the shared lock is ever touched.
+        if ncode >= 0 {
+            let ms = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            if let Some((vk, kind)) = mouse_button(wparam.0 as u32, ms.mouseData) {
+                if ms.dwExtraInfo == INJECT_MARK {
+                    return CallNextHookEx(None, ncode, wparam, lparam);
+                }
+                if let (Some(shared), Some(start)) = (SHARED.get(), START.get()) {
+                    let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    // Cleaning mode keeps the mouse working: it is how the user
+                    // clicks "Finish cleaning".
+                    let skip = g.debouncer.cleaning_mode
+                        || !g.enabled
+                        || g.suspended
+                        || (g.exclude_injected && ms.flags & LLMHF_INJECTED != 0);
+                    if !skip {
+                        let d = g.debouncer.decide_event(vk, false, kind, start.elapsed());
+                        if apply(&mut g, d, vk, 0, kind) {
+                            return LRESULT(1);
+                        }
                     }
                 }
             }
         }
+        CallNextHookEx(None, ncode, wparam, lparam)
     }
-    CallNextHookEx(None, ncode, wparam, lparam)
 }
 
 /// The `SendInput` record for one queued event.
@@ -407,35 +418,37 @@ pub(crate) fn flush_deferred_releases() {
 /// queued events and hand the queue to the injector. `flush_all` also sends
 /// releases whose delay has not run out (shutdown).
 unsafe fn drain(flush_all: bool) -> Vec<Injection> {
-    let (Some(shared), Some(start)) = (SHARED.get(), START.get()) else {
-        return Vec::new();
-    };
-    let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut due = [0u16; SLOTS];
-    let n = g
-        .debouncer
-        .due_releases(start.elapsed(), flush_all, &mut due);
-    for &slot in &due[..n] {
-        let scan = g.pending_scan[slot as usize];
-        g.inject.push(Injection {
-            slot,
-            down: false,
-            scan,
-        });
+    unsafe {
+        let (Some(shared), Some(start)) = (SHARED.get(), START.get()) else {
+            return Vec::new();
+        };
+        let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut due = [0u16; SLOTS];
+        let n = g
+            .debouncer
+            .due_releases(start.elapsed(), flush_all, &mut due);
+        for &slot in &due[..n] {
+            let scan = g.pending_scan[slot as usize];
+            g.inject.push(Injection {
+                slot,
+                down: false,
+                scan,
+            });
+        }
+        if !g.debouncer.has_pending_releases() {
+            DEFER_TIMER.with(|t| {
+                let id = t.replace(0);
+                if id != 0 {
+                    let _ = KillTimer(None, id);
+                }
+            });
+        } else if !flush_all {
+            // In-flight delays adopted from a previous thread (see [`start`]):
+            // this thread owns no timer yet, so arm one (ISSUE-001).
+            ensure_defer_timer();
+        }
+        g.inject.take()
     }
-    if !g.debouncer.has_pending_releases() {
-        DEFER_TIMER.with(|t| {
-            let id = t.replace(0);
-            if id != 0 {
-                let _ = KillTimer(None, id);
-            }
-        });
-    } else if !flush_all {
-        // In-flight delays adopted from a previous thread (see [`start`]):
-        // this thread owns no timer yet, so arm one (ISSUE-001).
-        ensure_defer_timer();
-    }
-    g.inject.take()
 }
 
 /// Thread messages for the hook thread.
@@ -557,7 +570,7 @@ pub(crate) fn spawn_hook_thread() -> Option<HookThread> {
     let (tx, rx) = mpsc::channel::<Option<u32>>();
     // Claimed up front so the thread knows its generation even if the
     // parent never hears back (hook install failure).
-    let gen = HOOK_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    let generation = HOOK_GEN.fetch_add(1, Ordering::AcqRel) + 1;
     let handle = std::thread::Builder::new()
         .name("kcfix-keyboard-hook".into())
         .spawn(move || unsafe {
@@ -594,10 +607,8 @@ pub(crate) fn spawn_hook_thread() -> Option<HookThread> {
                                     tracing::error!("SetWindowsHookExW(WH_MOUSE_LL) failed")
                                 })
                                 .ok();
-                            } else if !on {
-                                if let Some(h) = mouse.take() {
-                                    let _ = UnhookWindowsHookEx(h);
-                                }
+                            } else if !on && let Some(h) = mouse.take() {
+                                let _ = UnhookWindowsHookEx(h);
                             }
                             continue;
                         }
@@ -623,7 +634,7 @@ pub(crate) fn spawn_hook_thread() -> Option<HookThread> {
             // without waiting for this thread to service them. A thread
             // superseded by `restart` skips this: the new thread owns the
             // pending releases now (ISSUE-001).
-            if gen == HOOK_GEN.load(Ordering::Acquire) {
+            if generation == HOOK_GEN.load(Ordering::Acquire) {
                 send(&drain(true));
             }
         })

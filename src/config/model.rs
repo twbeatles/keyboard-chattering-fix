@@ -5,7 +5,7 @@
 
 use crate::{
     debounce::MeasureFrom,
-    i18n::{system_language, Language, LanguagePref},
+    i18n::{Language, LanguagePref, system_language},
 };
 
 #[derive(Clone, Debug)]

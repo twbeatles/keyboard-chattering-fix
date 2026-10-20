@@ -6,14 +6,14 @@
 //! quietly instead of showing "already running".
 
 use windows::{
-    core::PCWSTR,
     Win32::{
         Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS},
         System::Registry::{
-            RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW,
-            RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ,
+            HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_SZ, RegCloseKey, RegCreateKeyExW,
+            RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
         },
     },
+    core::PCWSTR,
 };
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";

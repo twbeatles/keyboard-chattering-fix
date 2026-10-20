@@ -8,22 +8,22 @@
 use std::sync::{Mutex, OnceLock};
 
 use windows::{
-    core::PWSTR,
     Win32::{
         Foundation::{CloseHandle, HANDLE, HWND, RECT},
         Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
         },
-        Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
+        Security::{GetTokenInformation, TOKEN_ELEVATION, TOKEN_QUERY, TokenElevation},
         System::Threading::{
-            GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW,
-            PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
         },
         UI::WindowsAndMessaging::{
             GetClassNameW, GetDesktopWindow, GetForegroundWindow, GetShellWindow, GetWindowRect,
             GetWindowThreadProcessId,
         },
     },
+    core::PWSTR,
 };
 
 use crate::app::state::SHARED;
@@ -130,117 +130,125 @@ pub(crate) fn self_elevated() -> bool {
 }
 
 unsafe fn token_elevated(process: HANDLE) -> Option<bool> {
-    let mut token = HANDLE::default();
-    OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
-    let mut elevation = TOKEN_ELEVATION::default();
-    let mut len = 0u32;
-    let ok = GetTokenInformation(
-        token,
-        TokenElevation,
-        Some(&mut elevation as *mut _ as *mut _),
-        std::mem::size_of::<TOKEN_ELEVATION>() as u32,
-        &mut len,
-    )
-    .is_ok();
-    let _ = CloseHandle(token);
-    ok.then_some(elevation.TokenIsElevated != 0)
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(process, TOKEN_QUERY, &mut token).ok()?;
+        let mut elevation = TOKEN_ELEVATION::default();
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut elevation as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok.then_some(elevation.TokenIsElevated != 0)
+    }
 }
 
 /// File name and elevation of a process. A token that cannot be read
 /// belongs to a process above our integrity level: treat it as elevated.
 unsafe fn describe_process(pid: u32) -> (String, bool) {
-    let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-        return (String::new(), false);
-    };
-    let mut buf = [0u16; 1024];
-    let mut len = buf.len() as u32;
-    let exe = if QueryFullProcessImageNameW(
-        process,
-        PROCESS_NAME_WIN32,
-        PWSTR(buf.as_mut_ptr()),
-        &mut len,
-    )
-    .is_ok()
-    {
-        let full = String::from_utf16_lossy(&buf[..len as usize]);
-        full.rsplit(['\\', '/']).next().unwrap_or("").to_string()
-    } else {
-        String::new()
-    };
-    let elevated = token_elevated(process).unwrap_or(true);
-    let _ = CloseHandle(process);
-    (exe, elevated)
+    unsafe {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return (String::new(), false);
+        };
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let exe = if QueryFullProcessImageNameW(
+            process,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok()
+        {
+            let full = String::from_utf16_lossy(&buf[..len as usize]);
+            full.rsplit(['\\', '/']).next().unwrap_or("").to_string()
+        } else {
+            String::new()
+        };
+        let elevated = token_elevated(process).unwrap_or(true);
+        let _ = CloseHandle(process);
+        (exe, elevated)
+    }
 }
 
 /// Desktop and shell windows are never "full-screen apps".
 unsafe fn is_shell(hwnd: HWND) -> bool {
-    if hwnd == GetDesktopWindow() || hwnd == GetShellWindow() {
-        return true;
+    unsafe {
+        if hwnd == GetDesktopWindow() || hwnd == GetShellWindow() {
+            return true;
+        }
+        let mut class = [0u16; 32];
+        let n = GetClassNameW(hwnd, &mut class) as usize;
+        let class = String::from_utf16_lossy(&class[..n]);
+        matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd")
     }
-    let mut class = [0u16; 32];
-    let n = GetClassNameW(hwnd, &mut class) as usize;
-    let class = String::from_utf16_lossy(&class[..n]);
-    matches!(class.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd")
 }
 
 unsafe fn is_fullscreen(hwnd: HWND) -> bool {
-    if is_shell(hwnd) {
-        return false;
+    unsafe {
+        if is_shell(hwnd) {
+            return false;
+        }
+        let mut win = RECT::default();
+        if GetWindowRect(hwnd, &mut win).is_err() {
+            return false;
+        }
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        GetMonitorInfoW(monitor, &mut info).as_bool() && covers_monitor(win, info.rcMonitor)
     }
-    let mut win = RECT::default();
-    if GetWindowRect(hwnd, &mut win).is_err() {
-        return false;
-    }
-    let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    GetMonitorInfoW(monitor, &mut info).as_bool() && covers_monitor(win, info.rcMonitor)
 }
 
 /// Timer tick. `own` is the main window (never paused for itself).
 /// Returns whether the status changed.
 pub(crate) unsafe fn tick(own: HWND) -> bool {
-    let fg = GetForegroundWindow();
-    let (apps, pause_fullscreen) = {
-        let c = CONFIG.lock().unwrap();
-        (c.apps.clone(), c.fullscreen)
-    };
-    let next = if fg.is_invalid() || fg == own {
-        (None, false)
-    } else {
-        let (exe, elevated) = {
-            let mut cache = CACHE.lock().unwrap();
-            if cache.hwnd != fg.0 as isize {
-                let mut pid = 0u32;
-                GetWindowThreadProcessId(fg, Some(&mut pid));
-                let (exe, elevated) = describe_process(pid);
-                *cache = Cache {
-                    hwnd: fg.0 as isize,
-                    exe,
-                    elevated,
-                };
-            }
-            (cache.exe.clone(), cache.elevated)
+    unsafe {
+        let fg = GetForegroundWindow();
+        let (apps, pause_fullscreen) = {
+            let c = CONFIG.lock().unwrap();
+            (c.apps.clone(), c.fullscreen)
         };
-        let listed = app_listed(&apps, &exe);
-        let fullscreen = pause_fullscreen && !listed && is_fullscreen(fg);
-        let reason = pause_reason(listed, fullscreen, pause_fullscreen, &exe);
-        (reason, elevated && !self_elevated())
-    };
-    let changed = {
-        let mut st = STATUS.lock().unwrap();
-        let changed = *st != next;
-        *st = next.clone();
-        changed
-    };
-    if changed {
-        if let Some(shared) = SHARED.get() {
+        let next = if fg.is_invalid() || fg == own {
+            (None, false)
+        } else {
+            let (exe, elevated) = {
+                let mut cache = CACHE.lock().unwrap();
+                if cache.hwnd != fg.0 as isize {
+                    let mut pid = 0u32;
+                    GetWindowThreadProcessId(fg, Some(&mut pid));
+                    let (exe, elevated) = describe_process(pid);
+                    *cache = Cache {
+                        hwnd: fg.0 as isize,
+                        exe,
+                        elevated,
+                    };
+                }
+                (cache.exe.clone(), cache.elevated)
+            };
+            let listed = app_listed(&apps, &exe);
+            let fullscreen = pause_fullscreen && !listed && is_fullscreen(fg);
+            let reason = pause_reason(listed, fullscreen, pause_fullscreen, &exe);
+            (reason, elevated && !self_elevated())
+        };
+        let changed = {
+            let mut st = STATUS.lock().unwrap();
+            let changed = *st != next;
+            *st = next.clone();
+            changed
+        };
+        if changed && let Some(shared) = SHARED.get() {
             shared.lock().unwrap().suspended = next.0.is_some();
         }
+        changed
     }
-    changed
 }
 
 #[cfg(test)]

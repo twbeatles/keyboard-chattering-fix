@@ -2,6 +2,13 @@
 
 이 프로젝트의 사용자에게 보이는 변경 사항입니다. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 따르고, 버전은 [유의적 버전](https://semver.org/lang/ko/)을 따릅니다.
 
+## [0.3.3] - 2026-10-20
+
+### 변경
+- **빌드 기반을 Rust 2024 에디션으로 전환**: 예약어 `gen` 회피(`generation`), `unsafe extern` 블록, 환경 변수 변경의 `unsafe` 블록, `unsafe fn` 내부 연산의 명시적 `unsafe` 블록, let-chain 중첩 `if` 축소. 사용자 동작 변경 없음.
+- **의존성 갱신**: 직접 의존성의 메이저 업그레이드 대상 없음(전부 최신 major 유지). 전이 의존성 패치 5건(`cc`, `find-msvc-tools`, `libc`, `ureq-proto`, `webpki-roots`).
+- 최소 지원 Rust 버전(MSRV) 1.85를 `Cargo.toml`에 명시.
+
 ## [0.3.2] - 2026-10-19
 
 ### 변경

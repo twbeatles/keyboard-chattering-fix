@@ -147,10 +147,10 @@ fn locale_override(value: Option<String>) -> Option<String> {
 #[cfg(windows)]
 fn locale_name_from_windows() -> Option<String> {
     use windows::{
-        core::PWSTR,
         Win32::Globalization::{
             GetUserDefaultLocaleName, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME,
         },
+        core::PWSTR,
     };
     unsafe {
         // Display (UI) languages, most preferred first, as a double-NUL

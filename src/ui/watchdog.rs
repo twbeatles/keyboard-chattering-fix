@@ -12,17 +12,17 @@
 //! (Raw keyboard input would be the obvious detector, but registering for
 //! it stops the hook from seeing input while this window is in front.)
 
-use std::sync::{atomic::Ordering, Mutex};
+use std::sync::{Mutex, atomic::Ordering};
 
 use windows::Win32::{
     System::SystemInformation::GetTickCount,
     UI::Input::KeyboardAndMouse::{
-        GetLastInputInfo, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-        LASTINPUTINFO, VIRTUAL_KEY,
+        GetLastInputInfo, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        LASTINPUTINFO, SendInput, VIRTUAL_KEY,
     },
 };
 
-use crate::input::hook::{restart, HOOK_EVENTS, INJECT_MARK, PROBES_SEEN, PROBE_VK};
+use crate::input::hook::{HOOK_EVENTS, INJECT_MARK, PROBE_VK, PROBES_SEEN, restart};
 
 /// Timer ticks (500 ms) between checks: 10 s.
 const CHECK_TICKS: u32 = 20;
@@ -82,80 +82,86 @@ fn clock_hh_mm() -> String {
 
 /// Whether there was user input since `since` (a `GetTickCount` value).
 unsafe fn input_since(since: u32) -> bool {
-    let mut info = LASTINPUTINFO {
-        cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-        dwTime: 0,
-    };
-    GetLastInputInfo(&mut info).as_bool() && info.dwTime.wrapping_sub(since) as i32 > 0
+    unsafe {
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        GetLastInputInfo(&mut info).as_bool() && info.dwTime.wrapping_sub(since) as i32 > 0
+    }
 }
 
 /// Send one watchdog probe. Returns whether it left this process: a probe
 /// that never left cannot come back, so the caller must not arm a wait for
 /// it (ISSUE-001).
 unsafe fn send_probe() -> bool {
-    let input = INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: VIRTUAL_KEY(PROBE_VK),
-                wScan: 0,
-                dwFlags: KEYEVENTF_KEYUP,
-                time: 0,
-                dwExtraInfo: INJECT_MARK,
+    unsafe {
+        let input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(PROBE_VK),
+                    wScan: 0,
+                    dwFlags: KEYEVENTF_KEYUP,
+                    time: 0,
+                    dwExtraInfo: INJECT_MARK,
+                },
             },
-        },
-    };
-    SendInput(&[input], std::mem::size_of::<INPUT>() as i32) != 0
+        };
+        SendInput(&[input], std::mem::size_of::<INPUT>() as i32) != 0
+    }
 }
 
 /// Timer tick (UI thread). Returns whether the hook was restarted.
 pub(crate) unsafe fn tick() -> bool {
-    let mut st = STATE.lock().unwrap();
-    if let Some((waited, sent_at)) = st.probe {
-        let seen = PROBES_SEEN.load(Ordering::Relaxed) > sent_at;
-        let waited = waited + 1;
-        if seen {
-            st.probe = None;
-        } else if probe_failed(seen, waited) {
-            st.probe = None;
-            st.hooked = HOOK_EVENTS.load(Ordering::Relaxed);
-            drop(st);
-            tracing::warn!("keyboard hook missed its probe; restarting it");
-            super::diag::log_line("hook probe missed; restarting hook");
-            let ok = restart();
-            if ok {
-                *LAST_RESTART.lock().unwrap() = Some(clock_hh_mm());
+    unsafe {
+        let mut st = STATE.lock().unwrap();
+        if let Some((waited, sent_at)) = st.probe {
+            let seen = PROBES_SEEN.load(Ordering::Relaxed) > sent_at;
+            let waited = waited + 1;
+            if seen {
+                st.probe = None;
+            } else if probe_failed(seen, waited) {
+                st.probe = None;
+                st.hooked = HOOK_EVENTS.load(Ordering::Relaxed);
+                drop(st);
+                tracing::warn!("keyboard hook missed its probe; restarting it");
+                super::diag::log_line("hook probe missed; restarting hook");
+                let ok = restart();
+                if ok {
+                    *LAST_RESTART.lock().unwrap() = Some(clock_hh_mm());
+                }
+                return ok;
+            } else {
+                st.probe = Some((waited, sent_at));
             }
-            return ok;
-        } else {
-            st.probe = Some((waited, sent_at));
+            return false;
         }
-        return false;
-    }
-    st.ticks += 1;
-    if st.ticks < CHECK_TICKS {
-        return false;
-    }
-    st.ticks = 0;
-    let hooked_now = HOOK_EVENTS.load(Ordering::Relaxed);
-    let hooked = hooked_now - st.hooked;
-    st.hooked = hooked_now;
-    let since = st.last_check_tick;
-    st.last_check_tick = GetTickCount();
-    // The first check has no reference time: just take one.
-    if since == 0 {
-        return false;
-    }
-    if check(hooked, input_since(since)) == Step::Probe {
-        let sent_at = PROBES_SEEN.load(Ordering::Relaxed);
-        drop(st);
-        // Arm the wait only when the probe actually left: otherwise the next
-        // check retries instead of restarting a healthy hook (ISSUE-001).
-        if send_probe() {
-            STATE.lock().unwrap().probe = Some((0, sent_at));
+        st.ticks += 1;
+        if st.ticks < CHECK_TICKS {
+            return false;
         }
+        st.ticks = 0;
+        let hooked_now = HOOK_EVENTS.load(Ordering::Relaxed);
+        let hooked = hooked_now - st.hooked;
+        st.hooked = hooked_now;
+        let since = st.last_check_tick;
+        st.last_check_tick = GetTickCount();
+        // The first check has no reference time: just take one.
+        if since == 0 {
+            return false;
+        }
+        if check(hooked, input_since(since)) == Step::Probe {
+            let sent_at = PROBES_SEEN.load(Ordering::Relaxed);
+            drop(st);
+            // Arm the wait only when the probe actually left: otherwise the next
+            // check retries instead of restarting a healthy hook (ISSUE-001).
+            if send_probe() {
+                STATE.lock().unwrap().probe = Some((0, sent_at));
+            }
+        }
+        false
     }
-    false
 }
 
 #[cfg(test)]

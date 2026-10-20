@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::error::{UpdateError, UpdateErrorKind};
 use super::http::download_and_verify;
-use super::model::{StagedUpdate, UpdateManifest, STAGING_SEQ, UPDATE_IN_PROGRESS};
+use super::model::{STAGING_SEQ, StagedUpdate, UPDATE_IN_PROGRESS, UpdateManifest};
 
 /// Helper binary name. It must sit next to the app executable so the update
 /// can proceed without extra installs or elevated privileges.
@@ -65,10 +65,10 @@ struct BinaryStamp {
 fn file_stamp(path: &Path) -> Option<BinaryStamp> {
     use std::os::windows::ffi::OsStrExt;
     use windows::{
-        core::{HSTRING, PCWSTR},
         Win32::Storage::FileSystem::{
-            GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, VS_FIXEDFILEINFO,
+            GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FIXEDFILEINFO, VerQueryValueW,
         },
+        core::{HSTRING, PCWSTR},
     };
     unsafe {
         let wide: Vec<u16> = path
@@ -360,10 +360,8 @@ fn cleanup_staging_dir(dir: &Path, max_age: Duration) {
             .ok()
             .and_then(|t| now.duration_since(t).ok())
             .is_some_and(|age| age >= max_age);
-        if stale {
-            if let Err(err) = std::fs::remove_file(&path) {
-                tracing::debug!(%err, file = ?name, "staging leftover still in use");
-            }
+        if stale && let Err(err) = std::fs::remove_file(&path) {
+            tracing::debug!(%err, file = ?name, "staging leftover still in use");
         }
     }
 }
@@ -410,11 +408,12 @@ mod tests {
         let left = unique_staging_path("KeyboardChatteringFix_update", "0.2.0");
         let right = unique_staging_path("KeyboardChatteringFix_update", "0.2.0");
         assert_ne!(left, right);
-        assert!(left
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .contains("0.2.0"));
+        assert!(
+            left.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("0.2.0")
+        );
     }
 
     #[test]
@@ -498,9 +497,11 @@ mod tests {
             .expect("kernel32.dll should carry a version stamp");
         let parts: Vec<&str> = stamp.version.split('.').collect();
         assert_eq!(parts.len(), 4);
-        assert!(parts
-            .iter()
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())));
+        assert!(
+            parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        );
         let name = stamp.product_name.as_deref().expect("product name");
         assert!(!name.is_empty());
         // A foreign stamped binary is never accepted as the helper.

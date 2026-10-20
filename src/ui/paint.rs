@@ -2,32 +2,32 @@
 //! and card-background painting.
 
 use std::sync::{
-    atomic::{AtomicU8, Ordering},
     Mutex, OnceLock,
+    atomic::{AtomicU8, Ordering},
 };
 
 use windows::{
-    core::PCWSTR,
     Win32::{
         Foundation::{COLORREF, HWND, RECT},
         Graphics::{
-            Dwm::{DwmSetWindowAttribute, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE},
+            Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWINDOWATTRIBUTE, DwmSetWindowAttribute},
             Gdi::*,
         },
         System::Registry::{
-            RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
-            REG_VALUE_TYPE,
+            HKEY, HKEY_CURRENT_USER, KEY_READ, REG_VALUE_TYPE, RegCloseKey, RegOpenKeyExW,
+            RegQueryValueExW,
         },
     },
+    core::PCWSTR,
 };
 
 use windows::{
-    core::w,
     Win32::UI::{Controls::SetWindowTheme, WindowsAndMessaging::GetDlgItem},
+    core::w,
 };
 
 use super::{
-    layout::{sc, Kind, SPECS},
+    layout::{Kind, SPECS, sc},
     text::to_wide,
 };
 
@@ -137,25 +137,29 @@ static BRUSH_CACHE: OnceLock<Mutex<Vec<BrushEntry>>> = OnceLock::new();
 /// Return a cached brush for `color`, creating it on first use. Replaces the
 /// previous per-message `CreateSolidBrush` in every `WM_CTLCOLOR*` handler.
 pub(crate) unsafe fn cached_brush(color: COLORREF) -> HBRUSH {
-    let mut cache = BRUSH_CACHE
-        .get_or_init(|| Mutex::new(Vec::new()))
-        .lock()
-        .unwrap();
-    if let Some(entry) = cache.iter().find(|entry| entry.0 == color.0) {
-        return entry.1;
+    unsafe {
+        let mut cache = BRUSH_CACHE
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap();
+        if let Some(entry) = cache.iter().find(|entry| entry.0 == color.0) {
+            return entry.1;
+        }
+        let brush = CreateSolidBrush(color);
+        cache.push(BrushEntry(color.0, brush));
+        brush
     }
-    let brush = CreateSolidBrush(color);
-    cache.push(BrushEntry(color.0, brush));
-    brush
 }
 
 /// Delete all cached brushes. Called whenever the theme may have changed so
 /// stale colors are never reused (and their handles are released).
 pub(crate) unsafe fn clear_brush_cache() {
-    if let Some(cache) = BRUSH_CACHE.get() {
-        let mut cache = cache.lock().unwrap();
-        for entry in cache.drain(..) {
-            let _ = DeleteObject(entry.1.into());
+    unsafe {
+        if let Some(cache) = BRUSH_CACHE.get() {
+            let mut cache = cache.lock().unwrap();
+            for entry in cache.drain(..) {
+                let _ = DeleteObject(entry.1.into());
+            }
         }
     }
 }
@@ -262,32 +266,34 @@ pub(crate) fn static_colors(kind: Kind, on_card: bool, c: &ThemeColors) -> (COLO
 }
 
 unsafe fn create_font(height_px: i32, weight: i32) -> HFONT {
-    // Segoe UI first; Korean glyphs fall back to Malgun Gothic via font
-    // linking, so mixed Korean/Latin text keeps Latin digits in Segoe UI.
-    let font_names = ["Segoe UI", "맑은 고딕", "Malgun Gothic"];
-    for name in font_names {
-        let wname = to_wide(name);
-        let hf = CreateFontW(
-            -height_px,
-            0,
-            0,
-            0,
-            weight,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY,
-            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-            PCWSTR(wname.as_ptr()),
-        );
-        if !hf.is_invalid() {
-            return hf;
+    unsafe {
+        // Segoe UI first; Korean glyphs fall back to Malgun Gothic via font
+        // linking, so mixed Korean/Latin text keeps Latin digits in Segoe UI.
+        let font_names = ["Segoe UI", "맑은 고딕", "Malgun Gothic"];
+        for name in font_names {
+            let wname = to_wide(name);
+            let hf = CreateFontW(
+                -height_px,
+                0,
+                0,
+                0,
+                weight,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY,
+                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
+                PCWSTR(wname.as_ptr()),
+            );
+            if !hf.is_invalid() {
+                return hf;
+            }
         }
+        HFONT(GetStockObject(DEFAULT_GUI_FONT).0 as *mut _)
     }
-    HFONT(GetStockObject(DEFAULT_GUI_FONT).0 as *mut _)
 }
 
 /// Logical (96-DPI) rect to device pixels.
@@ -307,66 +313,72 @@ pub(crate) unsafe fn draw_rounded_card(
     border: COLORREF,
     radius: i32,
 ) {
-    let brush = CreateSolidBrush(bg);
-    let pen = CreatePen(PS_SOLID, 1, border);
-    let old_brush = SelectObject(hdc, brush.into());
-    let old_pen = SelectObject(hdc, pen.into());
+    unsafe {
+        let brush = CreateSolidBrush(bg);
+        let pen = CreatePen(PS_SOLID, 1, border);
+        let old_brush = SelectObject(hdc, brush.into());
+        let old_pen = SelectObject(hdc, pen.into());
 
-    let _ = RoundRect(
-        hdc,
-        rect.left,
-        rect.top,
-        rect.right,
-        rect.bottom,
-        radius,
-        radius,
-    );
+        let _ = RoundRect(
+            hdc,
+            rect.left,
+            rect.top,
+            rect.right,
+            rect.bottom,
+            radius,
+            radius,
+        );
 
-    SelectObject(hdc, old_brush);
-    SelectObject(hdc, old_pen);
-    let _ = DeleteObject(brush.into());
-    let _ = DeleteObject(pen.into());
+        SelectObject(hdc, old_brush);
+        SelectObject(hdc, old_pen);
+        let _ = DeleteObject(brush.into());
+        let _ = DeleteObject(pen.into());
+    }
 }
 
 /// Apply the Windows 11 dark title bar and rounded corners to a new window.
 pub(crate) unsafe fn apply_window_chrome(hwnd: HWND) {
-    // The theme may have changed: drop cached brushes with it.
-    clear_brush_cache();
-    refresh_theme();
-    let is_dark = theme_is_dark();
-    let dark_attr: i32 = if is_dark { 1 } else { 0 };
-    let _ = DwmSetWindowAttribute(
-        hwnd,
-        DWMWA_USE_IMMERSIVE_DARK_MODE,
-        &dark_attr as *const _ as *const _,
-        std::mem::size_of::<i32>() as u32,
-    );
+    unsafe {
+        // The theme may have changed: drop cached brushes with it.
+        clear_brush_cache();
+        refresh_theme();
+        let is_dark = theme_is_dark();
+        let dark_attr: i32 = if is_dark { 1 } else { 0 };
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            &dark_attr as *const _ as *const _,
+            std::mem::size_of::<i32>() as u32,
+        );
 
-    // Windows 11 Rounded Window Corners: DWMWA_WINDOW_CORNER_PREFERENCE (33) = ROUND (2)
-    let corner: i32 = 2;
-    let _ = DwmSetWindowAttribute(
-        hwnd,
-        DWMWINDOWATTRIBUTE(33),
-        &corner as *const _ as *const _,
-        std::mem::size_of::<i32>() as u32,
-    );
+        // Windows 11 Rounded Window Corners: DWMWA_WINDOW_CORNER_PREFERENCE (33) = ROUND (2)
+        let corner: i32 = 2;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE(33),
+            &corner as *const _ as *const _,
+            std::mem::size_of::<i32>() as u32,
+        );
+    }
 }
 
 /// Re-skin native child controls for the current theme. Owner-drawn and
 /// static controls follow `ThemeColors` on their own; edits and combos need
 /// the system dark-mode class to darken their frames and drop-downs.
 pub(crate) unsafe fn apply_control_themes(hwnd: HWND) {
-    let dark = theme_is_dark();
-    for spec in SPECS {
-        if !matches!(spec.kind, Kind::Edit | Kind::NumberEdit | Kind::Combo) {
-            continue;
-        }
-        if let Ok(h) = GetDlgItem(Some(hwnd), spec.id) {
-            let _ = if dark {
-                SetWindowTheme(h, w!("DarkMode_CFD"), PCWSTR::null())
-            } else {
-                SetWindowTheme(h, PCWSTR::null(), PCWSTR::null())
-            };
+    unsafe {
+        let dark = theme_is_dark();
+        for spec in SPECS {
+            if !matches!(spec.kind, Kind::Edit | Kind::NumberEdit | Kind::Combo) {
+                continue;
+            }
+            if let Ok(h) = GetDlgItem(Some(hwnd), spec.id) {
+                let _ = if dark {
+                    SetWindowTheme(h, w!("DarkMode_CFD"), PCWSTR::null())
+                } else {
+                    SetWindowTheme(h, PCWSTR::null(), PCWSTR::null())
+                };
+            }
         }
     }
 }

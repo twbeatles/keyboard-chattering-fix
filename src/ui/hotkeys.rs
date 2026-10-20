@@ -9,8 +9,8 @@ use std::sync::Mutex;
 use windows::Win32::{
     Foundation::HWND,
     UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
-        MOD_SHIFT, MOD_WIN,
+        HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+        UnregisterHotKey,
     },
 };
 
@@ -112,30 +112,32 @@ pub(crate) fn cleaning_label() -> Option<String> {
 /// (Re)register both hotkeys. Returns user-facing problems, one per
 /// hotkey that is invalid or taken by another program.
 pub(crate) unsafe fn apply(hwnd: HWND, toggle: &str, cleaning: &str) -> Vec<String> {
-    let s = strings(current_lang());
-    let mut problems = Vec::new();
-    let mut labels = (None, None);
-    for (id, text) in [(HOTKEY_TOGGLE, toggle), (HOTKEY_CLEANING, cleaning)] {
-        let _ = UnregisterHotKey(Some(hwnd), id);
-        match parse_hotkey(text) {
-            Ok(None) => {}
-            Err(()) => problems.push(fill(s.hotkey_invalid_fmt, &[text.trim()])),
-            Ok(Some(hk)) => {
-                let mods = HOT_KEY_MODIFIERS(hk.mods | MOD_NOREPEAT.0);
-                if RegisterHotKey(Some(hwnd), id, mods, u32::from(hk.vk)).is_ok() {
-                    if id == HOTKEY_TOGGLE {
-                        labels.0 = Some(hk.label);
+    unsafe {
+        let s = strings(current_lang());
+        let mut problems = Vec::new();
+        let mut labels = (None, None);
+        for (id, text) in [(HOTKEY_TOGGLE, toggle), (HOTKEY_CLEANING, cleaning)] {
+            let _ = UnregisterHotKey(Some(hwnd), id);
+            match parse_hotkey(text) {
+                Ok(None) => {}
+                Err(()) => problems.push(fill(s.hotkey_invalid_fmt, &[text.trim()])),
+                Ok(Some(hk)) => {
+                    let mods = HOT_KEY_MODIFIERS(hk.mods | MOD_NOREPEAT.0);
+                    if RegisterHotKey(Some(hwnd), id, mods, u32::from(hk.vk)).is_ok() {
+                        if id == HOTKEY_TOGGLE {
+                            labels.0 = Some(hk.label);
+                        } else {
+                            labels.1 = Some(hk.label);
+                        }
                     } else {
-                        labels.1 = Some(hk.label);
+                        problems.push(fill(s.hotkey_taken_fmt, &[&hk.label]));
                     }
-                } else {
-                    problems.push(fill(s.hotkey_taken_fmt, &[&hk.label]));
                 }
             }
         }
+        *ACTIVE.lock().unwrap() = labels;
+        problems
     }
-    *ACTIVE.lock().unwrap() = labels;
-    problems
 }
 
 #[cfg(test)]

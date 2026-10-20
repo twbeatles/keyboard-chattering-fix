@@ -15,15 +15,14 @@ const SND_FILENAME: u32 = 0x00020000;
 /// Takes the cached buffer so the keyboard-hook hot path never allocates.
 pub(crate) fn play_notification_sound(sound_wide: Option<&[u16]>) {
     unsafe {
-        if let Some(wide) = sound_wide {
-            if PlaySoundW(
+        if let Some(wide) = sound_wide
+            && PlaySoundW(
                 wide.as_ptr(),
                 std::ptr::null_mut(),
                 SND_ASYNC | SND_FILENAME | SND_NODEFAULT,
             ) != 0
-            {
-                return;
-            }
+        {
+            return;
         }
         let _ = MessageBeep(MB_ICONEXCLAMATION);
     }
@@ -42,6 +41,6 @@ pub(crate) fn play_path_for_preview(path: &std::path::Path) {
 }
 
 #[link(name = "winmm")]
-extern "system" {
+unsafe extern "system" {
     fn PlaySoundW(pszSound: *const u16, hmod: *mut core::ffi::c_void, fdwSound: u32) -> i32;
 }

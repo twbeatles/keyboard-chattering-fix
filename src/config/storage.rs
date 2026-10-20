@@ -9,7 +9,7 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use super::model::Settings;
 use crate::{
-    debounce::{MeasureFrom, LOG_LIMIT_MAX, LOG_LIMIT_MIN, RELEASE_DEFER_MAX_MS},
+    debounce::{LOG_LIMIT_MAX, LOG_LIMIT_MIN, MeasureFrom, RELEASE_DEFER_MAX_MS},
     i18n::LanguagePref,
 };
 
@@ -92,10 +92,10 @@ fn parse(text: &str) -> Settings {
             map.insert(k.trim().to_string(), v.trim().to_string());
         }
     }
-    if let Some(v) = map.get("iThreshold") {
-        if let Ok(n) = v.parse::<u64>() {
-            s.threshold_ms = n.clamp(1, 1000);
-        }
+    if let Some(v) = map.get("iThreshold")
+        && let Ok(n) = v.parse::<u64>()
+    {
+        s.threshold_ms = n.clamp(1, 1000);
     }
     if let Some(v) = map
         .get("bFilterEnabled")
@@ -124,10 +124,10 @@ fn parse(text: &str) -> Settings {
     if let Some(v) = map.get("bRecordAllKeypress") {
         s.record_all_keys = v != "0";
     }
-    if let Some(v) = map.get("iLogLimit") {
-        if let Ok(n) = v.parse::<usize>() {
-            s.log_limit = n.clamp(LOG_LIMIT_MIN, LOG_LIMIT_MAX);
-        }
+    if let Some(v) = map.get("iLogLimit")
+        && let Ok(n) = v.parse::<usize>()
+    {
+        s.log_limit = n.clamp(LOG_LIMIT_MIN, LOG_LIMIT_MAX);
     }
     if let Some(v) = map.get("sLanguage") {
         s.language = LanguagePref::from_setting(v);
@@ -139,10 +139,10 @@ fn parse(text: &str) -> Settings {
             MeasureFrom::Release
         };
     }
-    if let Some(v) = map.get("iMinChatterMs") {
-        if let Ok(n) = v.parse::<u64>() {
-            s.min_chatter_ms = n.min(1000);
-        }
+    if let Some(v) = map.get("iMinChatterMs")
+        && let Ok(n) = v.parse::<u64>()
+    {
+        s.min_chatter_ms = n.min(1000);
     }
     if let Some(v) = map.get("bExcludeInjected") {
         s.exclude_injected = v != "0";
@@ -150,10 +150,10 @@ fn parse(text: &str) -> Settings {
     if let Some(v) = map.get("bFilterMouse") {
         s.filter_mouse = v != "0";
     }
-    if let Some(v) = map.get("iReleaseDeferMs") {
-        if let Ok(n) = v.parse::<u64>() {
-            s.release_defer_ms = n.min(RELEASE_DEFER_MAX_MS);
-        }
+    if let Some(v) = map.get("iReleaseDeferMs")
+        && let Ok(n) = v.parse::<u64>()
+    {
+        s.release_defer_ms = n.min(RELEASE_DEFER_MAX_MS);
     }
     if let Some(v) = map.get("sAutoDisableApps") {
         s.auto_disable_apps = v.clone();
@@ -167,41 +167,39 @@ fn parse(text: &str) -> Settings {
     if let Some(v) = map.get("sHotkeyCleaning") {
         s.hotkey_cleaning = v.clone();
     }
-    if let Some(v) = map.get("iCleaningTimeoutMin") {
-        if let Ok(n) = v.parse::<u64>() {
-            s.cleaning_timeout_min = n.min(CLEANING_TIMEOUT_MAX_MIN);
-        }
+    if let Some(v) = map.get("iCleaningTimeoutMin")
+        && let Ok(n) = v.parse::<u64>()
+    {
+        s.cleaning_timeout_min = n.min(CLEANING_TIMEOUT_MAX_MIN);
     }
-    if let Some(v) = map.get("iTotalPresses") {
-        if let Ok(n) = v.parse::<u64>() {
-            s.total_presses = n;
-        }
+    if let Some(v) = map.get("iTotalPresses")
+        && let Ok(n) = v.parse::<u64>()
+    {
+        s.total_presses = n;
     }
-    if let Some(v) = map.get("iBlockedPresses") {
-        if let Ok(n) = v.parse::<u64>() {
-            s.blocked_presses = n;
-        }
+    if let Some(v) = map.get("iBlockedPresses")
+        && let Ok(n) = v.parse::<u64>()
+    {
+        s.blocked_presses = n;
     }
     // Per-key cumulative counters: stat.<hex vk>=<presses>,<blocked>.
     // Only non-zero entries are written, so absence means zero.
     for (k, v) in &map {
-        if let Some(hex) = k.strip_prefix("stat.") {
-            if let Ok(vk) = u8::from_str_radix(hex, 16) {
-                if let Some((presses, blocked)) = v.split_once(',') {
-                    if let (Ok(p), Ok(b)) = (presses.parse::<u64>(), blocked.parse::<u64>()) {
-                        s.per_key_presses[vk as usize] = p;
-                        s.per_key_blocked[vk as usize] = b;
-                    }
-                }
-            }
+        if let Some(hex) = k.strip_prefix("stat.")
+            && let Ok(vk) = u8::from_str_radix(hex, 16)
+            && let Some((presses, blocked)) = v.split_once(',')
+            && let (Ok(p), Ok(b)) = (presses.parse::<u64>(), blocked.parse::<u64>())
+        {
+            s.per_key_presses[vk as usize] = p;
+            s.per_key_blocked[vk as usize] = b;
         }
     }
     // Per-key overrides: key.<2-digit hex virtual-key code>=<ms>.
     for (k, v) in &map {
-        if let Some(hex) = k.strip_prefix("key.") {
-            if let (Ok(vk), Ok(ms)) = (u8::from_str_radix(hex, 16), v.parse::<u64>()) {
-                s.per_key_ms[vk as usize] = Some(ms.clamp(1, 1000));
-            }
+        if let Some(hex) = k.strip_prefix("key.")
+            && let (Ok(vk), Ok(ms)) = (u8::from_str_radix(hex, 16), v.parse::<u64>())
+        {
+            s.per_key_ms[vk as usize] = Some(ms.clamp(1, 1000));
         }
     }
     s
@@ -286,11 +284,13 @@ mod tests {
         let seq = DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("kcfix_cfgtest_{}_{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var("APPDATA", &dir);
+        unsafe {
+            std::env::set_var("APPDATA", &dir);
+        }
         f(&dir);
         match previous {
-            Some(v) => std::env::set_var("APPDATA", v),
-            None => std::env::remove_var("APPDATA"),
+            Some(v) => unsafe { std::env::set_var("APPDATA", v) },
+            None => unsafe { std::env::remove_var("APPDATA") },
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -432,10 +432,11 @@ sLanguage={text}
             };
             assert!(save(&s));
             // No staging file may be left behind by the atomic write.
-            assert!(!dir
-                .join("KeyboardChatteringFix")
-                .join("settings.ini.tmp")
-                .exists());
+            assert!(
+                !dir.join("KeyboardChatteringFix")
+                    .join("settings.ini.tmp")
+                    .exists()
+            );
             let back = load();
             assert_eq!(back.threshold_ms, 77);
             assert!(!back.enabled);
@@ -502,11 +503,13 @@ sLanguage={text}
         let blocker =
             std::env::temp_dir().join(format!("kcfix_cfgblock_{}_{seq}", std::process::id()));
         std::fs::write(&blocker, b"not-a-directory").unwrap();
-        std::env::set_var("APPDATA", &blocker);
+        unsafe {
+            std::env::set_var("APPDATA", &blocker);
+        }
         assert!(!save(&Settings::default()));
         match previous {
-            Some(v) => std::env::set_var("APPDATA", v),
-            None => std::env::remove_var("APPDATA"),
+            Some(v) => unsafe { std::env::set_var("APPDATA", v) },
+            None => unsafe { std::env::remove_var("APPDATA") },
         }
         let _ = std::fs::remove_file(&blocker);
     }

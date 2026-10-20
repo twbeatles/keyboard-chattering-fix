@@ -9,7 +9,7 @@
 //!
 //! Pure functions over [`GapHistogram`]; the UI renders the result.
 
-use crate::debounce::{GapHistogram, GAP_BUCKETS, GAP_BUCKET_MS};
+use crate::debounce::{GAP_BUCKET_MS, GAP_BUCKETS, GapHistogram};
 
 /// Measured gaps needed before a recommendation is made.
 pub const MIN_SAMPLES: u32 = 20;

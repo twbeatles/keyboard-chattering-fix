@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows_10%2F11-0078D6?logo=windows&logoColor=white" alt="Platform" />
-  <img src="https://img.shields.io/badge/Language-Rust_2021-DEA584?logo=rust&logoColor=white" alt="Rust" />
+  <img src="https://img.shields.io/badge/Language-Rust_2024-DEA584?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/UI-Fluent_Win32_Dark-005FB8" alt="UI" />
   <img src="https://img.shields.io/badge/Security-Ed25519_Signed-success" alt="Security" />
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License" />
@@ -176,7 +176,7 @@ The **Keys & Mouse** tab edits the same `key.XX` lines and writes them immediate
 
 #### Prerequisites
 - Windows 10 / 11 (64-bit)
-- Rust toolchain (stable, 2021 edition)
+- Rust toolchain (stable, 2024 edition; MSRV 1.85)
 
 ```powershell
 # Clone the repository
@@ -385,7 +385,7 @@ key.01=30              # 마우스 왼쪽 버튼에만 30ms 적용
 
 #### 요구 사항
 - Windows 10 / 11 (64비트)
-- Rust 툴체인 (stable, 2021 edition)
+- Rust 툴체인 (stable, 2024 edition; MSRV 1.85)
 
 ```powershell
 # 저장소 복제

@@ -10,7 +10,7 @@ use windows::Win32::{
 };
 
 use super::{dialog::msg_box, ids::WM_UPDATE_EXIT, state::current_lang, window::update_exit_nonce};
-use crate::i18n::{fill, strings, Language};
+use crate::i18n::{Language, fill, strings};
 
 /// Pure classification of an update-check result for the tray flow, split
 /// out so the branches are unit-testable without windows or network.

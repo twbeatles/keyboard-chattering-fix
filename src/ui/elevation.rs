@@ -10,14 +10,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::{
-    core::{w, PCWSTR},
     Win32::{
         Foundation::{HWND, LPARAM, WPARAM},
         UI::{
             Shell::ShellExecuteW,
-            WindowsAndMessaging::{PostMessageW, MB_ICONWARNING, MB_OK, SW_SHOWNORMAL},
+            WindowsAndMessaging::{MB_ICONWARNING, MB_OK, PostMessageW, SW_SHOWNORMAL},
         },
     },
+    core::{PCWSTR, w},
 };
 
 use super::{
@@ -50,7 +50,7 @@ pub(crate) fn relaunch_args(pid: u32) -> String {
 /// COM, which the shell needs).
 pub(crate) fn relaunch_elevated(hwnd: HWND) {
     use windows::Win32::System::Com::{
-        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+        COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize,
     };
     let raw = hwnd.0 as usize;
     std::thread::spawn(move || unsafe {
@@ -86,22 +86,24 @@ pub(crate) fn relaunch_elevated(hwnd: HWND) {
 /// Flip the elevated sign-in task. Turning it on also removes the normal
 /// startup entry, so the elevated start is the one that wins at sign-in.
 pub(crate) unsafe fn toggle_task(hwnd: HWND) {
-    let on = !task_on();
-    let ok = config::set_elevated_task(on);
-    if ok {
-        TASK_ON.store(on, Ordering::Relaxed);
-        if on {
-            let _ = config::set_autostart(false);
-            super::widgets::set_toggle(hwnd, super::ids::ID_TOGGLE_AUTOSTART, false);
+    unsafe {
+        let on = !task_on();
+        let ok = config::set_elevated_task(on);
+        if ok {
+            TASK_ON.store(on, Ordering::Relaxed);
+            if on {
+                let _ = config::set_autostart(false);
+                super::widgets::set_toggle(hwnd, super::ids::ID_TOGGLE_AUTOSTART, false);
+            }
+        } else {
+            let s = strings(current_lang());
+            msg_box(
+                hwnd,
+                s.title,
+                s.elevated_autostart_failed,
+                MB_OK | MB_ICONWARNING,
+            );
         }
-    } else {
-        let s = strings(current_lang());
-        msg_box(
-            hwnd,
-            s.title,
-            s.elevated_autostart_failed,
-            MB_OK | MB_ICONWARNING,
-        );
     }
 }
 

@@ -65,7 +65,9 @@ fn local_time_of_day_ms() -> u64 {
 /// which is what the helper's stability wait requires.
 fn acknowledge_update_handshake() {
     if let Some(path) = std::env::var_os("KCFIX_UPDATE_READY_FILE").map(PathBuf::from) {
-        std::env::remove_var("KCFIX_UPDATE_READY_FILE");
+        unsafe {
+            std::env::remove_var("KCFIX_UPDATE_READY_FILE");
+        }
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(500));
             let _ = std::fs::write(&path, std::process::id().to_string());
@@ -168,7 +170,7 @@ fn arg_value(name: &str) -> Option<String> {
 fn wait_for_process_exit(pid: u32, limit: Duration) {
     use windows::Win32::{
         Foundation::CloseHandle,
-        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
     };
     unsafe {
         if let Ok(h) = OpenProcess(PROCESS_SYNCHRONIZE, false, pid) {

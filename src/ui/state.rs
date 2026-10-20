@@ -5,8 +5,8 @@
 //! live filter state itself lives in `app::state`.
 
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Mutex, OnceLock,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use crate::{config::Settings, i18n::Language};
