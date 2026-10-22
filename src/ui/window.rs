@@ -686,6 +686,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }
+            _ if msg == WM_ELEVATED_TASK_DONE => {
+                super::elevation::on_task_done(hwnd);
+                LRESULT(0)
+            }
             _ if msg == WM_TRAY => match lparam.0 as u32 {
                 WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
                     commands::show_window(hwnd);

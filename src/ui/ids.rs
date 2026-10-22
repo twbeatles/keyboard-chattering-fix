@@ -140,6 +140,9 @@ pub(crate) const WM_TRAY: u32 = WM_APP + 1;
 /// executable file). Carries this process's exit nonce in `wParam`: the id
 /// alone proves nothing, anyone in the session can post it (SEC-001).
 pub(crate) const WM_UPDATE_EXIT: u32 = WM_APP + 2;
+/// Posted by the elevation worker once a sign-in task change finished; the
+/// outcome itself stays in `elevation` (the id alone carries nothing).
+pub(crate) const WM_ELEVATED_TASK_DONE: u32 = WM_APP + 3;
 pub(crate) const TRAY_ID: u32 = 1;
 /// `RegisterHotKey` ids.
 pub(crate) const HOTKEY_TOGGLE: i32 = 1;

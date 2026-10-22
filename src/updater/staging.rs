@@ -20,9 +20,9 @@ pub fn end_update() {
     UPDATE_IN_PROGRESS.store(false, Ordering::SeqCst);
 }
 
-// Kept for API parity with the reference updater (used by future automatic
-// background checks); the current manual flow guards with `try_begin_update`.
-#[allow(dead_code)]
+/// Whether an update is running: the menu bar and tray menu grey out their
+/// "Check for updates" item meanwhile (the flow itself guards with
+/// [`try_begin_update`]).
 pub fn update_in_progress() -> bool {
     UPDATE_IN_PROGRESS.load(Ordering::SeqCst)
 }

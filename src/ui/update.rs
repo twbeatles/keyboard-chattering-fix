@@ -45,6 +45,27 @@ fn package_manager(exe: &std::path::Path) -> Option<(&'static str, &'static str)
     }
 }
 
+/// How an available update gets installed.
+#[derive(Debug, PartialEq, Eq)]
+enum UpdateRoute {
+    /// Installed by a package manager: its own update command.
+    Managed(&'static str, &'static str),
+    /// Running as administrator: the in-app update would run the helper
+    /// and install a file staged in the user's %TEMP% (writable by any
+    /// program of this account) with administrator rights, so ask for a
+    /// normal start instead (2026-10-22 audit ISSUE-003).
+    Elevated,
+    InApp,
+}
+
+fn update_route(exe: Option<&std::path::Path>, elevated: bool) -> UpdateRoute {
+    match exe.and_then(package_manager) {
+        Some((manager, command)) => UpdateRoute::Managed(manager, command),
+        None if elevated => UpdateRoute::Elevated,
+        None => UpdateRoute::InApp,
+    }
+}
+
 pub(crate) fn spawn_update_check(hwnd: HWND) {
     let raw_hwnd = hwnd.0 as usize;
     std::thread::spawn(move || {
@@ -82,14 +103,18 @@ pub(crate) fn spawn_update_check(hwnd: HWND) {
             UpdatePrompt::Available(manifest) => manifest,
         };
         // Installed by a package manager: let it do the update, so its
-        // records stay right.
-        if let Some((manager, command)) = std::env::current_exe()
-            .ok()
-            .as_deref()
-            .and_then(package_manager)
-        {
+        // records stay right. Running elevated: no in-app update at all.
+        let exe = std::env::current_exe().ok();
+        let notice = match update_route(exe.as_deref(), super::foreground::self_elevated()) {
+            UpdateRoute::Managed(manager, command) => Some(fill(
+                s.update_managed_fmt,
+                &[&manifest.version, manager, command],
+            )),
+            UpdateRoute::Elevated => Some(fill(s.update_elevated_fmt, &[&manifest.version])),
+            UpdateRoute::InApp => None,
+        };
+        if let Some(text) = notice {
             crate::updater::end_update();
-            let text = fill(s.update_managed_fmt, &[&manifest.version, manager, command]);
             unsafe {
                 msg_box(hwnd, s.update_title, &text, MB_OK | MB_ICONINFORMATION);
             }
@@ -164,6 +189,21 @@ mod tests {
             package_manager(Path::new(r"D:\Tools\KeyboardChatteringFix.exe")),
             None
         );
+    }
+
+    #[test]
+    fn elevated_copies_never_update_in_app() {
+        use std::path::Path;
+        let portable = Path::new(r"D:\Tools\KeyboardChatteringFix.exe");
+        assert_eq!(update_route(Some(portable), false), UpdateRoute::InApp);
+        assert_eq!(update_route(Some(portable), true), UpdateRoute::Elevated);
+        assert_eq!(update_route(None, true), UpdateRoute::Elevated);
+        // A package manager's own command is safe either way.
+        let scoop = Path::new(r"C:\Users\kim\scoop\apps\keyboard-chattering-fix\current\k.exe");
+        assert!(matches!(
+            update_route(Some(scoop), true),
+            UpdateRoute::Managed("Scoop", _)
+        ));
     }
 
     #[test]

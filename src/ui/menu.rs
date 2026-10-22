@@ -120,6 +120,16 @@ pub(crate) unsafe fn on_init_menu_popup(hwnd: HWND) {
                 })
             .0,
         );
+        let _ = EnableMenuItem(
+            bar,
+            MENU_ELEVATED_AUTOSTART as u32,
+            MF_BYCOMMAND
+                | if elevation::task_busy() {
+                    MF_GRAYED
+                } else {
+                    MF_ENABLED
+                },
+        );
         let busy = crate::updater::update_in_progress();
         let _ = EnableMenuItem(
             bar,

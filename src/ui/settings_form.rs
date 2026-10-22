@@ -301,6 +301,14 @@ pub(crate) fn set_key_override(vk: u8, ms: Option<u64>) -> bool {
     written
 }
 
+/// What a Save starts from: the file as it is now, so per-key values edited
+/// in it are kept. When the file cannot be read at all, the last saved
+/// settings stand in: an unreadable file must never pass for one whose
+/// per-key values were all removed (2026-10-22 audit ISSUE-005).
+fn save_base(disk: Option<Settings>, saved: Settings) -> Settings {
+    disk.unwrap_or(saved)
+}
+
 /// Mouse filter switch: applies at once (installs or removes the mouse
 /// hook) and is saved right away, like the protection switch.
 pub(crate) fn set_mouse_filter(on: bool) -> bool {
@@ -452,14 +460,15 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
         };
 
         let s = strings(current_lang());
-        if !config::set_autostart(autostart) {
+        if !config::sync_autostart(autostart) {
             // Show the real state instead of a toggle that did not apply (G2).
             set_toggle(hwnd, ID_TOGGLE_AUTOSTART, config::autostart_enabled());
             super::dialog::msg_box(hwnd, s.title, s.autostart_failed, MB_OK | MB_ICONWARNING);
         }
         // Disk is the base so file-only fields (`key.XX`) edited while running
         // are kept and, below, applied to the live filter (ISSUE-005, G3).
-        let mut new_settings = config::load();
+        let saved_now = SAVED.get().map(|s| s.lock().unwrap().clone());
+        let mut new_settings = save_base(config::try_load(), saved_now.unwrap_or_default());
         new_settings.threshold_ms = threshold;
         new_settings.enabled = enabled;
         new_settings.play_sound = sound;
@@ -545,6 +554,26 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn save_starts_from_the_file_but_never_from_an_unreadable_one() {
+        let mut saved = Settings::default();
+        saved.per_key_ms[0x41] = Some(90);
+        let mut disk = Settings::default();
+        disk.per_key_ms[0x42] = Some(120);
+        // Readable file: its per-key values win (edits made in the file).
+        let base = save_base(Some(disk), saved.clone());
+        assert_eq!(
+            (base.per_key_ms[0x41], base.per_key_ms[0x42]),
+            (None, Some(120))
+        );
+        // Unreadable file: the last saved values stay, nothing is wiped.
+        let base = save_base(None, saved);
+        assert_eq!(
+            (base.per_key_ms[0x41], base.per_key_ms[0x42]),
+            (Some(90), None)
+        );
+    }
 
     #[test]
     fn clamp_accepts_value_inside_range() {

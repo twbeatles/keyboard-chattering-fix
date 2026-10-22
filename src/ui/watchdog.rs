@@ -38,10 +38,14 @@ pub(crate) enum Step {
     Probe,
 }
 
-/// Decision at a check: `hooked` events since the last check, and whether
-/// there was user input in that period.
-pub(crate) fn check(hooked: u64, user_active: bool) -> Step {
-    if hooked == 0 && user_active {
+/// Decision at a check: `hooked` events since the last check, whether
+/// there was user input in that period, and whether a window running as
+/// administrator is in front while we are not. Such a window's input never
+/// reaches our hook, and UIPI silently drops a probe aimed at it (with no
+/// error from `SendInput`): probing then would restart a healthy hook
+/// every check (2026-10-22 audit ISSUE-004).
+pub(crate) fn check(hooked: u64, user_active: bool, elevated_foreground: bool) -> Step {
+    if hooked == 0 && user_active && !elevated_foreground {
         Step::Probe
     } else {
         Step::Fine
@@ -151,7 +155,8 @@ pub(crate) unsafe fn tick() -> bool {
         if since == 0 {
             return false;
         }
-        if check(hooked, input_since(since)) == Step::Probe {
+        let elevated_foreground = super::foreground::status().1;
+        if check(hooked, input_since(since), elevated_foreground) == Step::Probe {
             let sent_at = PROBES_SEEN.load(Ordering::Relaxed);
             drop(st);
             // Arm the wait only when the probe actually left: otherwise the next
@@ -170,10 +175,17 @@ mod tests {
 
     #[test]
     fn probe_only_when_the_user_was_active_and_the_hook_silent() {
-        assert_eq!(check(0, true), Step::Probe);
-        assert_eq!(check(3, true), Step::Fine);
+        assert_eq!(check(0, true, false), Step::Probe);
+        assert_eq!(check(3, true, false), Step::Fine);
         // Idle PC: never send input (it would reset the idle timer).
-        assert_eq!(check(0, false), Step::Fine);
+        assert_eq!(check(0, false, false), Step::Fine);
+    }
+
+    #[test]
+    fn no_probe_while_an_administrator_window_is_in_front() {
+        // Its input bypasses our hook and the probe cannot reach it: the
+        // silence proves nothing about the hook.
+        assert_eq!(check(0, true, true), Step::Fine);
     }
 
     #[test]

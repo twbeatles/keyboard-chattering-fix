@@ -55,13 +55,85 @@ pub fn load() -> Settings {
     try_load().unwrap_or_default()
 }
 
+/// A settings file as text. Files edited by hand may have been saved in
+/// the system code page (an older editor, a Korean path): those are
+/// decoded as such instead of being rejected, and a UTF-8 BOM is dropped.
+fn read_text(path: &std::path::Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let bytes = bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes);
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Some(text.to_string()),
+        Err(_) => decode_system_code_page(bytes),
+    }
+}
+
+fn decode_system_code_page(bytes: &[u8]) -> Option<String> {
+    use windows::Win32::Globalization::{
+        CP_ACP, MULTI_BYTE_TO_WIDE_CHAR_FLAGS, MultiByteToWideChar,
+    };
+    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    unsafe {
+        let len = MultiByteToWideChar(CP_ACP, flags, bytes, None);
+        if len <= 0 {
+            return None;
+        }
+        let mut wide = vec![0u16; len as usize];
+        let written = MultiByteToWideChar(CP_ACP, flags, bytes, Some(&mut wide));
+        (written > 0).then(|| String::from_utf16_lossy(&wide[..written as usize]))
+    }
+}
+
+/// Every key this program writes (`key.XX`/`stat.XX` aside).
+const KNOWN_KEYS: &[&str] = &[
+    "iThreshold",
+    "bFilterEnabled",
+    "bFilterStatus",
+    "bPlaySound",
+    "lpSoundFile",
+    "bMinimizeOnLaunch",
+    "bMinimizeWhenLaunch",
+    "bCloseToTray",
+    "bRecordAllKeypress",
+    "iLogLimit",
+    "sLanguage",
+    "sMeasureFrom",
+    "iMinChatterMs",
+    "bExcludeInjected",
+    "bFilterMouse",
+    "iReleaseDeferMs",
+    "sAutoDisableApps",
+    "bAutoDisableFullscreen",
+    "sHotkeyToggle",
+    "sHotkeyCleaning",
+    "iCleaningTimeoutMin",
+    "iTotalPresses",
+    "iBlockedPresses",
+];
+
+/// Whether `text` is this program's settings file: the section header or
+/// at least one known key. A file torn by a crash (zero bytes, NULs) or
+/// replaced by something else is not, and must never pass for a file
+/// whose settings were all reset to their defaults.
+fn looks_like_settings(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim();
+        line == "[KeyboardChatteringFix]"
+            || line.split_once('=').is_some_and(|(k, _)| {
+                let k = k.trim();
+                KNOWN_KEYS.contains(&k) || k.starts_with("key.") || k.starts_with("stat.")
+            })
+    })
+}
+
+/// A readable settings file at `path`, as text.
+fn read_settings(path: &std::path::Path) -> Option<String> {
+    read_text(path).filter(|text| looks_like_settings(text))
+}
+
 /// Settings from any file (Import). `None` when it cannot be read or does
 /// not look like this program's settings file.
 pub fn load_from(path: &std::path::Path) -> Option<Settings> {
-    let text = fs::read_to_string(path).ok()?;
-    text.lines()
-        .any(|l| l.trim() == "[KeyboardChatteringFix]" || l.trim_start().starts_with("iThreshold="))
-        .then(|| parse(&text))
+    read_settings(path).map(|text| parse(&text))
 }
 
 /// Settings from disk, or `None` when neither the main file nor its backup
@@ -69,15 +141,42 @@ pub fn load_from(path: &std::path::Path) -> Option<Settings> {
 /// unreadable file is never mistaken for "everything was removed".
 pub fn try_load() -> Option<Settings> {
     let path = config_path();
-    match fs::read_to_string(&path) {
-        Ok(text) if !text.trim().is_empty() => Some(parse(&text)),
-        _ => {
-            // Missing/empty main file: a torn write may have truncated it,
-            // so fall back to the previous generation (ISSUE-004).
-            let bak = fs::read_to_string(backup_path(&path)).ok()?;
-            (!bak.trim().is_empty()).then(|| parse(&bak))
-        }
+    // A missing, empty or unrecognizable main file (a write torn by a power
+    // loss leaves zeros) falls back to the previous generation (ISSUE-004,
+    // ISSUE-002 of the 2026-10-22 audit).
+    read_settings(&path)
+        .or_else(|| {
+            let bak = read_settings(&backup_path(&path));
+            if bak.is_some() && path.exists() {
+                tracing::warn!("settings file unreadable; using its backup");
+            }
+            bak
+        })
+        .map(|text| parse(&text))
+}
+
+/// The value of a `key=value` line without a trailing comment: `#` or `;`
+/// after whitespace starts one (`bPlaySound=0   # comment`), and so does a
+/// value that is nothing but a comment. The sound path keeps everything
+/// after its first character, since a file name may contain " #".
+fn strip_inline_comment<'a>(key: &str, value: &'a str) -> &'a str {
+    let value = value.trim();
+    if value.starts_with(['#', ';']) {
+        return "";
     }
+    if key == "lpSoundFile" {
+        return value;
+    }
+    let cut = value
+        .char_indices()
+        .find(|&(i, c)| {
+            matches!(c, '#' | ';')
+                && value[..i].ends_with(char::is_whitespace)
+                // `;` also separates excluded apps (`a.exe ; b.exe`).
+                && !(c == ';' && key == "sAutoDisableApps")
+        })
+        .map_or(value.len(), |(i, _)| i);
+    value[..cut].trim_end()
 }
 
 fn parse(text: &str) -> Settings {
@@ -89,7 +188,8 @@ fn parse(text: &str) -> Settings {
             continue;
         }
         if let Some((k, v)) = line.split_once('=') {
-            map.insert(k.trim().to_string(), v.trim().to_string());
+            let k = k.trim();
+            map.insert(k.to_string(), strip_inline_comment(k, v).to_string());
         }
     }
     if let Some(v) = map.get("iThreshold")
@@ -259,13 +359,54 @@ pub fn save(s: &Settings) -> bool {
     // previous generation as .bak, then rename over the main file, so a
     // crash can never leave a torn settings.ini (ISSUE-004).
     let tmp = path.with_extension("ini.tmp");
-    if fs::write(&tmp, &text).is_err() {
+    if !write_durably(&tmp, text.as_bytes()) {
         return false;
     }
-    if path.exists() {
+    // Only a good generation becomes the backup: copying a main file torn
+    // by an earlier crash would destroy the one copy that still works.
+    if read_settings(&path).is_some() {
         let _ = fs::copy(&path, backup_path(&path));
     }
-    fs::rename(&tmp, &path).is_ok()
+    replace_durably(&tmp, &path)
+}
+
+/// Write `bytes` and flush them to the disk before returning. Without the
+/// flush, NTFS may journal a later rename while the data is still cached:
+/// a power loss then leaves a file of the right size full of zeros.
+fn write_durably(path: &std::path::Path, bytes: &[u8]) -> bool {
+    use std::io::Write;
+    fs::File::create(path)
+        .and_then(|mut f| {
+            f.write_all(bytes)?;
+            f.sync_all()
+        })
+        .is_ok()
+}
+
+/// Rename `from` over `to`, returning only once the rename is on disk.
+fn replace_durably(from: &std::path::Path, to: &std::path::Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::{
+        Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        },
+        core::PCWSTR,
+    };
+    let wide = |p: &std::path::Path| -> Vec<u16> {
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    };
+    let (from, to) = (wide(from), wide(to));
+    unsafe {
+        MoveFileExW(
+            PCWSTR(from.as_ptr()),
+            PCWSTR(to.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+        .is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -293,6 +434,146 @@ mod tests {
             None => unsafe { std::env::remove_var("APPDATA") },
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `ini` sample blocks of the README (English and Korean).
+    fn readme_samples() -> Vec<String> {
+        include_str!("../../README.md")
+            .replace("\r\n", "\n")
+            .split("```ini\n")
+            .skip(1)
+            .filter_map(|rest| rest.split("```").next())
+            .filter(|block| block.starts_with("[KeyboardChatteringFix]"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The README shows the settings file with trailing `#` comments; a
+    /// file written like it must mean what the comments say (`0` is off),
+    /// not "any text but 0 is on" (2026-10-22 audit ISSUE-001).
+    #[test]
+    fn readme_sample_parses_to_what_it_documents() {
+        let samples = readme_samples();
+        assert_eq!(samples.len(), 2, "English and Korean sample");
+        for sample in &samples {
+            let s = parse(sample);
+            let d = Settings::default();
+            assert_eq!(s.threshold_ms, 50);
+            assert!(s.enabled);
+            assert!(!s.play_sound, "bPlaySound=0 with a comment is off");
+            assert_eq!(s.sound_file, None);
+            assert!(!s.minimize_on_launch);
+            assert!(s.close_to_tray);
+            assert!(!s.filter_mouse, "bFilterMouse=0 with a comment is off");
+            assert!(!s.auto_disable_fullscreen);
+            assert_eq!(s.language, LanguagePref::Auto);
+            assert_eq!(s.measure_from, MeasureFrom::Release);
+            assert_eq!(s.log_limit, d.log_limit);
+            assert_eq!(s.cleaning_timeout_min, 5);
+            assert_eq!(s.auto_disable_apps, "");
+            assert_eq!(
+                (s.hotkey_toggle.as_str(), s.hotkey_cleaning.as_str()),
+                ("", "")
+            );
+            assert_eq!(s.per_key_ms[0x48], Some(120));
+            assert_eq!(s.per_key_ms[0x20], Some(80));
+            assert_eq!(s.per_key_ms[0x01], Some(30));
+            assert_eq!(s.per_key_ms.iter().flatten().count(), 3);
+        }
+    }
+
+    #[test]
+    fn trailing_comments_need_whitespace_and_keep_paths_and_app_lists() {
+        let s = parse(
+            "[KeyboardChatteringFix]\n\
+             iThreshold=80 ; eighty\n\
+             lpSoundFile=C:\\My #1\\blip.wav\n\
+             sAutoDisableApps=a.exe ; b.exe # games\n\
+             sHotkeyToggle=Ctrl+Alt+F12\t# toggle\n",
+        );
+        assert_eq!(s.threshold_ms, 80);
+        assert_eq!(s.sound_file.as_deref(), Some(r"C:\My #1\blip.wav"));
+        assert_eq!(s.auto_disable_apps, "a.exe ; b.exe");
+        assert_eq!(s.hotkey_toggle, "Ctrl+Alt+F12");
+    }
+
+    /// A main file torn by a power loss (right size, all zeros) or holding
+    /// something else must fall back to the backup instead of loading as
+    /// "everything at its default" (2026-10-22 audit ISSUE-002).
+    #[test]
+    fn unrecognizable_main_file_falls_back_to_the_backup() {
+        with_isolated_appdata(|dir| {
+            let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+            let bak = ini.with_extension("ini.bak");
+            std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+            std::fs::write(&bak, "[KeyboardChatteringFix]\niThreshold=111\nkey.41=90\n").unwrap();
+            for torn in [vec![0u8; 512], b"hello\n".to_vec()] {
+                std::fs::write(&ini, &torn).unwrap();
+                let s = try_load().expect("backup");
+                assert_eq!(s.threshold_ms, 111);
+                assert_eq!(s.per_key_ms[0x41], Some(90));
+            }
+            // Neither readable: nothing, not the defaults.
+            std::fs::write(&bak, [0u8; 64]).unwrap();
+            assert!(try_load().is_none());
+        });
+    }
+
+    /// Saving over a torn main file keeps the good backup instead of
+    /// copying the torn file over it.
+    #[test]
+    fn save_never_backs_up_a_torn_main_file() {
+        with_isolated_appdata(|dir| {
+            let with_threshold = |threshold_ms| Settings {
+                threshold_ms,
+                ..Settings::default()
+            };
+            assert!(save(&with_threshold(111)));
+            assert!(save(&with_threshold(222)));
+            let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+            let bak = ini.with_extension("ini.bak");
+            assert!(
+                std::fs::read_to_string(&bak)
+                    .unwrap()
+                    .contains("iThreshold=111")
+            );
+
+            std::fs::write(&ini, [0u8; 512]).unwrap();
+            assert!(save(&with_threshold(333)));
+            assert!(
+                std::fs::read_to_string(&bak)
+                    .unwrap()
+                    .contains("iThreshold=111")
+            );
+            assert_eq!(load().threshold_ms, 333);
+            assert!(!ini.with_extension("ini.tmp").exists());
+        });
+    }
+
+    /// A hand-edited file saved in the system code page (not UTF-8) is
+    /// read, not silently replaced by the backup.
+    #[test]
+    fn non_utf8_file_is_read_in_the_system_code_page() {
+        with_isolated_appdata(|dir| {
+            let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+            std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+            let mut bytes = b"[KeyboardChatteringFix]\niThreshold=77\nlpSoundFile=C:\\s".to_vec();
+            // "가" in CP949, "°¡" in CP1252: whole characters either way.
+            bytes.extend_from_slice(&[0xB0, 0xA1]);
+            bytes.extend_from_slice(b".wav\n");
+            assert!(std::str::from_utf8(&bytes).is_err());
+            std::fs::write(&ini, &bytes).unwrap();
+            let s = try_load().expect("decoded");
+            assert_eq!(s.threshold_ms, 77);
+            assert!(s.sound_file.unwrap().ends_with(".wav"));
+            // A UTF-8 BOM is not part of the header line.
+            std::fs::write(
+                &ini,
+                b"\xEF\xBB\xBF[KeyboardChatteringFix]\niThreshold=66\n",
+            )
+            .unwrap();
+            assert_eq!(load().threshold_ms, 66);
+        });
     }
 
     #[test]

@@ -14,10 +14,22 @@ use windows::Win32::{
 };
 
 use super::{
-    instance::{bring_existing_to_front, show_already_running, try_acquire_single_instance},
+    instance::{
+        bring_existing_to_front, show_already_running, try_acquire_single_instance,
+        wait_for_other_instance,
+    },
     state::{SHARED, START, START_CLOCK_MS},
 };
 use crate::{config, debounce::Debouncer, input};
+
+/// How long a non-elevated automatic start waits for the elevated sign-in
+/// task. Logon tasks usually fire before `Run` entries; this covers a slow
+/// sign-in without leaving a broken task's user unprotected for long.
+const ELEVATED_START_GRACE: Duration = Duration::from_secs(20);
+/// How long the "Run as administrator" copy waits for the previous one to
+/// exit. Exiting flushes the settings file, which an antivirus scan can
+/// slow down; giving up too early would leave neither copy running.
+const AFTER_PID_WAIT: Duration = Duration::from_secs(30);
 
 /// Build the debouncer from persisted settings and publish shared state.
 fn init_shared(settings: &config::Settings) {
@@ -89,16 +101,36 @@ pub(crate) fn run(settings: config::Settings) {
     // "Run as administrator" relaunch: the previous instance is still
     // exiting and holds the single-instance mutex for a moment.
     if let Some(pid) = arg_value("--after-pid").and_then(|v| v.parse::<u32>().ok()) {
-        wait_for_process_exit(pid, Duration::from_secs(10));
+        wait_for_process_exit(pid, AFTER_PID_WAIT);
+    }
+
+    // Sign-in with both entries: the `Run` start may come before the elevated
+    // task. Give the elevated copy a moment to claim the instance; if it
+    // never shows up (task broken or disabled), this copy runs as fallback.
+    let autostart = has_arg(crate::config::AUTOSTART_ARG);
+    let elevated = crate::ui::self_elevated();
+    if autostart && !elevated && config::elevated_start_expected() {
+        if wait_for_other_instance(ELEVATED_START_GRACE) {
+            return;
+        }
+        // Waited in vain (the task was removed or disabled in Task
+        // Scheduler): stop delaying later sign-ins. An elevated start that
+        // does happen sets the marker again.
+        config::clear_elevated_start_marker();
     }
 
     #[cfg(windows)]
     let _instance_guard = match try_acquire_single_instance() {
         Some(guard) => guard,
         None => {
+            // The elevated sign-in task did run, just late: keep the marker
+            // so the next sign-in waits for it again.
+            if autostart && elevated {
+                config::mark_elevated_start();
+            }
             // Two autostart entries (Run key + elevated task) may both fire
             // at sign-in: the second one leaves quietly.
-            if !has_arg(crate::config::AUTOSTART_ARG) {
+            if !autostart {
                 bring_existing_to_front();
                 show_already_running(settings.ui_language());
             }
@@ -130,7 +162,9 @@ pub(crate) fn run(settings: config::Settings) {
             input::hook::stop();
             return;
         }
-        crate::ui::show_initial(hwnd, settings.minimize_on_launch);
+        // A sign-in start goes to the tray: a resident filter should not
+        // open its window at every sign-in.
+        crate::ui::show_initial(hwnd, settings.minimize_on_launch || autostart);
         if !hooked {
             // Never let the UI pretend to protect without a hook (G1).
             crate::ui::show_hook_failed(hwnd);

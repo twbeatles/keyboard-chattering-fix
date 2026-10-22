@@ -25,6 +25,30 @@ powershell -ExecutionPolicy Bypass -File .\scripts\e2e\update_swap_e2e.ps1 -Help
 CI에서는 Actions → **e2e** → Run workflow(수동 전용, `.github/workflows/e2e.yml`)가
 같은 스크립트를 돌리며, 직전에 게시된 헬퍼로도 교체를 검증합니다.
 
+## Manual checklist: administrator paths
+
+These need a UAC prompt or a sign-in, so no script covers them. Use a test
+build under a throw-away `APPDATA`; the `Run` value and the scheduled task
+are shared with the real install, so turn both off again afterwards.
+
+1. **One hook only.** Start the app, choose Tools > Run as administrator, then
+   start the test build again without elevation. Expected: "already running",
+   and Task Manager shows one `KeyboardChatteringFix.exe`.
+2. **Sign-in task from a writable folder.** In the elevated copy, choose Tools >
+   Start as administrator at sign-in while the exe sits outside `Program Files`.
+   Expected: a warning that defaults to No; Yes registers the task (check
+   `schtasks /query /tn KeyboardChatteringFix`).
+3. **Both entries at sign-in.** Turn on Start with Windows as well, sign out and in.
+   Expected: one elevated instance, in the tray; `%TEMP%\kcfix-diag.log` gains nothing.
+4. **Broken task fallback.** Disable the task in Task Scheduler, sign out and in.
+   Expected: the normal copy starts after about 20 s, and the next sign-in has no delay.
+5. **Watchdog and elevated windows.** In the non-elevated copy, keep Task Manager
+   in front and type for 30 s. Expected: no "keyboard monitoring stopped" note on
+   Home, no restart line in `%TEMP%\kcfix-diag.log`.
+6. **No in-app update while elevated.** In the elevated copy, choose Help > Check
+   for Updates with a newer release published. Expected: the notice to update from a
+   normal start, and no `kcfix-updater_helper_*.exe` in `%TEMP%`.
+
 Safety: every run uses a throw-away `APPDATA`, the only injected key is F24,
 and a running real instance aborts the run. Do not type during
 `hook_session_e2e` (~6 s). Exit code 0 means every check passed.

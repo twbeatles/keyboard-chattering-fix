@@ -54,4 +54,5 @@ mod widgets;
 mod window;
 
 pub(crate) use dialog::show_hook_failed;
+pub(crate) use foreground::self_elevated;
 pub(crate) use window::{create_window, show_initial};

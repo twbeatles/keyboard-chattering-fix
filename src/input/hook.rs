@@ -358,14 +358,54 @@ fn input_for(item: Injection) -> INPUT {
     }
 }
 
-fn send(items: &[Injection]) {
+/// Send queued events; returns how many the system accepted.
+fn send(items: &[Injection]) -> usize {
     if items.is_empty() {
-        return;
+        return 0;
     }
     let inputs: Vec<INPUT> = items.iter().copied().map(input_for).collect();
-    unsafe {
-        let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) as usize }
+}
+
+/// Attempts of [`send_retrying`]: about 3 s in all.
+const SEND_ATTEMPTS: u32 = 30;
+const SEND_RETRY_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// [`send`] until every event got through. `SendInput` refuses input while
+/// the secure desktop (UAC prompt, Ctrl+Alt+Del) is up; a held-back release
+/// lost there would leave its key down for the system until pressed again.
+/// Injector thread only: it may sleep.
+fn send_retrying(items: &[Injection]) {
+    let sent = retry_send(items, send, SEND_ATTEMPTS, || {
+        std::thread::sleep(SEND_RETRY_WAIT)
+    });
+    if sent < items.len() {
+        tracing::warn!(
+            lost = items.len() - sent,
+            "SendInput kept refusing held-back events"
+        );
     }
+}
+
+/// Retry loop of [`send_retrying`]: each attempt sends what is still
+/// missing, waiting between attempts. Returns how many got through.
+fn retry_send(
+    items: &[Injection],
+    mut try_send: impl FnMut(&[Injection]) -> usize,
+    attempts: u32,
+    wait: impl Fn(),
+) -> usize {
+    let mut sent = 0;
+    for attempt in 1..=attempts {
+        sent += try_send(&items[sent..]).min(items.len() - sent);
+        if sent >= items.len() {
+            break;
+        }
+        if attempt < attempts {
+            wait();
+        }
+    }
+    sent
 }
 
 /// Thread that only calls `SendInput`, so the hook thread is never inside
@@ -378,7 +418,7 @@ fn injector() -> &'static Mutex<mpsc::Sender<Vec<Injection>>> {
             .name("kcfix-injector".into())
             .spawn(move || {
                 for batch in rx {
-                    send(&batch);
+                    send_retrying(&batch);
                 }
             });
         Mutex::new(tx)
@@ -635,7 +675,7 @@ pub(crate) fn spawn_hook_thread() -> Option<HookThread> {
             // superseded by `restart` skips this: the new thread owns the
             // pending releases now (ISSUE-001).
             if generation == HOOK_GEN.load(Ordering::Acquire) {
-                send(&drain(true));
+                let _ = send(&drain(true));
             }
         })
         .ok()?;
@@ -819,6 +859,42 @@ mod tests {
         assert!(first && second);
         stop();
         assert_eq!(HOOK_THREAD_ID.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn refused_releases_are_retried_from_where_they_stopped() {
+        let items = [
+            Injection {
+                slot: 0x41,
+                down: false,
+                scan: 0x1E,
+            },
+            Injection {
+                slot: 0x42,
+                down: false,
+                scan: 0x30,
+            },
+        ];
+        // Secure desktop for two attempts, then one event per attempt.
+        let mut calls = Vec::new();
+        let sent = retry_send(
+            &items,
+            |rest| {
+                calls.push(rest.len());
+                if calls.len() <= 2 { 0 } else { 1 }
+            },
+            30,
+            || {},
+        );
+        assert_eq!(sent, 2);
+        assert_eq!(calls, [2, 2, 2, 1]);
+        // Never accepted: gives up after the attempts, waiting in between.
+        let waits = std::cell::Cell::new(0);
+        assert_eq!(
+            retry_send(&items, |_| 0, 3, || waits.set(waits.get() + 1)),
+            0
+        );
+        assert_eq!(waits.get(), 2);
     }
 
     #[test]

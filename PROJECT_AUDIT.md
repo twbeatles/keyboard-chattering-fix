@@ -1,44 +1,84 @@
 # Project Audit
 
-- 대상: `keyboard-chattering-fix` (`kcfix-rs`) — 메인 바이너리 + `crates/kcfix-updater` 헬퍼 (Cargo 워크스페이스)
-- 기준 시점: 2026-10-18, HEAD `0547ae2` (v0.3.0 릴리스 이후, 코드 변경 없음 — `git status`상 기존 미커밋 삭제분 `PROJECT_AUDIT_RELEASE.md`·`PROJECT_AUDIT_UI_TESTS.md` 2건은 본 감사와 무관하므로 손대지 않음)
-- 방법: 문서 확인 → CodeGraph 탐색(10회) → 소스 직접 열람 → 테스트·게이트 실행. **코드는 수정하지 않았다.**
-- 이 문서는 2026-10-17 작성의 이전 `PROJECT_AUDIT.md`(커밋 `a280cad` 수록)를 대체한다. 이전 문서의 ISSUE-001~005가 코드에서 해소됐음을 재확인했으며(아래 "이전 감사 이슈 해소 검증" 참조), 이번 감사는 그 이후 추가된 v0.3.0 기능(마우스 필터, 떼기 확인 `iReleaseDeferMs`, 워치독 프로브, 키·마우스 탭, 승격 작업 등)을 중심으로 다시 감사했다.
+- **대상:** `keyboard-chattering-fix` (`kcfix-rs`). 메인 바이너리와 `crates/kcfix-updater` 헬퍼로 이루어진 Cargo 워크스페이스.
+- **기준 시점:** 2026-10-22, HEAD `e67c856` (v0.3.3).
+  - 같은 날 작업한 **커밋 전 자동 실행 변경분**도 포함했다: `src/config/autostart.rs`, `src/app/instance.rs`, `src/app/bootstrap.rs`, `src/ui/elevation.rs` 등 14개 파일.
+  - 그래서 이 문서의 `autostart`·`instance` 관련 줄 번호는 작업 트리 기준이다.
+- **방법:**
+  1. 문서 확인
+  2. CodeGraph CLI 탐색: 인덱스를 `codegraph sync`로 작업 트리에 맞춘 뒤 `explore`·`callers` 사용
+  3. 소스 직접 열람
+  4. 게이트·테스트 실행
+  - **코드는 수정하지 않았다.**
+- **이전 문서와의 관계:** 이 문서는 2026-10-18~19 작성의 이전 `PROJECT_AUDIT.md`를 대체한다. 그 문서는 감사 본문과 적용 기록(10~12장)을 포함하며, 마지막 수정은 커밋 `1c6fed5`이다. 이전 이슈의 현재 상태는 1장 끝의 표에 다시 확인해 두었다.
 
 ---
 
 ## 1. Executive Summary
 
-**전체 상태.** 필터 코어(`Debouncer::decide_event`), 설정 원자 저장, 서명 업데이트 파이프라인은 정확하고 테스트도 촘촘하다.
-`cargo test --workspace` 188개 전부 통과, `cargo fmt --check`·`cargo clippy -D warnings` 모두 깨끗하다.
-이전 감사(2026-10-17)의 5개 이슈는 모두 코드에서 해소된 것을 확인했다.
-이번에 새로 발견된 문제는 영향이 제한적이거나 발생 조건이 좁아, 과장하지 않고 기록한다.
+### 전체 상태
 
-**전체 위험도: Low–Medium.** Critical/High에 해당하는 확정 문제는 없다.
-데이터를 파괴하는 경로는 없으며(원자 저장 + `.bak` 폴백 + 이중 해시 검증 유지),
-남은 문제는 통계 부풀리기·일시적 필터 동작 어긋남·좁은 조건의 업데이트 실패 수준이다.
+핵심 경로는 정확하고 방어적으로 짜여 있다.
+- **필터 코어:** `Debouncer::decide_event`는 이벤트당 O(1)이다.
+- **훅:** 전용 스레드에서 돌며, 세대 번호로 재시작 시 상태를 넘긴다.
+- **설정 저장:** tmp → `.bak` → rename 순서로 원자적으로 저장한다.
+- **업데이트:** 서명 → 핀 고정 URL → 크기·이중 해시 → 롤백 → 준비 확인 핸드셰이크로 이어진다.
 
-**가장 중요한 문제 3~5개**
+게이트(`fmt`·`clippy -D warnings`·`check --workspace`)와 `cargo test --workspace` 209건이 모두 통과했다.
 
-1. **[ISSUE-001] 워치독 오판단 시 재시작 과정에서 두 훅 스레드가 잠시 공존** — 프로브 왕복이 1초를 넘기면(고부하) 살아 있는 훅을 버리고 새 스레드를 띄운다. 정상 경로에서는 `WM_QUIT`으로 깔끔히 인계되지만, 인계 틈새에 두 `WH_KEYBOARD_LL` 훅이 같은 `SHARED`를 공유하면 통계가 이중 집계되고 떼기 확인 상태가 어긋난다. (Medium / Likely)
-2. **[ISSUE-002] 청소 모드가 진행 중인 떼기 확인(`pending_up`)을 고려하지 않음** — 청소 시작 직전 보류된 뗌이 타이머에 의해 청소 중에 방출되고, 청소 중 눌림은 보류분을 정리하지 않는다. 앱이 보지 못한 키의 뗌을 보는 수준의 어긋남이다. (Low / Likely)
-3. **[ISSUE-003] `bMinimizeOnLaunch`만 불리언 규칙이 다름** — 다른 플래그는 "0만 거짓"인데 이 항목만 `== "1"` 비교라, 직접 편집한 파일에서 `yes` 같은 값이 보호 관련 플래그와 반대로 해석된다. (Low / Confirmed)
-4. **[ISSUE-004] 시작 시 스테이징 청소가 진행 중인 업데이트 파일을 지울 수 있음** — 헬퍼가 교체 대기(최대 120초) 중 사용자가 앱을 재실행하면 새 프로세스의 `cleanup_stale_staging`이 잠겨 있지 않은 교체 파일을 삭제하고, 헬퍼의 사전 교체 해시 검사가 실패해 업데이트가 깨진다. (Low / Likely)
-5. **관측 가능성 공백** — GUI 빌드(`windows_subsystem = "windows"`)에는 콘솔이 없어 `tracing` 진단(느린 틱 로그·업데이트 경로 로그)이 실제로는 버려진다. 과거 응답없음 리포트의 원인 추적 수단이 없는 상태다. (구조적 Gap, 5장 참조)
+이번에 남긴 문제는 다섯 가지다.
+- **좁은 조건에서 생기는 데이터 유실:** 설정 파일이 손상된 경우.
+- **문서와 파서의 어긋남:** 설정이 잘못 해석된다.
+- **관리자 권한 경로의 신뢰 경계 문제.**
+- **워치독 오탐.**
+- **저장 경로 하나의 규약 위반.**
 
-**데이터 손상/유실 가능성 여부.** 설정 파일 손상 경로는 없다(`settings.ini.tmp` 기록 → `.bak` 보관 → rename, 깨진 본 파일은 백업으로 폴백 — `src/config/storage.rs:213-271`, `70-81`). 유실 가능성은 (a) 크래시 시 최대 5분치 통계(의도된 설계, `autosave_tick`), (b) ISSUE-004의 교체 파일 삭제(복구: 업데이트 재시도, 이전 버전은 계속 실행 중)뿐이다. 사용자 데이터·시스템 손상은 없다.
+### 전체 위험도: Medium
 
-**가장 먼저 수정해야 할 영역.** `src/input/hook.rs` 재시작 인계(구 스레드 종료 확인 후 신 스레드 기동, 또는 세대 번호로 구 스레드 방출 무효화) → `src/debounce.rs`·`hook.rs drain`의 청소 모드 가드 → 관측용 파일 로그(선택).
+- Critical은 없다.
+- 실사용자에게 닿을 수 있는 **데이터 유실 경로 1건**과 **설정 오해석 1건**이 Medium이다.
 
-### 이전 감사 이슈 해소 검증 (2026-10-17 → 이번 감사)
+### 가장 중요한 문제
+
+1. **[ISSUE-001] README 설정 샘플의 줄 끝 주석을 파서가 값으로 읽는다** (Medium / Confirmed)
+   - 샘플대로 `bFilterMouse=0   # ...`처럼 쓰면 **켜짐**으로 해석된다(`v != "0"`).
+   - 숫자 항목과 `key.XX`는 조용히 무시된다.
+2. **[ISSUE-002] 손상된 본 설정 파일이 기본값으로 로드되고, 다음 저장이 정상 `.bak`까지 덮어쓴다** (Medium / Likely)
+   - 정전이나 블루스크린 직후에 NUL로 채워진 파일이 생기면 설정·누적 통계·키별 기준이 영구 유실된다.
+   - 저장 시 `fsync`가 없고, "비어 있음"만 손상으로 판정하기 때문이다.
+3. **[ISSUE-003] 관리자 권한 경로가 일반 권한으로 쓸 수 있는 파일을 관리자 권한으로 실행·설치한다** (Medium / Confirmed)
+   - 경로 1: 로그인 작업이 사용자 폴더(Scoop·winget·포터블)의 exe를 매 로그인마다 관리자 권한으로 실행한다.
+   - 경로 2: 관리자 인스턴스에서 업데이트하면 `%TEMP%`의 헬퍼·교체 파일을 관리자 권한으로 실행·설치한다.
+4. **[ISSUE-004] 관리자 권한 창이 전경일 때 워치독이 정상 훅을 약 11초마다 재시작한다** (Low / Likely)
+   - 홈 화면에 "키보드 감시가 멈췄다"는 잘못된 안내가 남는다.
+5. **[ISSUE-005] `on_save`만 `config::load()`(실패 시 기본값)를 기준으로 삼는다** (Low / Confirmed 코드 경로)
+   - 저장하는 순간 설정 파일을 읽을 수 없으면 키별 기준이 전부 지워져 라이브 필터에도 적용된다.
+
+### 데이터 손상·유실 가능성
+
+있다. 다만 조건이 좁다.
+- **ISSUE-002:** 쓰기 직후 강제 전원 차단 같은 환경 사고에 의존한다.
+- **ISSUE-005:** 저장 순간에 본 파일과 백업이 모두 읽기 실패해야 한다.
+
+정상 운영(정상 종료·세션 종료·저장 실패 알림)에서는 유실 경로를 찾지 못했다. 시스템이나 사용자 문서를 파괴하는 경로는 없다.
+
+### 가장 먼저 수정할 영역
+
+1. `src/config/storage.rs`: `save`의 `sync_all`, `try_load`의 "인식 불가 파일" 폴백, 깨진 본 파일을 `.bak`으로 복사하지 않기.
+2. 같은 파일의 `parse` 줄 끝 주석 처리, 또는 README 샘플 수정.
+3. `src/ui/watchdog.rs`: 관리자 창이 전경이면 프로브 생략.
+
+### 이전 감사 이슈 재검증
 
 | 이전 이슈 | 현재 상태 | 근거 |
 |---|---|---|
-| 자동 업데이트가 2회차부터 영구 실패 (헬퍼 엄격 버전 일치) | 해소됨 | `helper_compatible`이 `[HELPER_MIN_VERSION, app_version]` 범위를 허용 (`src/updater/staging.rs:150-153`), 관련 테스트 2건 통과 |
-| 훅이 UI 스레드에서 실행 | 해소됨 | 훅은 전용 메시지펌프 스레드 (`spawn_hook_thread`, `src/input/hook.rs:499-577`), UI 정지와 무관 |
-| 업데이트 "적용 중" 모달이 헬퍼 대기를 갉아먹음 | 해소됨 | 모달 없이 즉시 `WM_UPDATE_EXIT` 게시 (`src/ui/update.rs:123-129`), 헬퍼 대기 120초 (`HELPER_EXIT_TIMEOUT_SECS`) |
-| OS 종료 시 미저장 | 해소됨 | `WM_ENDSESSION(TRUE)`에서 `persist_live` + 트레이 제거 (`src/ui/window.rs:575-585`), 종료 veto 없음 |
-| 실행 중 파일 편집이 스냅샷으로 덮어씀 | 해소됨 | `adopt_file_only_fields` + 디스크 재읽기 병합 (`persist_with` `src/ui/settings_form.rs:239-267`, `on_save`는 디스크를 기준으로 시작 `440`) |
+| ISSUE-001 워치독 재시작 시 두 훅 공존 | 해소 | `HOOK_GEN` 세대 retire/claim (`src/input/hook.rs:466`, `560-563`, `637-639`), 테스트 `restart_hands_over_pending_releases_to_one_thread`·`concurrent_restarts_leave_one_hook_thread` 통과 |
+| ISSUE-002 청소 모드와 보류 뗌 | 해소 | `set_cleaning(true)` → `flush_deferred_releases()` (`src/ui/commands.rs:71-75`) |
+| ISSUE-003 `bMinimizeOnLaunch` 불리언 규칙 | 해소 | `v != "0"` 통일 (`src/config/storage.rs:119`) |
+| ISSUE-004 스테이징 청소가 진행 중인 업데이트 파일 삭제 | 해소 | `STAGING_MAX_AGE` 1시간 (`src/updater/staging.rs:332-366`) |
+| PERF-001 해시가 파일 전체를 RAM에 적재 | 해소 | 64KB 스트리밍 (`src/updater/http.rs:26-41`, `crates/kcfix-updater/src/lib.rs:115-128`) |
+| SEC-001 인증 없는 `WM_UPDATE_EXIT` | 해소 | nonce 검증 (`src/ui/window.rs:69-73`, `677-688`) |
+| SEC-002 뮤텍스 선점(관찰) | 관찰 유지 | 동일 사용자 코드 실행이 전제. 별도로, 이번 세션 변경분이 "관리자 인스턴스가 쥔 뮤텍스의 `ACCESS_DENIED`를 fail-open으로 처리해 훅이 2개 뜨던" 실제 버그를 고쳤다 (`src/app/instance.rs` `held_by_elevated`) |
 
 ---
 
@@ -46,411 +86,438 @@
 
 ### 프로젝트 목적
 
-Windows 저수준 키보드 훅(`WH_KEYBOARD_LL`)으로 기계식 스위치 바운스(채터링)를 가로채 버리는 상주형 필터다.
-관리자 권한·DLL 인젝션 없이 동작하고, Win32 네이티브 UI(홈·기록·키·마우스·설정·고급 탭, 트레이)를 쓴다.
-청소 모드, 키별 임계값·권장값, 마우스 버튼 필터, 떼기 확인(릴리스 지연), 자동 일시 중지, Ed25519 서명 기반 업데이트를 제공한다.
-설계상 Windows 전용이다.
+- Windows 저수준 키보드 훅(`WH_KEYBOARD_LL`)으로 같은 키가 기준 시간 안에 다시 눌리는 **채터링을 차단**하는 상주형 트레이 앱이다.
+- 선택 기능도 같은 필터를 쓴다.
+  - 마우스 버튼 필터(`WH_MOUSE_LL`)
+  - 떼기 확인(`iReleaseDeferMs`)
+  - 전경 앱 자동 일시 중지
+  - 청소 모드
+  - 키별 기준과 권장값
+- 서명된 인앱 업데이트를 지원한다.
+- 언어는 한국어·영어다.
 
 ### 주요 entrypoint
 
-| Entrypoint | 위치 | 역할 |
+| Entry | 위치 | 역할 |
 |---|---|---|
-| `main` | `src/main.rs:30` | `app::cli::handle_cli()`(`--version`/`--check-language`/`--check-helper`/`--check-update`) 후 `app::bootstrap::run(config::load())` |
-| `bootstrap::run` | `src/app/bootstrap.rs:76` | `init_shared` → `--after-pid` 대기 → 단일 인스턴스 뮤텍스 → 핸드셰이크 ack → 훅 스레드 기동 → 창 생성 → 메시지 루프 → 종료 시 `hook::stop` |
-| `hook_proc` / `mouse_proc` | `src/input/hook.rs:164` / `245` | OS가 호출하는 필터 콜백. 훅 전용 스레드에서 실행. 락 + `decide_event` + `apply`만 수행 |
-| `wndproc` | `src/ui/window.rs:486` | 500ms 타이머·명령·트레이·세션 종료·닫기 라우팅 |
-| 헬퍼 `main` | `crates/kcfix-updater/src/main.rs:59` | 대기 → 해시 재검증 → 교체 → 재실행·준비 확인 → 실패 시 롤백·이전 버전 재실행 |
+| `main` | `src/main.rs:30-35` | `cli::handle_cli()` → `bootstrap::run(config::load())` |
+| CLI | `src/app/cli.rs:16-71` | `--version`/`-V`, `--check-language`, `--check-helper`, `--check-update` (GUI 없이 종료) |
+| GUI 기동 | `src/app/bootstrap.rs:84-` | `init_shared` → (`--after-pid` 대기) → (자동 실행 시 관리자 인스턴스 대기) → 단일 인스턴스 → 훅 스레드 → 창 → 메시지 루프 |
+| 훅 콜백 | `src/input/hook.rs:171` `hook_proc`, `:254` `mouse_proc` | 전용 스레드의 LL 훅 |
+| 창 프로시저 | `src/ui/window.rs:560` `wndproc` | 500ms 타이머, 명령, 세션 종료, 업데이트 종료 |
+| 업데이트 헬퍼 | `crates/kcfix-updater/src/main.rs`, `lib.rs:262` `update_executable_with` | 프로세스 종료 대기 → 재해시 → 교체 → 재실행 → 실패 시 롤백 |
 
 ### 핵심 모듈
 
-| 모듈 | 역할 |
-|---|---|
-| `src/debounce.rs` | `Debouncer::decide_event` 상태 머신. 물리 슬롯(vk+확장, 512칸)으로 타이밍, vk(256)로 통계·임계값. `Decision::{Pass, Block, Defer, Flush}` |
-| `src/app/state.rs` | `SHARED: OnceLock<Mutex<Shared>>`(훅·UI 공유), `START`(단조 시계), `HOOK_ACTIVE` |
-| `src/input/hook.rs` | 훅 스레드 수명(`start`/`stop`/`restart`), `InjectQueue`(고정 32칸), injector 스레드(`SendInput` 전담), 떼기 확인 타이머, 워치독 프로브 응답 |
-| `src/config/` | `Settings` 모델, INI 원자 저장(`storage`), Run 인용 경로·스케줄 작업(`autostart`), 사운드 사전 검증(`sound`) |
-| `src/ui/` | `window`(디스패치·종료), `settings_form`(저장·자동저장), `stats`/`history`(스냅샷→렌더→diff), `foreground`(일시 중지·승격 감지), `watchdog`(프로브→재시작), `update`(워커), `files`(가져오기·내보내기), `keys_page`, `hotkeys`, `elevation` |
-| `src/recommend.rs` | 간격 히스토그램 → `Advice::{NeedMoreData, NoChatter, Suggest, Overlap}` 순수 함수 |
-| `src/updater/` + 헬퍼 | 매니페스트 서명·URL 핀·크기·만료·버전 검증, 다운로드·해시, 헬퍼 스테이징·실행·청소 |
+- `debounce`: 판정 코어. `Decision::{Pass, Block, Defer, Flush}`.
+- `input::hook`: 훅·인젝터 스레드, 재시작.
+- `config`: 설정 모델, INI 원자 저장, 자동 실행(Run·StartupApproved·작업 스케줄러 COM), 사운드 경로 검증.
+- `ui`: Win32 창 전반.
+  - `settings_form`: 저장
+  - `watchdog`: 훅 감시
+  - `foreground`: 자동 일시 중지·관리자 창 감지
+  - `elevation`: 관리자 재실행·로그인 작업
+  - `update`: 업데이트 워커
+- `updater`: 매니페스트 검증, 다운로드, 스테이징.
 
 ### 데이터 저장 방식
 
-- `%APPDATA%\KeyboardChatteringFix\settings.ini` (레거시 `KcfixRs` 폴백, exe 옆 `settings.ini`가 있으면 휴대 모드). 저장은 tmp 기록 → 기존 파일 `.bak` 복사 → rename. 본 파일이 비면 `.bak` 폴백.
-- 쓰기 시점은 `on_save`(Save/가져오기), `persist_live`(종료·세션 종료·5분 자동저장·통계 초기화·언어 변경), 가져오기의 직접 저장 1회(`files.rs:141`, 아래 6장 참조)뿐이다.
-- `HKCU\...\Run\KeyboardChatteringFix`(인용 경로 + `--autostart`), 승격 시작은 스케줄 작업(배터리·시간제한 해제 정의).
-- DB·서버 상태 없음. 네트워크는 GitHub Releases 매니페스트·아티팩트 다운로드뿐(connect 30s / read 60s / total 90s).
+| 저장소 | 내용 | 쓰는 곳 |
+|---|---|---|
+| `%APPDATA%\KeyboardChatteringFix\settings.ini`(또는 exe 옆 포터블) | 설정 20여 개 필드, `key.XX`(키별 기준, 파일이 원본), `stat.XX`, 누적 카운터 | `config::save`. 호출자: `persist_with`(`settings_form.rs:253`), `on_save`(`:513`), `files::import_settings`(`files.rs:150`) |
+| `settings.ini.bak` / `.tmp` | 직전 세대 / 스테이징 | `save` 내부 |
+| `HKCU\...\Run`, `...\Explorer\StartupApproved\Run` | 자동 실행 | `config::autostart` |
+| 작업 스케줄러 `\KeyboardChatteringFix`, `HKCU\Software\KeyboardChatteringFix\ElevatedTask` | 관리자 로그인 시작과 그 표식 | `config::autostart::set_elevated_task`·`refresh_elevated_task` |
+| `%TEMP%` | 업데이트 스테이징, `kcfix-diag.log`(256KB 회전) | `updater::staging`, `ui::diag` |
+
+DB는 없다.
 
 ### 외부 의존성
 
-`windows 0.62`, `ureq 3`, `ed25519-dalek 3`, `sha2`, `serde_json`, `thiserror`, `tracing`(+subscriber), 헬퍼 쪽 `clap`·`hex` 등. 시스템 의존: LL 훅, `SendInput`, 레지스트리 Run, `schtasks`, `ShellExecuteW`.
+- **크레이트:** `windows 0.62`, `ureq 3`(TLS), `ed25519-dalek`, `sha2`, `serde_json`, `tracing`. 헬퍼 쪽은 `clap`, `hex`, `thiserror`.
+- **외부 서비스:** GitHub Releases 매니페스트와 아티팩트.
+- **OS:** Windows 전용(설계 의도). LL 훅, `SendInput`, 레지스트리, 작업 스케줄러 COM, `ShellExecuteW`.
 
 ### 핵심 실행 흐름
 
-`입력 → 검증 → 핵심 로직 → 상태 변경 → 파일/DB/API → 결과/오류 처리` 형태로 정리하면 다음과 같다.
+```
+[키 입력] OS → hook_proc(전용 스레드) → SHARED 락 → Debouncer::decide_event
+          → apply: Pass(CallNextHookEx) / Block(LRESULT 1 + 사운드)
+                   / Defer(pending_up + 스레드 타이머) → drain → injector 스레드 SendInput(INJECT_MARK)
 
-- **키 입력:** `OS 키 이벤트 → hook_proc(훅 스레드) → INJECT_MARK·청소·주입분류 선통과 판정 → SHARED.lock → Debouncer::decide_event → apply(Pass=통과, Block=차단+캐시 사운드, Defer=보류+타이머, Flush=주입큐+injector 기상) → LRESULT(1) 차단 / CallNextHookEx 통과`
-- **떼기 확인:** `Up(Defer, pending_up 기록) → 훅 스레드 타이머 → drain(due_releases 만료분) → injector 스레드 SendInput(INJECT_MARK, 훅은 통과) → 바운스 다운이면 취소·차단, 늦으면 Flush(뗌 먼저·눌림 재심)`
-- **설정 저장:** `Save → on_save(폼 파싱·클램프, 실패 시 실행값 폴백) → set_autostart → 디스크 재읽기를 기준으로 병합 → SHARED 적용 → 사운드는 워커 검증(세대 번호) → 마우스훅·전경·핫키 적용 → config::save → 실패 시 경고 대화상자`
-- **통계 표시:** `WM_TIMER(500ms, 재진입 가드) → 짧은 락 스냅샷 → render → diff → 변경분만 SetWindowTextW. 기록 탭은 보일 때·log_seq 변경 때만`
-- **워치독:** `10초간 키보드 무소식 + 사용자 활동(GetLastInputInfo) → SendInput 프로브(표식 VK 0xFF 키업) → 1초 내 미감지 → hook::restart → 성공 시 Home에 시각 기록`
-- **업데이트:** `워커 스레드 → check_for_update(서명·핀고정 URL·크기·만료·신버전) → 패키지관리자 설치면 안내만 → 확인 → prepare_update(헬퍼해석→%TEMP% 스테이징→다운로드·크기·해시) → launch_helper → 즉시 WM_UPDATE_EXIT·종료 → 헬퍼: pid 대기(120s) → 해시 재검증 → 교체 → 재실행·준비 확인(60s) → 실패 시 롤백·이전 버전 재실행`
-- **종료:** `WM_CLOSE(트레이 상주 or 파괴) / WM_UPDATE_EXIT / WM_ENDSESSION(TRUE, 즉시 persist) → WM_DESTROY(KillTimer·핫키 해제·persist_live·트레이 제거) → 메시지 루프 종료 → hook::stop(보류 뗌 전부 방출·join)`
+[설정 저장] 저장 버튼 → settings_form::on_save → (폼 값 + config::load()) → SHARED에 적용
+          → config::save(tmp → .bak 복사 → rename) → 실패 시 msg_box
+
+[주기 저장] WM_TIMER 500ms → autosave_tick(5분) → persist_live → persist_with
+          → config::try_load로 key.XX 병합 → 라이브 카운터 → config::save
+
+[업데이트] 메뉴 → spawn_update_check(워커) → check_for_update(서명 검증) → 확인 대화상자
+          → prepare_update(헬퍼 %TEMP% 복사 + 다운로드·해시) → launch_helper → WM_UPDATE_EXIT(nonce)
+          → 헬퍼: 종료 대기 → 재해시 → rename 교체 → 재실행·준비 확인 → 실패 시 롤백 + 이전 버전 재실행
+
+[자동 실행] 로그인 → (Run) 일반 --autostart / (작업) 관리자 --autostart
+          → bootstrap: 표식 있고 일반이면 관리자 인스턴스 최대 20초 대기 → 단일 인스턴스
+```
 
 ---
 
 ## 3. Audit Coverage & Limitations
 
-### 실제 확인한 주요 모듈
+### 실제 확인한 주요 모듈 (전체 열람)
 
-직접 열람: `main.rs`, `app/{bootstrap,cli,instance,state}.rs`, `input/hook.rs`(대부분)·`input/sound.rs`,
-`debounce.rs`(상태머신 본체 `284-427` + 테스트 일부), `config/{model,storage,sound,autostart}.rs`,
-`ui/{window(종료·타이머 경로),settings_form(저장 본체),watchdog,foreground(상부),files,history(csv·스냅샷),update,keys_page(적용 경로),state,hotkeys,elevation}.rs`,
-`recommend.rs`, `updater/{model,manifest(검증 본체),http,staging(스테이징·헬퍼·청소),error}.rs`,
-`crates/kcfix-updater/src/main.rs`(진입·실패 처리). 이전 감사 문서(2026-10-17)의 코드 인용과 대조해 변경분 위주로 재확인했다.
+- 입력·필터: `src/input/hook.rs`, `src/debounce.rs`(판정부)
+- 설정·자동 실행: `src/config/storage.rs`, `src/config/autostart.rs`, `src/config/sound.rs`
+- 앱 골격: `src/app/{bootstrap,instance,cli}.rs`, `src/main.rs`
+- UI: `src/ui/{settings_form,commands,window(주요 부분),watchdog,foreground,elevation,update,files,hotkeys(파서),keys_page(변경 경로)}.rs`
+- 업데이트: `src/updater/{http,staging}.rs`, `crates/kcfix-updater/src/lib.rs`(교체·롤백·준비 확인)
+- 문서: `README.md`(설정 샘플·한계 절), `docs/UPDATE.md`(실행 인자 절), `CLAUDE.md`, `GEMINI.md`(grep)
 
 ### CodeGraph로 분석한 호출 관계
 
-`codegraph_explore` 10회로 다음 호출 경로를 확인했다(반환된 원문 소스를 기판독으로 간주, 부족분만 grep·직접 열람으로 보완).
-
-- 진입·상태: `main → cli → bootstrap::run → init_shared`, `SHARED` 사용처(`hook.rs`·`bootstrap.rs`)
-- 필터 코어: `decide_event ← hook_proc/mouse_proc`, `Decision` 분기, `due_releases/has_pending_releases ← drain`
-- 훅 수명: `start/stop/restart/abandon/spawn_hook_thread`, `set_mouse_filter → 스레드 메시지`, `injector`·`drain`·`INJECT_MARK`·`PROBE_VK`
-- 설정: `persist_live → persist_with → adopt_file_only_fields`, `config::save` 호출점 3곳, `try_load` 폴백
-- 업데이트: `prepare_update/launch_helper/discard_staged/cleanup_stale_staging`, `download_and_verify`, `UpdateErrorKind` 사용처
-- UI: `on_save` 본체, `apply_sound_async` 세대 번호, `session_reply/on_destroy`, `csv_snapshot`, `set_key_override`, `hotkeys::apply`, 단일 인스턴스·승격 경로
+- **환경:** MCP 서버는 연결 실패 상태였다. 그래서 셸 CLI(`codegraph`)를 썼다.
+  - 인덱스가 작업 트리보다 뒤처져 있어(변경 46개 파일) `codegraph sync`로 갱신한 뒤 사용했다.
+- `explore "hook_proc mouse_proc decide_event drain due_releases injector restart"`
+  - `decide_event`의 호출자 5개(hook·debounce)와 `due_releases`의 호출자 3개를 확인했다.
+  - 훅 → apply → 인젝터 경로를 확인했다.
+- `callers`
+  - `restart` ← `watchdog::tick` ← `wndproc`
+  - `register_task` ← `set_elevated_task`·`refresh_elevated_task`
+  - `try_load` ← `load`
 
 ### 실행한 테스트
 
-- `cargo test --workspace` (exit 0): 메인 162 + 헬퍼 3·2·10 + `exe_smoke` 5 + `version_sync` 6, 총 188개 전부 통과. 실패 0.
-- `cargo fmt --all -- --check`: 통과. `cargo clippy --all-targets --all-features -- -D warnings`: 경고 0.
-- 테스트에 사용된 CodeGraph 미사용 주장 없음, 실행하지 않은 테스트를 실행했다고 쓰지 않음(아래 미확인 항목 참조).
+| 명령 | 결과 |
+|---|---|
+| `cargo fmt --all -- --check` | 통과(exit 0) |
+| `cargo clippy --all-targets --all-features -- -D warnings` | 통과(exit 0) |
+| `cargo check --workspace --all-targets` | 통과 |
+| `cargo test --workspace` | **209건 전부 통과** (헬퍼 lib 4 + 헬퍼 main 2 + 헬퍼 통합 10 + 앱 단위 178 + `edition_2024` 4 + `exe_smoke` 5 + `version_sync` 6). 실제 LL 훅 테스트도 건너뛰지 않고 실행됨 |
 
-### 확인하지 못한 환경/외부 서비스
+### 확인하지 못한 환경·외부 서비스
 
-- 실기 GUI 기동·실제 키보드 채터링·E2E 스크립트(`scripts/e2e/`, 실바이너리·데스크톱·네트워크 필요)는 실행하지 않았다. `hook_runs_on_a_dedicated_thread_and_stops` 같은 환경 의존 테스트는 스위트 내에서 통과했다.
-- GitHub Releases 도달성·실제 업데이트 왕복, `schtasks`/Run 실기 등록, UAC·관리자 창·전체화면·IME·원격 데스크톱 조합은 코드·테스트로만 확인했다.
-- Linux/macOS 빌드: 설계상 Windows 전용이라 시도하지 않았다(아래 9장 참조).
-- `AGENTS.md`는 저장소에 존재하지 않아(루트·추적 파일 목록 확인) "확인 문서"에서 제외했다. 지시문이 요구한 문서는 README·CLAUDE·GEMINI·Cargo 매니페스트·빌드 스크립트로 대체했다.
+- 관리자 권한(UAC) 실기 경로: 관리자 인스턴스, 무결성 수준 교차 `SendInput`·뮤텍스, 로그인 작업의 실제 기동. 감사 세션이 중간 무결성(비관리자)이었다.
+  - ISSUE-003과 ISSUE-004를 Confirmed/Likely로 나눈 근거가 이것이다.
+- 전원 차단·블루스크린 상황의 파일 시스템 동작(ISSUE-002).
+- GitHub 실서버 업데이트 왕복, 프록시 환경.
+- GUI E2E 스크립트(`scripts/e2e/*.ps1`). 프로젝트 규칙상 테스트에서 GUI를 띄우지 않으며, 이번 감사에서도 실행하지 않았다.
+- Python 매니페스트 스크립트 테스트(`scripts/test_update_manifest.py`). 실행하지 않았다.
 
-### CodeGraph 또는 분석상의 한계
+### CodeGraph와 분석의 한계
 
-- CodeGraph는 심볼 단위 호출 관계 파악에 썼고, 줄 번호·타이밍·Win32 의미 해석은 직접 열람으로 검증했다. UI 페인트·레이아웃 좌표 전수, `strings.rs` 전 문구 대조, 릴리스 스크립트·워크플로 전수는 이번 범위에 넣지 않았다(버전 동기화 테스트 6건이 파이프라인 드리프트를 대신 보증).
-- 레이스·타이밍 이슈는 정적 근거 + 단위 테스트로만 판단하고 런타임 재현은 하지 않았다. 그래서 해당 이슈는 `Likely` 이하로만 분류했다.
+- **`pub use` 허브 재수출 경로를 해석하지 못한다.** `config::load`, `crate::updater::prepare_update` 같은 경로다. 그래서 `callers load`가 테스트만 보여 줬다.
+  - 실제 UI 호출자는 grep으로 확정했다: `settings_form.rs:462`, `main.rs:34`, `staging.rs`의 호출자인 `update.rs:109`.
+- `explore` 출력은 파일 일부를 생략한다. 핵심 파일은 직접 전체를 열람해 보완했다.
 
 ---
 
 ## 4. High-Risk Issues
 
-High-Risk에는 `Confirmed`와 근거가 강한 `Likely`만 넣는다. 이번 감사에서 Critical/High에 해당하는 확정 문제는 없었다.
-아래 4건이 전부이며, 과장하지 않기 위해 Medium 1건·Low 3건으로 기록한다.
+> 심각도 기준은 지시서를 따른다. 이 장은 Confirmed와 근거가 강한 Likely만 담는다.
 
-### [ISSUE-001] 워치독 오판단 시 두 훅 스레드가 잠시 공존하며 통계를 이중 집계한다
+### [ISSUE-001] README 설정 샘플의 줄 끝 주석이 값으로 읽혀 불리언이 켜지고 숫자·키별 값이 무시된다
 
-- **위치:** `src/input/hook.rs` — `restart` (`454-460`), `spawn_hook_thread` (`499-577`), `HookThread::abandon` (`491-493`); `src/ui/watchdog.rs` — `tick` (`109-151`), `send_probe` (`92-106`)
+- **위치:**
+  - `src/config/storage.rs`: `parse` (`83-206`). 특히 `91-92` `split_once('=')` + `trim`, 불리언 `104-162`의 `v != "0"`, 숫자 `parse::<u64>()`, `key.XX` `198-204`.
+  - `README.md:122-148`(영문), `README.md:331-357`(한글) 설정 샘플.
 - **우선순위:** Medium
-- **신뢰도:** Likely
-- **문제:** 프로브(`SendInput` 표식 키업) 왕복이 `PROBE_TICKS`(2틱 = 1초)를 넘기면 워치독은 훅이 죽었다고 보고 `restart()`한다. `restart`는 구 스레드를 기다리지 않고(`abandon` = `WM_QUIT` 게시만) 새 스레드를 띄운다. 구 스레드가 살아서 메시지를 펌프 중이면 `WM_QUIT`을 받아 스스로 언훅·종료하므로 정상 인계되지만, **새 훅 설치 → 구 스레드의 `WM_QUIT` 처리 사이 틈새에는 두 개의 `WH_KEYBOARD_LL` 훅이 같은 `SHARED`를 공유**한다. 그 틈새의 키 이벤트는 두 훅이 순차 처리한다. 첫 훅이 상태 전이를 소비한 뒤 두 번째 훅이 전이 후 상태를 보므로, 같은 물리 눌림이 `total_presses`·`per_key_presses`에 **2회 집계**되고 알림음이 이중 재생될 수 있다. 떼기 확인 사용 중이면 구 스레드 종료 시 `send(&drain(true))`가 보류 중인 뗌을 조기 방출해 홀드 착각이 깨진다.
-- **발생 조건:** (a) 마우스만 10초 이상 쓰고 키보드는 가만히 있는 일상적 상황에서 프로브가 나가고, (b) 그 왕복이 1초를 초과(극심한 부하·입력 스톨)하거나 `SendInput`이 실패(`let _ =`로 무시됨)할 때. (a)는 흔하고 (b)는 드물어 전체 확률은 낮다.
-- **영향:** 통계 부풀리기(차단율·문제 키 진단 왜곡), 이중 알림음, 떼기 확인 중 한순간 홀드 해제. 키 stuck(눌림 고착) 방향은 아니다. 스레드 자체는 `WM_QUIT`으로 종료되므로 누수는 일시적이다.
-- **근거:** `tick`의 실패 판정(`116-125`), `restart`의 무대기 교체(`455-460`), `hook_proc`의 공유 상태 순차 처리(`183-215`), 종료 시 `drain(true)` 방출(`562-564`). 이중 집계 메커니즘은 `judge_down`이 매 호출에서 카운터를 올리는 구조(`357-358`)에서 직접 도출된다.
-- **반증 확인:** 상위 보호로 (1) 프로브는 `INJECT_MARK`라 일시 중지·주입 제외 상태에서도 훅이 삼키고(`176-182`), (2) 구 스레드가 펌프 중이면 반드시 `WM_QUIT`을 처리해 언훅하므로 이중 상태가 영속하지 않으며, (3) `stop()` 경로는 join으로 깔끔히 닫힌다. 그래서 영속적 이중 훅·영구 통계 오염은 성립하지 않고, **과도기 틈새(ms 단위, 키 입력이 겹칠 때만)** 로 한정된다. `try_acquire_single_instance`의 fail-open(`instance.rs:54-55`)은 이론상 같은 현상을 만들지만 `CreateMutexW` 실패는 사실상 발생하지 않아 제외했다.
-- **호출/영향 범위:** caller `watchdog::tick ← wndproc WM_TIMER`; callee `restart → start → spawn_hook_thread`, `HookThread::quit`. 영향 모듈: `debounce` 통계, `sound` 재생, `stats`·`history` 표시, 떼기 확인(`drain`·`inject`).
-- **권장 수정 방향:** 재시작 전에 `HOOK_THREAD_ID`의 구 스레드 종료를 짧게(예: 수백 ms) join 시도하고, 실패 시에만 포기 후 기동. 또는 훅 스레드에 세대 번호를 두고 구 스레드의 `drain(true)`·주입이 현 세대가 아니면 버리게 한다. `send_probe`의 `SendInput` 반환값을 확인해 전송 실패 시에는 재시작 대신 재프로브하도록 한다.
-- **필요한 회귀 테스트:** (Unit) `probe_failed` 경계는 이미 존재. 추가: 세대 가드가 있는 `drain`이 구 세대 호출을 무시하는 테스트. (Integration) `restart()` 직후 `HOOK_THREAD_ID`가 정확히 1개 스레드를 가리키고 구 스레드가 N초 내 종료됨을 assert(데스크톱 있는 환경에서만).
+- **신뢰도:** Confirmed (코드 흐름)
+- **문제:** 파서는 `#`·`;`로 **시작하는** 줄만 주석으로 건너뛴다(`88`). 그런데 README는 `iThreshold=50          # Global chatter threshold...`처럼 **줄 끝 주석**을 단 샘플을 "설정 파일은 이렇게 저장된다"고 제시한다. 이렇게 적으면 값이 다음처럼 해석된다.
+  - 불리언: `"0           # Play notification..."`은 `"0"`이 아니므로 **참**이 된다.
+  - 숫자와 `key.XX`: `parse::<u64>()`가 실패해 **조용히 무시**된다.
+  - `lpSoundFile=   # Path...`: 사운드 경로가 `# Path to custom .wav file ...`이 된다(검증에 실패해 시스템음으로 폴백).
+- **발생 조건:** 사용자가 README 샘플을 복사하거나 같은 양식으로 `settings.ini`를 직접 편집할 때. README 150행은 파일 직접 편집을 권장하는 문맥이다.
+- **영향:**
+  - `bPlaySound=0 #…` → 차단음 켜짐.
+  - `bFilterMouse=0 #…` → **마우스 버튼 필터 켜짐**. 빠른 더블클릭이 채터링으로 차단될 수 있다.
+  - `bAutoDisableFullscreen=0 #…` → 전체 화면 앱에서 보호 자동 꺼짐.
+  - `bMinimizeOnLaunch=0 #…` → 트레이로 시작.
+  - `key.48=120 #…` 같은 키별 기준은 적용되지 않는다.
+  - 어떤 경고도 없다. UI에서 고치면 정상 값으로 다시 저장되므로 복구는 가능하다.
+- **근거:** `storage.rs:91-92`는 값을 그대로 `trim`만 한다. `104`, `107`, `119`, `151`, `162`는 `v != "0"`, `200`은 `v.parse::<u64>()`를 쓴다. 주석이 섞인 값을 다루는 테스트는 없다(`storage.rs` 테스트 전체 확인).
+- **반증 확인:**
+  - 프로그램 자신이 쓰는 파일에는 주석이 없다(`save` `216-257`). 그래서 **수동 편집에서만** 발생한다.
+  - 가져오기(`load_from`)도 같은 `parse`를 쓰므로 막아 주지 못한다.
+  - 언어(`from_setting`)는 알 수 없는 값을 `Auto`로 폴백해 무해하다. 단축키는 파싱에 실패하면 무시하고, 저장할 때만 경고한다.
+  - 즉 보호 장치가 일부 필드에만 있다.
+- **호출·영향 범위:** `parse` ← `try_load`/`load`/`load_from` ← `main.rs:34`, `persist_with`(`settings_form.rs:257`), `on_save`(`:462`), `import_settings`(`files.rs:137`). 설정을 읽는 모든 경로에 해당한다.
+- **권장 수정 방향:** 둘 중 하나를 고른다.
+  - (a) README 샘플의 주석을 별도 줄(`; ...`)로 옮긴다. 비용이 가장 낮다.
+  - (b) `parse`에서 공백 뒤 `#`·`;` 이후를 잘라낸다. 사운드 경로에 `#`이 있을 수 있으니 "공백 + `#`" 규칙으로 하거나 `lpSoundFile`은 예외로 둔다.
+  - 둘 다 하는 편이 가장 안전하다.
+- **필요한 회귀 테스트:**
+  - `"[KeyboardChatteringFix]\nbFilterMouse=0   # c\niThreshold=80 # c\nkey.48=120 # c\n"`을 `load()`하면 `filter_mouse == false`, `threshold_ms == 80`, `per_key_ms[0x48] == Some(120)`.
+  - README 샘플 블록 자체를 `include_str!`로 읽어 파싱 결과가 주석의 기본값과 일치하는지 검사한다(문서 회귀 방지).
 
-### [ISSUE-002] 청소 모드가 진행 중인 떼기 확인을 고려하지 않는다
+### [ISSUE-002] 손상된 본 설정 파일이 기본값으로 로드되고, 다음 저장이 정상 `.bak`까지 덮어써 설정·통계가 영구 유실된다
 
-- **위치:** `src/debounce.rs` — `decide_event` 청소 분기 (`296-304`); `src/input/hook.rs` — `drain` (`380-406`), `hook_proc` 청소 분기 (`192-200`)
+- **위치:**
+  - `src/config/storage.rs`: `save` (`211-269`; `262` `fs::write`, `266` `fs::copy(path → .bak)`, `268` `rename`), `try_load` (`70-81`), `parse` (`83-206`).
+  - 호출자 `src/main.rs:34`, `src/ui/settings_form.rs:253-281` `persist_with`.
+- **우선순위:** Medium
+- **신뢰도:** Likely. 코드 경로는 확정이고, 트리거(전원 차단 후 NUL 파일)는 환경 재현을 하지 않았다.
+- **문제:** 세 단계가 겹쳐 유실이 일어난다.
+  1. `save`는 tmp에 쓴 뒤 `sync_all`(FlushFileBuffers) 없이 rename한다. NTFS는 메타데이터(rename·크기)만 저널링한다. 그래서 쓰기 직후 강제 전원 차단이나 블루스크린이 나면 **크기는 맞고 내용은 NUL인** 파일이 남을 수 있다(여러 앱에서 흔히 보고되는 현상).
+  2. `try_load`는 본 파일이 **읽기 실패이거나 공백뿐일 때만** `.bak`으로 폴백한다(`73`). NUL은 공백이 아니므로 `parse`가 인식하지 못한 줄을 전부 버리고 `Settings::default()`를 돌려준다.
+  3. 다음 저장(5분 자동 저장·종료·키 탭 변경)의 흐름은 이렇다.
+     - `persist_with`가 디스크(=기본값)에서 `key.XX`를 받아 키별 기준을 지운다(`adopt_file_only_fields`).
+     - `save`가 손상된 본 파일을 `.bak`으로 **복사**한다(`266`). 이때 정상이던 직전 세대가 덮어써진다.
+- **발생 조건:** 설정 쓰기 직후 몇 초 안에 정전, 강제 전원 버튼, 블루스크린이 일어나는 경우.
+  - 쓰기는 5분 자동 저장, 종료, 세션 종료, 키 탭 변경, 통계 초기화, 언어 변경 때 일어난다.
+  - 정상 종료는 캐시를 플러시하므로 해당하지 않는다.
+- **영향:** 기준값·키별 기준·단축키·제외 앱 목록·누적 통계가 전부 기본값으로 돌아간다. 복구할 수 있는 세대(`.bak`)도 없어진다. 사용자는 사라졌다는 사실만 알 수 있다.
+- **근거:**
+  - `storage.rs:262-268`에 `sync_all`과 `MOVEFILE_WRITE_THROUGH`가 없다.
+  - `73`은 `!text.trim().is_empty()`만 검사한다. `parse`는 헤더나 인식 키가 하나도 없어도 `Some(defaults)`가 된다.
+  - `266`은 본 파일의 유효성을 확인하지 않고 복사한다.
+- **반증 확인:**
+  - 빈 파일 폴백은 있다. 테스트 `storage.rs:489-491`이 빈 본 파일에서 `.bak`을 읽는 것을 확인한다. 그러나 NUL이나 쓰레기 내용은 막지 못한다.
+  - 통계는 메모리에서 다시 채워질 수 있다는 반론이 가능하다. 그러나 기동 시 기본값(0)으로 시작하므로 근거가 되지 않는다.
+  - `on_save`도 `config::load()`를 쓰므로 같은 결과가 된다.
+- **호출·영향 범위:** `save` ← `persist_with`(종료 `window.rs:411`, 세션 종료 `:655`, 자동 저장 `settings_form.rs:322`, 통계 초기화 `commands.rs:158`, 언어 `settings_form.rs:356/360`, 내보내기 `files.rs:122`, 키 탭 `keys_page.rs:449/460/474/481`), `on_save`(`:513`), 가져오기(`files.rs:150`).
+- **권장 수정 방향:**
+  1. tmp에 쓴 뒤 `File::sync_all()`을 하고 rename한다. 가능하면 `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`를 쓴다.
+  2. `try_load`에서 "헤더나 알려진 키가 하나도 없는" 본 파일도 손상으로 보고 `.bak`으로 폴백한다.
+  3. `save`의 `.bak` 복사는 본 파일이 파싱 가능할 때만 한다.
+  4. 선택: 폴백이 일어나면 `diag::log_line`에 기록한다.
+- **필요한 회귀 테스트:**
+  - 본 파일을 `vec![0u8; 512]`로, `.bak`을 `iThreshold=111`로 두면 `load().threshold_ms == 111`.
+  - 그 상태에서 `save(&s)`를 하면 `.bak`이 여전히 `iThreshold=111`을 담는다.
+  - `"hello\n"`처럼 헤더가 없는 본 파일도 같은 폴백을 탄다.
+  - 기존 `with_isolated_appdata` 패턴(`storage.rs:279-296`)을 사용한다.
+
+### [ISSUE-003] 관리자 권한 경로가 일반 권한 프로세스가 쓸 수 있는 파일을 관리자 권한으로 실행·설치한다
+
+- **위치:**
+  - `src/config/autostart.rs`: `register_task` (`404-426`, `current_exe` 경로를 그대로 `HighestAvailable` 작업에 등록).
+  - `src/updater/staging.rs`: `stage_helper` (`226-231`), `prepare_update` (`233-251`), `launch_helper` (`289-306`).
+  - `crates/kcfix-updater/src/lib.rs`: 재해시 `292-303` → rename `320`.
+- **우선순위:** Medium
+- **신뢰도:** Confirmed. 경로 권한 검사가 없다는 것을 코드로 확인했다. 악용 실증은 하지 않았다.
+- **문제:** 두 갈래다.
+  - **(a) 로그인 작업:** 작업은 등록 시점의 exe를 **매 로그인마다 관리자 권한으로** 실행한다. 이 exe가 사용자가 쓸 수 있는 폴더에 있으면, 같은 사용자의 **일반 권한 프로세스가 exe를 바꿔치기해 다음 로그인 때 관리자 권한을 얻는다.** 일반적인 배포 위치는 모두 사용자 쓰기 가능이다.
+    - Scoop: `%USERPROFILE%\scoop\apps\…`
+    - winget 포터블: `%LOCALAPPDATA%\Microsoft\WinGet\Packages\…`
+    - 다운로드 폴더 포터블
+  - **(b) 업데이트:** 관리자 인스턴스에서 업데이트하면 다음 순서로 진행된다.
+    1. 헬퍼를 `%TEMP%`에 복사한다(`227`).
+    2. **다운로드가 끝날 때까지(수 초~수 분)** 그대로 둔 뒤, 관리자 토큰을 상속한 채 실행한다(`303`).
+    3. 교체 파일도 `%TEMP%`에 있다. 헬퍼가 재해시한 뒤 rename하기까지 틈이 있다.
+    - 즉 일반 권한 프로세스가 스테이징 파일을 바꾸면 관리자 권한 코드 실행이 된다.
+- **발생 조건:** 사용자 계정에서 이미 악성 코드가 실행 중이고, 다음 중 하나에 해당할 때.
+  - (a) 관리자 로그인 작업을 켰다.
+  - (b) 관리자 권한 인스턴스에서 업데이트를 실행했다. 패키지 관리자 설치본은 안내만 하므로 해당하지 않는다(`update.rs:86-97`).
+- **영향:** 일반 권한에서 관리자 권한으로 승격된다. (a)는 영속적이다.
+- **근거:**
+  - `register_task`는 `current_exe()`를 그대로 `<Command>`에 넣고, 경로의 ACL이나 위치를 검사하지 않는다.
+  - `stage_helper`는 `std::env::temp_dir()`(사용자 쓰기 가능)에 복사한다.
+  - `Command::spawn`은 부모 토큰을 상속한다.
+  - 이번 세션의 미커밋 변경은 작업 정의 XML의 `%TEMP%` 경유만 없앴다(COM 등록). 실행 대상 파일 자체의 위치 문제는 남아 있다.
+- **반증 확인:**
+  - Microsoft는 UAC를 보안 경계로 보지 않는다. 동일 사용자의 악성 코드가 전제다. 그래서 Critical이나 High가 아닌 Medium으로 분류했다.
+  - 그래도 (a)는 "한 번 켜 두면 매 로그인 무프롬프트 승격"이라는 지속성이 있고, 이 기능 자체가 만든 경로다.
+  - (b)의 해시 검증은 다운로드 손상과 위조는 막지만, 검증 후 바꿔치기(TOCTOU)는 막지 못한다.
+- **호출·영향 범위:**
+  - (a) `elevation::toggle_task` → `set_elevated_task(true)` → `register_task`. `refresh_elevated_task`(관리자 기동 시 재등록)도 같은 경로를 쓴다.
+  - (b) 메뉴 `MENU_UPDATE` → `spawn_update_check` → `prepare_update` → `launch_helper`.
+- **권장 수정 방향:**
+  - (a) 다음 중 하나 이상을 적용한다.
+    - 작업을 켤 때 exe 경로가 관리자 전용 쓰기 위치(`Program Files` 등)인지 확인하고, 아니면 경고하거나 거부한다.
+    - README와 메뉴 문구에 위험을 명시한다.
+  - (b) 관리자 인스턴스에서는 인앱 업데이트를 막고 "일반 권한으로 다시 실행 후 업데이트"를 안내한다. 또는 스테이징 디렉터리를 관리자 전용 ACL로 만들고, 헬퍼를 잠긴 핸들로 실행한다.
+- **필요한 회귀 테스트:**
+  - 순수 함수 `is_admin_only_location(path)`를 만들어 단위 테스트한다. 기대값은 `C:\Program Files\X\a.exe`가 true, `%LOCALAPPDATA%\…`가 false.
+  - 관리자 인스턴스의 업데이트 분기를 순수 판정으로 떼어 내 "elevated → 업데이트 차단 안내"를 검사한다.
+
+### [ISSUE-004] 관리자 권한 창이 전경일 때 워치독이 정상 훅을 약 11초마다 재시작하고 잘못된 안내를 남긴다
+
+- **위치:**
+  - `src/ui/watchdog.rs`: `tick` (`116-165`), `send_probe` (`97-113`), `check` (`43-49`).
+  - 호출 `src/ui/window.rs:640`, 안내 `src/ui/stats.rs:132`. 전경 관리자 감지는 `src/ui/foreground.rs:239`에 있지만 워치독은 쓰지 않는다.
 - **우선순위:** Low
-- **신뢰도:** Likely
-- **문제:** 청소 모드는 눌림 차단·뗌 통과만 결정하고 `pending_up`(보류 중인 뗌)을 건드리지 않는다. (a) 청소 시작 직전 보류된 뗌은 훅 스레드 타이머가 그대로 `drain`해 청소 중에 방출된다 — 앱은 본 적 없는(또는 청소 전) 눌림의 뗌을 뒤늦게 받는다. (b) 청소 중 눌림은 `pending_up`을 정리하지 않으므로, 청소 종료 후 첫 눌림이 `Flush` 경로를 탈 수 있다. 모두 무해한 방향(눌림 고착 없음)이지만 "청소 중 입력 동결" 기대와 어긋난다.
-- **발생 조건:** `iReleaseDeferMs > 0` + 키를 누른 채(보류 발생) 청소 모드 진입, 또는 청소 중 보류 타이머 만료. 틈새는 지연값(수십 ms) 수준이라 조건이 좁다.
-- **영향:** 유령 뗌 1회 또는 종료 직후 눌림 1회의 `Flush` 재주입. 데이터 손상 없음.
-- **근거:** 청소 분기가 `pending_up` 검사보다 먼저 반환됨(`296-304` vs `327` 이하). `drain`은 `cleaning_mode`를 확인하지 않음(`380-406`). 마우스 청소는 의도적 통과(주석 명시)라 반증되나, **키보드 보류 뗌은 주석·테스트 모두 없음**을 확인했다.
-- **반증 확인:** `Defer`는 홀드 중인 키에서만 발생하고 청소 진입은 버튼·핫키·Enter(눌림 차단 대상)라 진입 순간 손가락이 키 위에 있을 확률이 낮다. 또한 방출돼도 `INJECT_MARK`라 필터가 재처리하지 않는다. 그래서 Low로 분류한다.
-- **호출/영향 범위:** caller `hook_proc`(청소 분기) · 타이머 `WM_TIMER/WM_KCFIX_INJECT → drain`; 영향은 `pending_up`·`inject` 큐·`SendInput` 1회.
-- **권장 수정 방향:** `set_cleaning(true)` 시 `pending_up`을 전부 확정 방출(즉시 `drain(true)` 상당 처리)하거나, 반대로 `drain`의 타이머 경로에서 청소 중이면 만료분을 청소 종료까지 보류. 둘 중 하나로 일관.
-- **필요한 회귀 테스트:** (Unit) `release_defer` + 청소 진입 시나리오: `Down→Up(Defer)→cleaning=true→due_releases` 후 보류 잔량이 정책대로(0 또는 유지)임을 assert. 현재 `release_defer_*` 테스트 4건에 청소 조합이 없음을 확인.
+- **신뢰도:** Likely. 코드와 OS 문서 근거가 있고, 관리자 환경 실측은 하지 않았다.
+- **문제:** 앱이 일반 권한이고 관리자 권한 창(작업 관리자, 관리자 터미널)이 전경이면 다음처럼 흘러간다.
+  1. 그 창으로 가는 입력을 훅이 보지 못한다(README `165`행이 명시한 UIPI 한계). 그래서 `HOOK_EVENTS` 증가가 0이다.
+  2. `GetLastInputInfo`는 세션 전체 입력(마우스 포함)이라 "사용자 활동 중"이 된다. 그래서 `check`가 `Probe`를 반환한다.
+  3. 프로브 `SendInput`은 UIPI로 상위 무결성 전경에 주입되지 못한다. MSDN상 반환값으로 실패를 알 수 없다고 하므로 `send_probe`는 true를 반환하고 대기를 건다.
+  4. 1초 뒤 `probe_failed`로 `restart()`가 호출된다.
+- **발생 조건:** 비관리자 실행 중에 관리자 창이 전경에 있고 10초 이상 키보드나 마우스를 쓰는 경우. 흔한 상황이다.
+- **영향:**
+  - 훅 스레드가 주기적으로 교체된다. 비용이 작고, 세대 인계로 상태 손실은 없다.
+  - `%TEMP%\kcfix-diag.log`가 오탐 재시작 기록으로 채워진다. 정작 실제 장애를 추적할 때 방해가 된다.
+  - 관리자 창을 벗어나면 홈 화면에 **"{시각}에 키보드 감시가 멈춰 자동으로 다시 시작했어요"**가 표시된다(`stats.rs:132`). 사용자는 앱이 불안정하다고 오해한다.
+- **근거:** `window.rs:640`이 매 틱 무조건 `watchdog::tick()`을 호출한다. `tick`은 전경 상태를 보지 않는다. `foreground::status()`의 두 번째 값(관리자 창 전경 여부)을 쓸 수 있는데도 쓰지 않는다.
+- **반증 확인:**
+  - `send_probe`의 반환값 검사(이전 감사의 ISSUE-001 수정)는 보안 데스크톱처럼 `SendInput`이 0을 반환하는 경우만 거른다. UIPI의 "조용한 차단"은 거르지 못한다.
+  - 관리자 권한으로 실행 중이면 이 문제는 생기지 않는다(`self_elevated`).
+- **호출·영향 범위:** `wndproc(WM_TIMER)` → `watchdog::tick` → `hook::restart` → `start`/`abandon`. 표시 쪽은 `stats::render_stats`.
+- **권장 수정 방향:** `foreground::status().1`(관리자 창이 전경이고 우리는 비관리자)이 참인 동안에는 검사를 건너뛰고 기준값(`st.hooked`)만 갱신한다. 또는 `check`에 `elevated_foreground` 인자를 추가해 `Fine`으로 처리한다.
+- **필요한 회귀 테스트:**
+  - `check(0, true, elevated_foreground = true) == Step::Fine`
+  - `check(0, true, false) == Step::Probe`
+  - 기존 `probe_only_when_the_user_was_active_and_the_hook_silent`를 확장한다.
 
-### [ISSUE-003] `bMinimizeOnLaunch`만 불리언 해석 규칙이 다르다
+### [ISSUE-005] `on_save`만 `config::load()`를 기준으로 삼아, 파일을 읽을 수 없는 순간 저장하면 키별 기준이 전부 지워진다
 
-- **위치:** `src/config/storage.rs` — `115-120` (`bMinimizeOnLaunch`는 `v == "1"`, 같은 파일의 다른 7개 플래그는 `v != "0"`). 규칙 테스트 `load_treats_any_nonzero_boolean_as_true` (`515-531`)
+- **위치:** `src/ui/settings_form.rs`: `on_save` (`462` `config::load()`, `485-487` 라이브 적용, `513` 저장). 비교 대상은 `persist_with` (`257` `config::try_load()`).
 - **우선순위:** Low
-- **신뢰도:** Confirmed
-- **문제:** "0이 아니면 참" 규칙이 테스트로 강제돼 있는데(`bPlaySound=2`·`yes` → 참) 유독 시작 최소화만 `"1"`이 아니면 거짓이다. 손으로 파일을 고친 사용자가 `bMinimizeOnLaunch=yes`라 쓰면 다른 플래그와 반대로(꺼짐) 동작한다.
-- **발생 조건:** 설정 파일을 직접 편집하고 비정형 참값(`yes`, `2` 등)을 쓸 때. UI 저장값은 항상 0/1이라 UI 경로에서는 발생하지 않는다.
-- **영향:** 시작 시 최소화 여부 1회성 어긋남. 보호 기능·데이터 무결성과 무관.
-- **근거:** 코드 직접 확인. 테스트가 `bMinimizeWhenLaunch` 별칭까지 묶어 규칙을 명시하므로 의도된 분기가 아님을 확정했다.
-- **반증 확인:** UI 경로·기본값·별칭 처리에는 영향이 없어 피해가 수동 편집으로 한정됨을 확인했다. 그럼에도 테스트가 문서화한 규칙 위반이므로 수정 대상이다.
-- **호출/영향 범위:** `parse ← load/try_load ← bootstrap·on_save·persist_with`. 영향 모듈 없음(표시 동작만).
-- **권장 수정 방향:** `s.minimize_on_launch = v != "0";`로 통일하고, 테스트에 `bMinimizeOnLaunch=yes → true` 케이스 1줄 추가.
-- **필요한 회귀 테스트:** 위 케이스. 입력 `bMinimizeOnLaunch=yes` → 기대 `minimize_on_launch == true`.
-
-### [ISSUE-004] 시작 시 스테이징 청소가 진행 중인 업데이트 교체 파일을 지울 수 있다
-
-- **위치:** `src/updater/staging.rs` — `cleanup_stale_staging` (`333-345`), `is_staging_file_name` (`321-326`); 호출점 `src/app/bootstrap.rs:111`
-- **우선순위:** Low
-- **신뢰도:** Likely
-- **문제:** 청소는 이름 패턴으로 %TEMP%의 `kcfix-updater_helper_*`·`keyboardchatteringfix_update_*`를 전부 삭제한다. 실행 중인 헬퍼 본인은 이미지 잠금으로 건너뛰지만, **아직 실행되지 않은 교체 파일(잠금 없음)은 삭제된다**. 헬퍼가 구 프로세스 종료를 최대 120초 기다리는 동안 사용자가 앱을 재실행하면, 새 프로세스의 시작 청소가 그 교체 파일을 지우고 헬퍼의 교체 직전 해시 검사가 실패해 업데이트가 깨진다(헬퍼는 롤백·이전 버전 재실행 후 오류 대화상자 — 데이터 손상은 없음).
-- **발생 조건:** 업데이트 헬퍼 대기 중(수 초~2분, 보통 수 초) 수동 재실행. 단일 인스턴스 가드와 무관하게(구 프로세스는 종료 중) 새 프로세스가 뜰 수 있다.
-- **영향:** 업데이트 실패 1회(재시도로 복구). 필터 공백 가능성은 헬퍼의 이전 버전 재실행(`should_relaunch_previous`)으로 완화된다.
-- **근거:** 청소 주석이 "아직 실행 중인 헬퍼는 잠금으로 건너뛴다"고만 보장하고 교체 파일은 언급하지 않음(`328-332`). `prepare_update` 실패 시 삭제(`239-243`)와 달리 진행 중 보호가 없다.
-- **반증 확인:** 단일 비행 플래그(`UPDATE_IN_PROGRESS`)는 프로세스 내 메모리라 재실행된 프로세스에는 소용없음을 확인했다. 단일 인스턴스 뮤텍스는 종료 중인 구 프로세스가 잠시 쥐고 있어(`--after-pid` 대기) 재실행이 바로 성공하지 않을 수 있으나, 10초를 넘기면(느린 종료) 그대로 진입하므로 방벽이 되지 못한다.
-- **호출/영향 범위:** caller `bootstrap::run`(별도 스레드); callee `is_staging_file_name`. 영향 모듈: 헬퍼 교체 흐름(`crates/kcfix-updater`), `launch_helper` 이후 단계.
-- **권장 수정 방향:** 교체 파일도 잠금(쓰기 핸들 유지)으로 보호하거나, 청소를 "N시간 이상 경과" 파일로 한정. 또는 헬퍼 대기 시작 시점에 마커 파일을 두고 청소가 마커가 있는 동안은 건너뛰게 한다.
-- **필요한 회귀 테스트:** (Integration) 가짜 스테이징 파일 + 진행 중 마커(또는 잠금) 상황에서 `cleanup_stale_staging`이 새 파일은 지우고 진행 중 파일은 남김을 assert. 현재 `staging_leftovers_are_recognized_by_name_only`는 이름 판별만 커버.
+- **신뢰도:** Confirmed (코드 경로). 트리거는 드물다.
+- **문제:**
+  - `storage.rs:67-69`의 문서는 "디스크 상태를 메모리에 병합하는 호출자는 `try_load`를 써서, 읽을 수 없는 파일이 '전부 삭제됨'으로 오인되지 않게 한다"고 규약을 정해 둔다.
+  - `persist_with`는 이 규약을 지킨다. `on_save`는 `load()`를 써서, 본 파일과 `.bak`이 모두 읽기 실패이면 `Settings::default()`(키별 기준이 모두 `None`)를 기준으로 삼는다.
+  - 그 결과 `485-487`이 라이브 필터의 키별 기준을 모두 지우고, `513`이 그대로 저장한다.
+- **발생 조건:** 저장 버튼(또는 가져오기의 `on_save`)을 누르는 순간 본 파일과 `.bak`이 모두 읽기 실패인 경우. 예를 들면 다음과 같다.
+  - 동기화나 백업 도구의 배타 잠금
+  - 둘 다 UTF-8이 아닌 상태
+  - 포터블 폴더 권한 문제
+- **영향:** 키별 기준(파일이 원본)이 유실되고 필터 동작이 즉시 바뀐다. 경고는 없고, 저장 성공으로 표시된다.
+- **근거:** 코드 직접 확인. CLAUDE.md도 "파일이 per-key 값의 원본이라는 전제를 깨지 말 것"을 철칙으로 둔다.
+- **반증 확인:**
+  - 정상적으로 읽히는 파일에서는 문제가 없다.
+  - 손상(ISSUE-002)이 아닌 순수 읽기 실패는 드물다. 그래서 Low로 분류했다.
+  - 다른 호출 경로(`persist_with`)는 이미 안전하다.
+- **호출·영향 범위:** `on_save` ← 저장 버튼·Enter(`window.rs:338/380`), `files::import_settings`(`files.rs:155`).
+- **권장 수정 방향:** `config::try_load()`가 `None`이면 `SAVED`의 현재 값을 기준으로 삼는다(`persist_with`와 같은 규칙). 또는 저장을 중단하고 `save_failed`를 표시한다.
+- **필요한 회귀 테스트:** 기준 설정 선택을 순수 함수 `save_base(disk: Option<Settings>, saved: &Settings) -> Settings`로 떼어 낸다. 기대값은 다음과 같다.
+  - `None`이면 `saved.per_key_ms`가 보존된다.
+  - `Some(d)`이면 `d.per_key_ms`를 채택한다.
 
 ---
 
 ## 5. Potential Functional Gaps
 
-버그가 아니라 "현재 목적상 빠졌을 가능성이 있는" 안정성 보완점이다. 추정은 버그처럼 표현하지 않는다.
+버그가 아니라 보완 여지다. 추정은 버그처럼 쓰지 않는다.
 
-- **관측 로그가 GUI에서 버려짐 (Likely Gap).** `bootstrap::run`이 `tracing_subscriber::fmt`을 초기화하지만(`src/app/bootstrap.rs:79-84`), GUI 빌드는 `windows_subsystem = "windows"`라 콘솔이 없어 느린 틱 경고(`stats.rs:196-222`)·훅 실패·업데이트 경로의 `warn/error!`가 실제로는 어디에도 기록되지 않는다. 과거 "기동 직후 응답없음" 같은 이슈가 재발하면 원인 추적 수단이 없다. 방향: `%TEMP%` 또는 설정 폴더의 회전 로그 파일 1개(크기 상한 포함)로 연결. 단, 훅 핫패스에서의 로깅은 금지(현 규칙 유지).
-- **매니페스트 최소 버전·폐기(revocation) 없음 (Likely Gap).** 서명·만료·핀고정·이중 해시는 탄탄하나, 서명 키가 탈취된 경우 이미 서명된 구 매니페스트의 재전송(다운그레이드 유도)을 막을 장치가 만료 시각(선택 필드, 구 매니페스트엔 없음)뿐이다. 방향: 바이너리에 최소 허용 버전 상수 또는 키 회전 계획(`docs/UPDATE.md`에 명문화).
-- **프록시·오프라인 환경 안내 부족 (추정).** `ureq` 에이전트에 프록시 설정이 없고, 기업망에서 업데이트 검사가 실패하면 기술 상세만 표시된다. Scoop/winget 설치 감지 후 관리자 안내(`update.rs:86-97`)는 잘 돼 있다. 방향: 시스템 프록시 준수 또는 실패 메시지에 수동 다운로드 경로 안내.
-- **키별 통계 개별 초기화 없음 (추정).** 전체 초기화(`reset_stats`)만 있고 특정 키의 히스토그램·카운터만 지우는 경로는 없다. 스위치 교체 후 해당 키의 권장값이 옛 데이터에 오염된다. 방향: 키·마우스 탭 행 컨텍스트에 "이 키 통계 지우기"(작은 enhancement, 버그 아님).
-- **조사했으나 Gap으로 채택하지 않은 것:** (a) 일시 중지·보호 꺼짐·주입 제외 상태에서 훅이 상태 전이를 생략하는 것 — 재개 후 fail-open(통과 방향)이라 안전하고 의도된 설계다. (b) `InjectQueue` 32칸 초과분 침묵 삭제 — 실제 손가락으로 32개 동시 보류는 불가능해 dead-code에 가까운 방어 한계다. (c) 휴대 모드 판정이 실행 중 뒤집히는 경우 — ini 삭제라는 인위적 조작이 필요하다. (d) CSV 수식 인젝션 — 셀 값이 내부 VK 이름·시각·숫자뿐이라 불가하다.
-- **보안 특기:** 업데이트(서명+핀+크기+이중 해시), 자동실행 인용 경로, 작업 XML 이스케이프, `schtasks` 무창 실행, 셸 실행의 워커 스레드 분리까지 점검했고, password·토큰·개인정보 저장, SQL·셸 인젝션, 경로 탈출(가져오기는 사용자 선택 경로가 의도)에 해당하는 문제를 찾지 못했다.
+- **관리자 시작 표식이 일반 권한에서는 갱신되지 않는다 (Likely Gap, 이번 세션 미커밋 변경).**
+  - 작업 스케줄러 UI에서 작업을 지우거나 끄면, 표식(`HKCU\Software\KeyboardChatteringFix\ElevatedTask`)은 관리자 인스턴스가 다음에 기동할 때까지 남는다(`refresh_elevated_task`).
+  - 그동안 일반 자동 실행은 **매 로그인 20초** 대기한 뒤 대신 실행된다(`bootstrap.rs:108`, `ELEVATED_START_GRACE`). 보호 공백은 20초로 한정된다.
+  - 방향: 대기가 시간 초과로 끝나면 표식을 지운다. 일반 권한도 HKCU는 쓸 수 있다.
+- **떼기 확인 재주입 실패를 무시한다 (추정).**
+  - `send`(`hook.rs:361-369`)는 `SendInput` 반환값을 버린다.
+  - UAC 프롬프트처럼 보안 데스크톱으로 전환되기 직전에 보류된 뗌(최대 100ms)이 전환 뒤에 주입되면 실패할 수 있다. 그러면 해당 키가 시스템상 눌린 상태로 남을 가능성이 있다.
+  - `iReleaseDeferMs` 기본값이 0이라 기능을 켠 사용자에게만 해당한다. 실측하지 않았다.
+- **자동 실행 시에도 창을 띄운다 (Likely Gap).**
+  - `show_initial`(`window.rs:796-800`)은 `--autostart`와 무관하게 `bMinimizeOnLaunch`만 본다(기본 0). 그래서 기본 설정이면 매 로그인마다 메인 창이 뜬다.
+  - 의도일 수 있으므로 버그로 분류하지 않았다. 방향: `--autostart`이면 트레이로 시작하는 옵션을 두거나 기본값을 바꾼다.
+- **비UTF-8 설정 파일을 조용히 폴백한다 (Likely Gap).**
+  - ANSI(CP949)로 저장된 수동 편집 파일은 `read_to_string`에 실패해 `.bak`(이전 세대)으로 폴백한다. 사용자의 편집은 알림 없이 무시되고, 다음 저장에서 `.bak`으로 밀려난다.
+  - Windows 11 메모장의 기본값이 UTF-8이라 빈도는 낮다.
+- **관리자 재실행 인계의 10초 한도 (추정).**
+  - `--after-pid` 대기는 10초다(`bootstrap.rs` `wait_for_process_exit`).
+  - 이전 인스턴스 종료가 이보다 오래 걸리면(예: 백신 검사 중인 `persist_live`) 새 관리자 인스턴스는 "이미 실행 중"을 띄우고 끝난다. 그 뒤 이전 인스턴스가 끝나면 보호가 공백이 된다.
+- **관리자·UAC 경로의 자동 검증이 없다 (Confirmed Gap).**
+  - ISSUE-003·004와 이번 세션의 뮤텍스 `ACCESS_DENIED` 수정은 모두 관리자 실기에서만 확인할 수 있다.
+  - `scripts/e2e`에도 해당 시나리오가 없다(`features_e2e`는 떼기 확인·마우스·단축키·일시 중지만 다룬다).
+- **프록시 미지원 (추정, 이전 감사에서 이월).** `ureq` 에이전트에 시스템 프록시 설정이 없다(`http.rs:13-22`).
+- **조사했으나 채택하지 않은 것:**
+  - 일시 중지·보호 꺼짐 중에는 훅이 키 상태를 추적하지 않아 `held`가 남는다. 재개 후 다음 1회 누름이 오토리핏으로 보고 통과되는 fail-open이라 안전하다.
+  - 업데이트 다운로드가 중간에 끊긴 경우의 부분 파일은 `prepare_update`가 삭제한다(`staging.rs:239-242`). 반증됐다.
+  - `WM_ELEVATED_TASK_DONE` 위조는 `BUSY` 가드로 무시된다.
+  - 워커 스레드의 `msg_box`는 동작상 문제가 없다.
+  - `InjectQueue` 32칸 초과는 실제 손으로는 도달할 수 없다.
 
 ## 6. Documentation Mismatches
 
-- **`AGENTS.md` 없음.** 지시문이 확인을 요구한 문서이나 저장소 루트·추적 파일(`git ls-files`) 어디에도 없다. README·CLAUDE·GEMINI가 역할을 대신하고 있어 실무 영향은 없다. (없음을 명시)
-- **CLAUDE.md "설정 쓰기는 `persist_live`와 `on_save`뿐" — 현재는 3곳.** 가져오기(`src/ui/files.rs:141`)가 `config::save`를 직접 호출한 뒤 `on_save`가 한 번 더 저장한다. 의도(가져온 값 + 이 PC 통계로 디스크 선반영)는 타당하고 무해한 중복이나, "둘 다 디스크 값을 다시 읽어 병합한다"는 서술이 가져오기 경로를 설명하지 않는다. `grep`으로 `config::save` 호출점 3곳을 확정했다.
-- **GEMINI.md 성능 계약 1항이 구버전.** "유일한 Win32 호출은 차단 시 사운드"라고 돼 있으나, 현재 훅 경로는 떼기 확인용 `SetTimer`·`PostThreadMessageW`도 허용한다(훅 스레드 타이머 1개). CLAUDE.md는 이미 갱신돼 있고 GEMINI.md만 뒤처졌다.
-- **위 3건 외 불일치 없음.** README의 설정 샘플 20개 필드·`key.XX`·휴대 모드·아키텍처 그림·버전 동기화 서술은 코드·테스트(`version_sync` 6건)와 일치함을 확인했다.
+- **README 설정 샘플의 줄 끝 주석** (`README.md:122-148`, `331-357`): 실제 파서는 지원하지 않는다. 기능 영향이 있어 ISSUE-001로 올렸다.
+- **CLAUDE.md "설정 쓰기는 `persist_live`(종료·세션 종료·5분 자동 저장·통계 초기화·언어 변경)와 `on_save`뿐":** 실제 `persist_live`/`persist_with` 호출처에는 다음도 있다.
+  - 설정 내보내기(`files.rs:122`)
+  - 키별 통계 지우기(`keys_page.rs:474`)
+  - 키 탭 임계값과 마우스 스위치(`settings_form.rs:287-309`, CLAUDE.md의 다른 절에 서술됨)
+  - 나열이 불완전할 뿐 동작 위험은 없다.
+- **`docs/UPDATE.md:107-109` `--autostart` 설명:** 이번 세션 미커밋 변경으로 생긴 "관리자 작업 표식이 있으면 일반 자동 실행이 관리자 인스턴스를 최대 20초 기다린다"는 동작이 빠져 있다. CHANGELOG·CLAUDE.md에는 반영돼 있다.
+- **코드 주석 불일치:** `src/updater/staging.rs:23-28`은 `update_in_progress`를 "API 호환용, 현재 흐름은 쓰지 않음"이라며 `#[allow(dead_code)]`를 달았다. 실제로는 `menu.rs:133`과 `tray.rs:211`이 사용한다. 기능 영향은 없다.
+- **`AGENTS.md` 없음:** 지시서가 확인을 요구했지만 저장소에 없다. README·CLAUDE·GEMINI가 역할을 대신한다.
+- **이 밖의 확인 결과:** README의 한계 절(UIPI·보안 데스크톱), 포터블 모드, 설정 경로, `key.XX` 즉시 기록 서술, CLAUDE.md의 핫패스 규칙·모듈 지도는 코드와 일치한다.
 
 ## 7. Recommended Fix Plan
 
-실제 코드는 수정하지 않는다. 아래는 순서 제안뿐이다.
+실제 코드는 수정하지 않았다. 아래는 순서 제안이다.
 
 ### Phase 1 — Immediate
 
-데이터 손상·주요 기능 실패에 해당하는 확정 항목이 없으므로, Phase 1은 ISSUE-001의 저비용 완화로 한정한다.
-
-- ISSUE-001: `restart()`의 구 스레드 짧은 join(수백 ms) + 실패 시 포기, `send_probe`의 `SendInput` 반환값 확인. 통계 오염·이중 사운드의 발생 창을 닫는다.
-- ISSUE-003: 1줄 통일(`!= "0"`) + 테스트 1줄. 즉시 가능.
+- **ISSUE-002:** `save`에 `sync_all`(+ `MOVEFILE_WRITE_THROUGH`)을 넣고, `try_load`의 "인식 불가" 폴백을 추가하고, `.bak` 복사를 유효성 조건부로 바꾼다. 데이터 유실을 막는 유일한 항목이다.
+- **ISSUE-001:** README 샘플 주석을 별도 줄로 옮긴다(즉시). 파서의 줄 끝 주석 처리는 Phase 2에서 검토한다.
 
 ### Phase 2 — Stability
 
-- ISSUE-002: 청소 진입 시 보류 뗌 정책 확정(즉시 방출 vs 종료까지 보류) + 단위 테스트.
-- ISSUE-004: 스테이징 진행 중 보호(잠금 유지 또는 경과 시간 조건) + 통합 테스트.
-- 관측 로그 파일 회전 도입(5장의 Likely Gap 1). 훅 핫패스 무로깅 규칙은 유지.
-- 가져오기 저장 경로의 문서화(CLAUDE.md 1줄) 또는 `config::save` 직접 호출을 `persist_with` 계열로 일원화.
+- **ISSUE-004:** 관리자 창이 전경인 동안 워치독 프로브를 생략한다(1~2줄 + 테스트).
+- **ISSUE-005:** `on_save` 기준을 `try_load` 규칙으로 통일한다.
+- **ISSUE-001 (b):** `parse`의 "공백 + `#`/`;`" 줄 끝 주석 처리 + 테스트.
+- **5장 표식 Gap:** 대기 시간 초과 시 표식을 지운다.
 
 ### Phase 3 — Structural
 
-- 최소 허용 버전 상수·키 회전 계획 문서화(5장의 Likely Gap 2).
-- E2E 스크립트(`hook_session_e2e`·`features_e2e`·`update_swap_e2e`)의 정기 실행 기록. 이번 감사에서 미실행이므로 다음 릴리스 전 수동 실행을 권장.
-- 키별 통계 개별 초기화 같은 소규모 UX 보완은 별도 enhancement로 분리(버그 아님).
+- **ISSUE-003:** 관리자 로그인 작업에 경로 위치 검사·경고를 넣고, 관리자 인스턴스의 인앱 업데이트 정책을 정한다(차단 또는 ACL 스테이징). 위협 모델을 README에 명시한다.
+- **관리자·UAC 시나리오 E2E 추가:** 관리자 인스턴스 + 일반 실행 = 1개만 생존, 로그인 작업 실기동, 관리자 창 전경 시 워치독 무재시작.
+- **`on_save`를 순수 함수로 분리:** 기준 설정 선택과 폼 → 설정 매핑을 떼어 내 HWND 없이 테스트할 수 있게 한다.
 
 ## 8. Test Recommendations
 
-"테스트 추가"가 아니라 입력 조건과 기대 결과를 명시한다. 기존 스위트(188건)는 유지하고 아래를 더한다.
-
-- **Unit — 불리언 규칙 통일(ISSUE-003):** 입력 `[KeyboardChatteringFix]\nbMinimizeOnLaunch=yes` → 기대 `minimize_on_launch == true`. 기존 `load_treats_any_nonzero_boolean_as_true`에 1줄.
-- **Unit — 청소×떼기 확인(ISSUE-002):** `set_release_defer_ms(30)` 후 `Down(0)→Up(Defer)→cleaning_mode=true→due_releases` 입력 → 기대는 채택 정책대로 보류 잔량 0(즉시 방출) 또는 1(종료까지 보류) 중 하나를 assert. 정책 결정이 선행돼야 함.
-- **Unit — 세대 가드(ISSUE-001):** `drain`에 세대 인자 도입 시, 구 세대 `drain(true)` 호출 → 기대 방출 0건·`pending_up` 유지.
-- **Integration — 재시작 인계(ISSUE-001, 데스크톱 환경 한정):** `spawn_hook_thread → restart → 구 스레드 join(타임아웃 5초)` → 기대 `HOOK_THREAD_ID`가 새 스레드 1개만 가리키고 구 스레드 종료. 기존 `hook_runs_on_a_dedicated_thread_and_stops` 옆에 배치.
-- **Integration — 스테이징 보호(ISSUE-004):** 임시 디렉터리에 가짜 `keyboardchatteringfix_update_*.exe`(최근) + 경과 파일(오래됨) 배치 후 `cleanup_stale_staging` → 기대 오래된 것만 삭제(또는 마커 도입 후: 마커 존재 시 전부 유지). `TEMP` 격리(`with_isolated_appdata` 패턴) 필수.
-- **Concurrency — 중복 재시작:** 두 스레드에서 `restart()` 동시 호출 → 기대 훅 스레드 최대 1개 생존, 패닉 없음. `try_begin_update_parallel_exactly_one_winner` 패턴을 따른다.
-- **E2E(수동, 릴리스 전):** `hook_session_e2e`(훅·UI 정지·세션 종료 저장), `features_e2e`(떼기 확인·마우스·단축키·자동 일시 중지), `update_swap_e2e`(헬퍼 연속 교체). 이번 감사 미실행 — `scripts/e2e/README.md` 절차대로 다음 릴리스 전 실행.
-- **Regression — 기존 약한 assertion 강화:** 프로젝트 철칙(`<= 11 → == 10`류)에 따라, 이번 수정과 만나는 기존 테스트의 범위 assertion을 정확한 값으로 좁힌다. 새 hollow 테스트는 금지.
-- **Platform-specific:** 본 프로젝트는 Windows 전용이므로 Linux/macOS 이식 테스트는 범위 밖. 대신 DPI(125%/150%)·명암 테마·승격/비승격 조합의 수동 체크리스트를 E2E에 유지한다.
+- **Unit**
+  - (ISSUE-001) `bFilterMouse=0   # c` / `iThreshold=80 # c` / `key.48=120 # c`를 `load()`하면 `false` / `80` / `Some(120)`.
+  - (ISSUE-001) README 샘플 블록을 `include_str!`로 파싱한 결과가 문서의 기본값(`threshold 50`, 불리언 0 항목 거짓, `key.48 = 120`)과 같다.
+  - (ISSUE-002) 본 파일이 NUL 512바이트이고 `.bak`이 `iThreshold=111`이면 `load().threshold_ms == 111`.
+  - (ISSUE-002) 헤더 없는 `"hello\n"` 본 파일도 `.bak` 값을 돌려준다.
+  - (ISSUE-004) `check(0, true, elevated_fg = true) == Fine`, `check(0, true, false) == Probe`.
+  - (ISSUE-005) `save_base(None, &saved).per_key_ms == saved.per_key_ms`, `save_base(Some(d), &saved).per_key_ms == d.per_key_ms`.
+  - (ISSUE-003) `is_admin_only_location(r"C:\Program Files\K\k.exe") == true`, `%LOCALAPPDATA%` 하위는 `false`.
+- **Integration**
+  - (ISSUE-002) 격리 APPDATA에서 `save(A)`를 한 뒤, 본 파일을 NUL로 덮고 `save(B)`를 한다. 기대: `.bak`이 A를 유지(손상본으로 덮어쓰지 않음).
+  - (자동 실행) 격리 레지스트리 키는 쓸 수 없으므로, `registered_exe`/`approved_says_disabled` 같은 순수 함수를 유지하고 확장한다(현재 있음).
+- **End-to-End (수동, 릴리스 전)**
+  - 기존 `hook_session_e2e`·`features_e2e`·`update_swap_e2e` 실행. 이번 감사에서는 실행하지 않았다.
+  - 신규 관리자 시나리오:
+    - 관리자 인스턴스 실행 중 일반 실행 → "이미 실행 중"이 뜨고 훅은 1개.
+    - 관리자 작업 + Run 둘 다 켜고 재로그인 → 관리자 인스턴스만 생존.
+    - 작업 관리자를 전경에 두고 30초 동안 타이핑 → `kcfix-diag.log`에 재시작 기록 없음(ISSUE-004 수정 후).
+- **Concurrency**
+  - 키 탭 변경(`set_key_override`)과 자동 저장 틱이 연속으로 실행된 뒤 파일의 `key.XX`가 마지막 변경을 반영한다(UI 스레드 단일이라 순서 보장. 회귀 방지용).
+  - 기존 `concurrent_restarts_leave_one_hook_thread`는 유지한다.
+- **Regression**
+  - 이번 세션의 `running_probe_sees_holder_without_claiming`과 `only_access_denied_means_held_by_elevated`를 유지한다.
+  - 기존 범위형 assertion이 있으면 정확한 값으로 좁힌다(프로젝트 철칙).
+- **Platform-specific**
+  - Windows 전용. DPI 125%/150%, 다크·라이트 테마, 관리자·비관리자, 비UTF-8 설정 파일(CP949) 로드 시 폴백 동작을 수동 체크리스트로 둔다.
 
 ## 9. Final Assessment
 
 | 영역 | 평가 | 근거 |
 |---|---|---|
-| Functional Correctness | Acceptable | 필터 코어·설정·업데이트 검증이 정확하고 188건 테스트가 보증. 남은 것은 좁은 조건의 Low 3건 + Likely Medium 1건 |
-| Runtime Stability | Acceptable | 훅 전용 스레드·재진입 가드·diff 갱신·락 순서(SAVED→SHARED 단일, 역전 없음) 확인. 워치독 재시작 틈새만 잔존 |
-| Data Integrity | Good | 원자 저장+`.bak`+백업 폴백, 이중 해시, 통계 병합 저장. 유실은 크래시 시 최대 5분 통계뿐(설계) |
-| Error Resilience | Good | 저장 실패·핫키 충돌·헬퍼 부재·프로브 실패 경로마다 사용자 알림 또는 폴백. `send_probe`의 `SendInput` 반환 무시 같은 작은 구멍만 잔존 |
-| Cross-platform Robustness | Acceptable | Windows 전용이 설계 의도이며 README·매니페스트와 일치. 이식성 결함이 아니라 범위 선언으로 평가 |
-| Test Confidence | Good | 188/188 통과, fmt·clippy 깨끗, 경계·폴백·동시성 단위 테스트 보유. E2E만 수동(미실행)으로 남음 |
+| Functional Correctness | Acceptable | 필터 코어·훅·업데이트 검증은 정확하다. 수동 편집 설정의 오해석(ISSUE-001)과 관리자 창 전경 시 워치독 오탐(ISSUE-004)이 남는다 |
+| Runtime Stability | Good | 훅 전용 스레드, 세대 인계, poison 내성, 락 밖 Win32 호출, 재진입 가드. 오탐 재시작도 상태를 잃지 않는다 |
+| Data Integrity | Acceptable | 원자 저장과 `.bak`은 있다. 다만 `fsync`가 없고 손상 판정이 "빈 파일"뿐이라 전원 사고 시 백업까지 잃을 수 있다(ISSUE-002). `on_save`의 규약 위반도 있다(ISSUE-005) |
+| Error Resilience | Good | 저장·자동 실행·작업·업데이트·헬퍼 실패마다 사용자 알림이나 롤백이 있다. 업데이트 실패 시 이전 버전을 재실행한다 |
+| Cross-platform Robustness | Acceptable | Windows 전용이 설계 의도이며 문서와 일치한다. Windows 안에서는 인코딩 폴백(비UTF-8)과 관리자·비관리자 교차 동작에 빈틈이 있다 |
+| Test Confidence | Acceptable | 209건 통과, 경계·폴백·동시성 테스트가 풍부하다. 다만 이번 이슈 5건 중 테스트로 잡히던 것이 없고, 관리자·UAC 경로와 GUI E2E는 자동 검증 밖이다 |
 
 **실제로 먼저 수정할 문제 3개**
 
-1. **ISSUE-001 (워치독 재시작 인계)** — Medium/Likely. 통계 무결성과 직결된 유일한 중간 위험. join-짧게 + `SendInput` 반환 확인.
-2. **ISSUE-003 (`bMinimizeOnLaunch` 규칙 통일)** — Low/Confirmed. 1줄 수정+테스트 1줄, 즉시 처리 가능.
-3. **관측 로그 파일화 (5장 Gap 1)** — 다음 "원인 불명" 이슈 발생 전에 추적 수단을 확보. 그 전에는 ISSUE-001류 타이밍 문제를 재현·확정할 방법이 없다.
+1. **ISSUE-002:** 설정 저장의 `sync_all`, 손상 파일 폴백, `.bak` 보호. 유일한 영구 데이터 유실 경로다.
+2. **ISSUE-001:** README 샘플을 즉시 고치고, 이어서 파서의 줄 끝 주석을 처리한다. 문서를 따른 사용자의 설정이 조용히 뒤집힌다.
+3. **ISSUE-003:** 관리자 로그인 작업의 경로 검사·경고와 관리자 인스턴스 업데이트 정책. 이 기능이 만든 영속 승격 경로다.
 
 ---
 
-## 10. 적용 기록 (2026-10-18)
+## 10. 적용 기록 (2026-10-22)
 
-본 감사 직후 사용자 요청으로 위 제안을 전부 구현했다. E2E 수동 항목(8장의 릴리스 전 절차)은 실기 GUI가 필요해 미실행으로 남는다.
+이 감사 직후 사용자 요청으로 1~8장의 제안을 모두 구현했다. 게이트(`fmt`·`clippy -D warnings`·`check --workspace`)와 `cargo test --workspace`가 통과했다(221건, 앱 단위 테스트 178 → 190).
 
 | 제안 | 적용 내용 | 테스트 |
 |---|---|---|
-| ISSUE-001 | `HOOK_GEN` 세대(생성 시 획득·`abandon` 시 은퇴), 구 스레드 종료 방출 건너뛰기, `drain`의 타이머 재개설(인계), `start`의 인계 킥, `send_probe` 전송 실패 시 재시작 대신 다음 주기 재시도 | `restart_hands_over_pending_releases_to_one_thread`, `concurrent_restarts_leave_one_hook_thread` |
-| ISSUE-002 | 청소 진입(`set_cleaning(true)`) 시 `flush_deferred_releases()`로 보류 뗌 즉시 방출(인젝터 경유) | `flush_deferred_releases_empties_pending` |
-| ISSUE-003 | `v == "1"` → `v != "0"` 1줄 통일 | `load_treats_any_nonzero_boolean_as_true`에 `yes` 케이스(수정 전 실패 확인) |
-| ISSUE-004 | `cleanup_stale_staging`을 1시간 경과 파일만 삭제하도록 변경(`cleanup_staging_dir` 분리) | `cleanup_keeps_fresh_staging_and_drops_only_old` |
-| 관측 공백 Gap 1 | `src/ui/diag.rs` 회전 파일 로그(`%TEMP%\kcfix-diag.log`, 256KB·1세대), 느린 틱·훅 재시작 연결 | `lines_accumulate_in_order`, `oversize_log_rotates_once` |
-| 키별 초기화 Gap | `Debouncer::clear_key_stats`(전체 합계 차감·히스토그램·해당 로그행 정리, 기준값 유지) + 키 탭 "통계 지우기" 버튼(ID 711·한/영 문구·저장 연동) | `clear_key_stats_forgets_one_key_only`, layout 겹침·카드·문구 테스트 통과 |
-| 문서 불일치 | CLAUDE(쓰기 경로 예외·`diag` 모듈·진단 로그 안내), GEMINI(훅 허용 호출 갱신), UPDATE(구 매니페스트 재전송 절 신설) 수정 | 문서이므로 테스트 없음 |
-| 프록시·개별 초기화 외 추정 Gap | 프록시는 미적용(향후 과제 유지), 키별 초기화는 위 버튼으로 해소 | — |
+| ISSUE-001 | `storage::strip_inline_comment`: "공백 + `#`/`;`" 이후는 주석, 값 전체가 주석이면 빈 값. `lpSoundFile`은 그대로, `sAutoDisableApps`의 `;`는 구분자로 유지. README 샘플은 그대로 두고 주석 규칙만 문서화 | `readme_sample_parses_to_what_it_documents`(README 두 샘플을 `include_str!`로 파싱), `trailing_comments_need_whitespace_and_keep_paths_and_app_lists` |
+| ISSUE-002 | `write_durably`(tmp `sync_all`), `replace_durably`(`MoveFileExW` + `WRITE_THROUGH`), `looks_like_settings`(헤더·알려진 키가 없으면 손상으로 보고 `.bak` 폴백), 유효한 본 파일만 `.bak`으로 복사 | `unrecognizable_main_file_falls_back_to_the_backup`, `save_never_backs_up_a_torn_main_file` |
+| ISSUE-003 (a) | `exe_in_protected_location`(Program Files·Windows known folder 하위 판정). 밖이면 작업 켜기 전 경고(기본 No) | `protected_location_means_inside_a_protected_root`, `known_protected_roots_resolve` |
+| ISSUE-003 (b) | `update_route`: 관리자 실행 중이면 인앱 업데이트 대신 안내(패키지 관리자 안내가 우선) | `elevated_copies_never_update_in_app` |
+| ISSUE-004 | `watchdog::check`에 `elevated_foreground` 인자 추가, `foreground::status().1`이 참이면 프로브 생략 | `no_probe_while_an_administrator_window_is_in_front` |
+| ISSUE-005 | `on_save` 기준 = `save_base(try_load(), SAVED)` | `save_starts_from_the_file_but_never_from_an_unreadable_one` |
+| 5장 표식 Gap | 대기 시간 초과 시 표식 삭제. 늦게 뜬 관리자 작업이 조용히 종료할 때 표식 재설정 | 관리자·로그인 경로라 수동 체크리스트로 (`scripts/e2e/README.md`) |
+| 5장 재주입 Gap | injector 경로 `send_retrying`(100ms × 최대 30회, 남은 것만 재전송). 종료 경로는 1회 | `refused_releases_are_retried_from_where_they_stopped` |
+| 5장 자동 실행 창 | `--autostart`이면 항상 트레이로 시작 | GUI 경로(테스트 금지 규칙) |
+| 5장 비UTF-8 | `read_text`: BOM 제거, UTF-8이 아니면 시스템 코드 페이지(`MultiByteToWideChar(CP_ACP)`)로 해석 | `non_utf8_file_is_read_in_the_system_code_page` |
+| 5장 `--after-pid` | 대기 10 → 30초 | 상수 변경 |
+| 5장 관리자 E2E 부재 | `scripts/e2e/README.md`에 관리자 경로 수동 체크리스트 6항목 추가 | 수동 |
+| 5장 프록시 | `HTTPS_PROXY` 등이 없으면 `WinHttpGetIEProxyConfigForCurrentUser`의 수동 프록시 사용(PAC 미지원) | `windows_proxy_setting_picks_the_https_route`. 실제 `--check-update` exit 0 확인 |
+| 6장 문서 | CLAUDE.md(쓰기 경로 목록·저장 규칙·워치독·업데이트 경로·프록시·재주입), `docs/UPDATE.md`(`--autostart`·`--after-pid`·관리자 업데이트·프록시), README(주석 규칙·트레이 시작·관리자 작업 위험·프록시, 영/한), `staging.rs` 주석, `AGENTS.md` 신설(CLAUDE.md 안내), CHANGELOG | 문서 |
 
-*감사 종료. 본 절은 감사 이후의 적용 기록이며, 감사 본문(1~9장)의 판단은 작성 시점 기준이다.*
+미실행: 관리자·UAC 실기 체크리스트와 GUI E2E 스크립트. 이 세션은 비관리자이고, 프로젝트 규칙상 테스트에서 GUI를 띄우지 않는다.
 
----
-
-## 11. 성능 핫패스 감사 (2026-10-19)
-
-- 범위: 입력 지연·CPU·메모리·락 경합에 직접 닿는 경로 — 훅 콜백(`hook_proc`/`mouse_proc`), 500ms 타이머 틱, 페인트, 떼기 확인 타이머, 시작 시점, 업데이트 해시.
-- 방법: 1~10장과 동일(문서 → CodeGraph 4회 → 소스 직접 열람 → 테스트 실행). **코드는 수정하지 않았다.** 프로파일러·실기 GUI 측정은 하지 않았으므로, 아래 수치는 정적 근거 기반 추정치이며 측정값처럼 표현하지 않는다.
-- 전체 결론: **핫패스는 잘 설계돼 있다.** 이벤트당 비용은 락 1회 + O(1) 판정 수준이고, UI 쪽 락 구간은 memcpy 규모, Win32 호출은 락 밖(훅의 비동기 사운드 제외)으로 분리돼 있다. Critical/High 없음, 확정 이슈 2건(Low).
-
-### 11.1 경로별 예산 분석
-
-| 경로 | 주기 | 락·할당 | 판단 |
-|---|---|---|---|
-| `hook_proc` 키 이벤트 | 입력 시 | `SHARED` 1회, `decide_event` O(1), QPC 1회, 할당 없음 | 정상. `VK_PACKET`·주입·표식은 락 전에 통과 |
-| `mouse_proc` 이동·휠 | 초당 수백 회 | 락을 잡기 전 분류·반환, 버튼만 락 | 정상. 이동 폭주가 락을 건드리지 않음 |
-| 차단 시 사운드 | 차단 시 | 락을 쥔 채 `PlaySoundW`(비동기)·폭은 수십 µs | 정상(설계). 아래 반증 참조 |
-| 500ms 틱(`update_stats`) | 2Hz | 스냅샷 1회(수십 KB 복사), 렌더 순수, diff 후 변경분만 `SetWindowTextW` | 정상. 재진입 가드 + 250ms 초과 기록 |
-| 전경 틱 | 2Hz | 작은 락 3회 + 문자열 복제, 프로세스 조회는 창 변경 때만, `SHARED`는 변경 때만 | 정상 |
-| 기록·키 탭 리프레시 | 2Hz | 탭 숨김·키 불변 시 조기 반환, 변경 때만 스냅샷·렌더 | 정상. 상한 5000행, 가상 리스트라 표시는 가시행만 |
-| 떼기 확인 타이머 | 보류 중에만 10ms 주기 | 기상당 락 1회 + 512칸 순회(수 µs) | 정상. 아래 수치 참조 |
-| 페인트 | 무효화 때만 | 더블버퍼 `BitBlt`, 브러시 캐시, 펜은 생성·삭제 쌍 | 정상 |
-| 시작 1회 | 1회 | 사운드 `is_file`·레지스트리·스테이징 청사는 1회성(청소는 별도 스레드) | 정상 |
-
-### 11.2 이슈
-
-### [PERF-001] 업데이트 해시가 파일 전체를 RAM에 적재한다
-
-- **위치:** `src/updater/http.rs` — `download_and_verify` (`38-56`, `Vec`에 `size+1`까지 적재); `crates/kcfix-updater/src/lib.rs` — `sha256_file` (`113-118`, 무제한 `fs::read`)
-- **우선순위:** Low
-- **신뢰도:** Confirmed
-- **문제:** 아티팩트 전체를 메모리에서 해시한다. 앱 측은 매니페스트 선언 크기(상한 512MB+1)로 묶이지만, 헬퍼 측은 파일 크기 그대로 읽는다. 한 번의 업데이트에서 원본이 메모리에 두 번(다운로드 버퍼, 재검증 버퍼) 올라간다.
-- **발생 조건:** 항상. 다만 실제 아티팩트는 수 MB라 일시적 증가분도 수십 MB 수준이다.
-- **영향:** 저사양 PC에서 순간 메모리 스파이크. 데이터 손상·지연 없음(업데이트는 워커·헬퍼에서 수행).
-- **근거:** 코드 직접 확인. 상한·이중 검증 자체는 정확하므로 보안 이슈가 아님을 확인했다.
-- **반증 확인:** `take(size+1)` + `SizeOutOfRange` 검사가 악성 대용량을 막고(`45-47`), 실제 릴리스 산출물은 한 자릿수 MB라 현실 피해가 없다. 그래서 Low이며, 수정보다 향후 과제(스트리밍 해시)가 맞다.
-- **호출/영향 범위:** `prepare_update → download_and_verify`, 헬퍼 `update_executable_with` 2단계. 필터·UI 경로와 무관.
-- **권장 수정 방향:** `Read` 스트리밍 해시(청크 64KB)로 교체. 동작·테스트 기대값은 그대로.
-- **필요한 회귀 테스트:** 기존 해시 테스트 + 100MB급 임시 파일 해시 일치 테스트(스트리밍/일괄 동일 결과).
-
-### [PERF-002] 지속 부하 테스트의 상한이 변별력이 없다
-
-- **위치:** `src/ui/stats.rs` — `render_and_diff_sustained_tick_load` (`539-553`)
-- **우선순위:** Low
-- **신뢰도:** Confirmed
-- **문제:** 1만 회 render+diff에 10초를 허용한다(회당 1ms). 현재 구현은 그보다 1~2자릿수 빠를 것으로 추정되나, 렌더가 느려져도(예: 렌더에 I/O·락이 섞여도) 10초 안에는 통과해 회귀 가드로 작동하지 않는다.
-- **근거:** 테스트 코드 직접 확인. 프로젝트 철칙("약한 assertion 강화")에도 어긋난다.
-- **권장 수정 방향:** 상한을 1초로 강화(여전히 넉넉). 실패하면 그때 원인을 본다.
-- **필요한 회귀 테스트:** 상한 강화 자체가 테스트 변경이다. 별도 신규 테스트 불필요.
-
-### 11.3 반증되어 이슈에서 제외한 것
-
-- **차단 시 `PlaySoundW`가 `SHARED` 락 안에서 실행됨** (`hook.rs` `apply` → `drop_with_sound(&g)`): `SND_ASYNC`라 반환이 빠르고 파일 I/O·할당이 없다(사전 인코딩 버퍼). 빠른 연속 차단에도 입력 지연으로 번지지 않으므로 정상.
-- **UI 쪽 `SHARED` 점유**: `on_save`(256 순회+복사)·`persist_*`(카운터 복사)·`csv_snapshot`(최대 5000행 복제, 사용자 동작 때만) 모두 memcpy 규모이며, `set_autostart`·`config::save`·`hotkeys::apply`·`ShellExecuteW`는 락 밖이다. 훅 대기 시간에 미치는 영향은 µs 단위.
-- **기록 탭 5000행 재렌더**: 변경된 틱·보이는 탭에서만, 행 문자열은 캐시 후 가상 리스트가 가시행만 조회. 상한이 있어 발산하지 않는다.
-- **히스토그램(256×41, 약 43KB) 스냅샷**: 키 탭이 보일 때 2Hz 복사로 수십 µs 수준. `take_snapshot`이 버퍼를 락 밖에 미리 할당해 락 안에서는 복사만 한다(`keys_page.rs:210-223`).
-- **`top_chattered_key` 256 순회**: 스냅샷 락 안에서 실행되나 정수 비교 256회라 무시 가능.
-- **마우스 훅 상시 비용**: 필터가 꺼져 있으면 훅 자체를 설치하지 않아(`set_mouse_filter`), 이동 이벤트 비용은 0이다.
-- **`timeBeginPeriod` 미사용**: `Instant`(QPC) 측정이라 타이머 해상도를 올릴 이유가 없고(부트스트랩 주석), 전력·전역 부작용이 없다.
-
-### 11.4 권장 (코드 수정 없음, 순서만)
-
-1. PERF-002 상한 강화(1초) — 즉시 가능, 위험 없음.
-2. PERF-001 스트리밍 해시 — 다음 업데이트 만질 때 함께. 메모리 상한 테스트를 동반.
-3. 측정 기반 확인(향후): 실기에서 500ms 틱 분포(`kcfix-diag.log`에 이미 느린 틱이 기록됨)와 `render_and_diff` 실측값을 모아 상한을 실측으로 교체.
-
-### 11.5 테스트 증거
-
-- `cargo test --workspace` (exit 0): 195건 전부 통과(3+2+10+169+5+6+0). 성능 관련 포함: `render_and_diff_sustained_tick_load`, `render_*`/`diff_*` 전건, `history` 렌더 테스트, `keys_page` 행 테스트, `debounce` 33건, `hook` 7건, `diag` 2건.
-- `cargo fmt --check`·`clippy -D warnings`: 깨끗(본 감사에서 코드 변경 없음).
-- 측정하지 못한 것: 실기 입력 지연(QPC 수준이라 프로파일러 필요), GUI 틱 실측 분포, 5000행 만재 시 렌더 시간. 런타임 재현·프로파일링은 하지 않았으므로 타이밍 이슈는 `Likely` 이하로만 분류했다(해당 없음).
-
-*성능 감사 종료. 코드는 수정하지 않았으며, 본 장은 기존 문서(1~10장)에 추가된 것이다.*
-
-### 11.6 적용 기록 (성능 2건)
-
-사용자 요청으로 11.2의 2건을 구현했다(테스트 포함, 게이트 통과).
-
-- PERF-002: 상한 10초 → 1초로 강화. 통과(0.02초대, 여유 큼).
-- PERF-001: `download_and_verify`를 64KB 청크 스트리밍(해시+파일 동시 기록, 실패 시 부분 파일 삭제)으로 교체하고, 미사용이 된 `sha256_hex`와 재수출을 제거(프로젝트 규칙). 헬퍼 `sha256_file`도 스트리밍으로 교체. 테스트: `stream_hashed_writes_and_hashes_incrementally`(앱, 확정 empty 다이제스트 오라클), `streamed_file_hash_matches_oneshot_hash`(헬퍼, 기존 모듈에 병합). 전체 197건 통과.
-
----
-
-## 12. 보안 심층 감사 (2026-10-19)
-
-- 범위: 기능과 연관된 보안 위험 — 업데이트 신뢰 체인, 윈도우 메시지, 권한·자동실행, 설정·임시 파일, 입력 훅의 민감 데이터, 버전 파싱. 스타일·취향 제외.
-- 방법: 1~11장과 동일(문서 → CodeGraph 4회 → 소스 직접 열람 → 테스트 실행). **감사 단계에서는 코드를 수정하지 않았다**(11.6의 성능 구현은 별도 사용자 요청). 런타임 침투·실기 UAC·네트워크 MITM은 수행하지 않았다.
-- 전체 결론: **심각한 문제 없음.** 업데이트 신뢰 체인(서명·핀고정·크기·만료·이중 해시)은 전송계층과 독립적으로 위조를 막는다. 남은 것은 로컬 DoS 수준 1건(Low) + 관찰 1건이다.
-
-### 12.1 위협 모델(전제)
-
-- 공격자는 같은 세션의 저권한 프로세스 실행이 가능하다고 가정한다(예: 샌드박스 렌더러).
-- 같은 사용자·중간 무결성 공격자는 이미 파일 삭제·프로세스 종료가 가능하므로, 그 수준에서만 통하는 문제는 심각도를 올리지 않는다.
-- 네트워크 공격자는 서명 키 없이 위조가 불가능해야 한다(전송계층과 무관하게 성립해야 함).
-
-### 12.2 이슈
-
-### [SEC-001] 인증 없는 윈도우 메시지로 종료·상태 변경이 가능하다
-
-- **위치:** `src/ui/ids.rs` — `WM_UPDATE_EXIT` (`138`, `WM_APP + 2`, 인증자 없음); `src/ui/window.rs` — 분기 (`603-608`, `335-336` 경유 메뉴 명령 포함); `src/ui/commands.rs` — `MENU_EXIT` (`177-179`, 확인 없음)
-- **우선순위:** Low
-- **신뢰도:** Likely
-- **문제:** 창 클래스명(`KeyboardChatteringFixMain`)은 고정·공개돼 있어 같은 세션의 프로세스는 창을 찾아 `WM_UPDATE_EXIT`를 게시하면 즉시 종료(`DestroyWindow`, 카운터는 `WM_DESTROY`에서 저장됨), `WM_COMMAND`에 메뉴 ID(1001~1017)를 담으면 종료·통계 초기화·청소 모드·업데이트 확인 등을 실행할 수 있다. UIPI 기본값 덕에 `WM_APP+` 메시지는 저무결성→중간무결성에 차단되지만, `WM_COMMAND`(0x0111)는 허용 목록이라 저무결성 프로세스도 메뉴 명령을 발사할 수 있다. 가장 영향이 큰 것은 확인 없는 즉시 종료와 청소 모드 진입(키보드 입력 동결, Enter·버튼·5분 타임아웃으로 복구)이다.
-- **발생 조건:** 같은 세션에서 코드 실행 + 창 핸들 발견. 원격·네트워크 불가.
-- **영향:** 필터 중단(재실행으로 복구), 통계 초기화(되돌릴 수 없음, 확인 대화상자는 UI 경로에만 있음). 데이터 유출·권한 상승 없음.
-- **근거:** 코드 직접 확인. `ChangeWindowMessageFilterEx` 호출이 저장소 어디에도 없어 기본 UIPI가 그대로 적용됨을 확인했다.
-- **반증 확인:** (1) 같은 사용자·중간 무결성 공격자는 `taskkill`·설정 삭제로 동일 효과를 내므로 새로운 원자적 위협이 아니고, (2) 종료 시 `WM_DESTROY`가 카운터를 저장해 설정·통계 손실이 없으며, (3) 서명·자동실행·파일 교체 등 상위 권한 동작은 메시지로 건드릴 수 없다. 그래서 Low로 분류한다.
-- **호출/영향 범위:** 외부 프로세스 → `wndproc` → `commands::run` 전 메뉴·`DestroyWindow`. 필터 스레드·업데이트 체인과 무관.
-- **권장 수정 방향:** `WM_UPDATE_EXIT`에 기동 시 생성한 64비트 난수(nonce)를 `wParam`/`lParam`으로 동봉·검증(저비용, 동일 사용자 장난까지 차단). 메뉴 경로(`WM_COMMAND`)는 시스템이 생성하므로 nonce를 붙일 수 없어 잔류 수용하되, `MENU_EXIT`에 확인 대화상자를 다는 것을 검토(단, 업데이트 후 자동 종료 경로와 충돌하지 않게 내부 플래그로 구분).
-- **필요한 회귀 테스트:** nonce 불일치 `WM_UPDATE_EXIT`는 무시·일치는 종료를 assert하는 `session_reply`류 순수 판정 테스트(현재 세션 종료 판정 테스트 옆에 배치). GUI 발송 테스트는 금지(프로젝트 철칙).
-
-### [SEC-002] 단일 인스턴스 뮤텍스 선점으로 자동실행이 조용히 꺼질 수 있다(관찰)
-
-- **위치:** `src/app/instance.rs` — `try_acquire_named` (`33-58`), `Local\KeyboardChatteringFix_SingleInstance`
-- **우선순위:** Low
-- **신뢰도:** Speculative
-- **문제:** 같은 세션의 프로세스가 뮤텍스 이름만 선점하면, 부팅 시 `--autostart` 경로는 대화상자 없이 조용히 종료돼 필터가 꺼진 채로 남는다. 일반 경로는 "이미 실행 중" 대화상자가 떠서 드러난다.
-- **근거:** 코드 직접 확인. `CreateMutexW` 실패 시 fail-open(`54-55`)은 별개로, 리소스 고갈 상황에서만 탄다.
-- **반증 확인:** 선점 자체가 같은 세션 코드 실행을 요구하고(그 수준이면 Run 키 삭제 등 더 직접적인 방법이 있음), 지속 상주하려면 부팅마다 선점해야 해서 현실성이 낮다. 그래서 이슈가 아닌 관찰로 기록한다.
-- **권장 수정 방향:** 없음(수용). 원하면 `--autostart` 조용 종료 전에 윈도우 클래스 존재 여부로 실제 인스턴스를 확인하는 1줄 보강을 검토.
-
-### 12.3 반증되어 이슈에서 제외한 것(업데이트 신뢰 체인 중심)
-
-- **매니페스트 위조**: 64KB 상한 → JSON 파싱 → 서명·키·길이 검증 → 정식(canonical) 바이트 검증(`manifest.rs:30-66`) 순서로, 서명 전 필드를 신뢰하지 않는다. 서명 키 없이는 위조 불가이므로 TLS MITM은 가용성 문제로만 축소된다(전송계층 독립).
-- **아티팩트 바꿔치기**: 핀고정 URL이 태그에서 도출된 정확한 URL과 일치해야 하고(`is_valid_artifact_url`), 크기·SHA-256을 다운로드 시와 헬퍼 교체 직전에 각각 검증한다. URL에 태그 외 입력이 들어갈 여지가 없다(`tag = v + 숫자.점 버전` 강제).
-- **버전 파싱**: `version_tuple`은 숫자·점만 허용하고 오버플로우는 `unwrap_or(0)`으로 fail-closed(패닉 없음). 빈 조각·비어 있음은 거부한다.
-- **정식 JSON 차이(DEL 등)**: Rust `is_control`과 Python `json.dumps`의 이스케이프 범위가 달라 제어문자가 들어간 매니페스트는 서명 불일치로 실패한다 — fail-closed이며, 서명 스크립트의 고정 필드에 제어문자가 들어갈 수 없어 가용성에도 영향이 없다.
-- **다운그레이드 재전송**: 11장 이전부터 알려진 잔류(선택적 `expires_at` + 버전 비교). 키 탈취를 전제로 하며 완화책은 `docs/UPDATE.md`에 문서화했다. 중복 기록하지 않는다.
-- **헬퍼 CLI**: 셸 없이 `Command` 직접 실행, 경로는 앱이 지정한 값만. `--relaunch-arg=` 형태는 구 헬퍼와의 계약 테스트가 보증. 환경 변수(`KCFIX_LANG`·준비 파일)는 표시·동기화 용도이며, 준비 파일 쓰기 내용은 pid 숫자뿐이다.
-- **자동실행·작업**: Run 값은 인용 경로 + 고정 플래그, 자기 값만 변경. 작업 XML은 이스케이프 처리. `schtasks`는 무창·고정 인자.
-- **설정 파일 변조**: 모든 수치 클램프, 불리언 규칙 통일(10장 적용), 미지정 키 무시, 핫키·앱 목록은 파싱 실패 시 안전 기본. 설정으로 코드 실행·권한 변경에 이를 수 없다.
-- **가져오기 검증이 약함**(헤더 1줄 확인): 값 자체가 전부 클램프·검증되므로 통과돼도 해가 없다. 확인했다.
-- **CSV 수식 인젝션**: 셀 어휘가 내부 VK 이름·시각·숫자로 고정돼 불가. 확인했다.
-- **사운드 경로**: 존재하는 파일만, 재생만(`PlaySoundW`), 실패 시 시스템음 폴백. 실행 아님.
-- **프로브·주입 표식 위조**: 표식은 훅 안에서만 의미를 갖고, 프로브 카운트는 훅이 살았을 때만 증가하므로 죽은 훅을 속일 수 없다. 표식을 단 외부 입력이 필터를 우회해도 공격자 자신의 입력일 뿐이다.
-- **민감 데이터**: 후크가 평문 키 입력을 보는 것은 설계상 필수이며, 키별 내용은 메모리에만(로그 상한 5000, 영속화되는 것은 카운터뿐), 덤프·전송 경로가 없다. 설정 파일의 `stat.XX`는 사용 빈도 수준의 메타데이터로 사용자 로컬 ACL 아래에 있다. CVE급 문제 아님.
-- **진단 로그**: `%TEMP%` 회전 256KB·1세대라 디스크 고갈 불가, 내용은 시각·지연·재시작뿐(PII 없음). 사전 생성·읽기 공격은 best-effort 실패로 귀결.
-
-### 12.4 문서 불일치(보안 관련)
-
-- 없음. README의 `Ed25519_Signed` 배지, CLAUDE의 "서명·핀고정·이중 해시" 서술, 한계절(UIPI·보안 데스크톱)의 설명이 모두 코드와 일치함을 확인했다.
-
-### 12.5 테스트 증거
-
-- `cargo test --workspace` (exit 0): 197건 전부 통과(4+2+10+170+5+6+0). 보안 관련 포함: 매니페스트 서명·핀·만료·버전 테스트, `helper_compatible` 범위 테스트, 롤백·재실행 테스트, 핫키 파싱 거부 테스트, 불리언·클램프·폴백 저장 테스트.
-- `cargo fmt --check`·`clippy -D warnings`: 깨끗.
-- 수행하지 않은 것: 실기 UAC·무결성 레벨 교차 메시지 실험, 네트워크 MITM, 퍼징. 같은 이유로 물리적 도달 이슈는 `Likely` 이하로만 분류했다(SEC-001이 해당).
-
-*보안 감사 종료. 코드는 수정하지 않았으며, 본 장은 기존 문서(1~11장)에 추가된 것이다.*
-
-### 12.6 적용 기록 (SEC-001)
-
-사용자 요청으로 12.2의 SEC-001 중 `WM_UPDATE_EXIT` 부분을 구현했다(테스트 포함, 게이트 통과).
-
-- 기동 시 64비트 nonce 생성(`BCryptGenRandom`, 불가 시 OS 시드 폴백, 0 방지) → `on_create`에서 1회 발행.
-- 발송처 2곳(업데이트 워커·승격 재실행)이 `wParam`에 nonce 동봉, 핸들러가 불일치 시 `DefWindowProcW`로 무시. 기존 `WPARAM(0)` 발송은 모두 교체해 회귀 없음(승격 경로 포함).
-- 테스트: `update_exit_needs_this_process_nonce`(일치·0·오답·미발행 상태). 전체 198건 통과.
-- `Win32_Security_Cryptography` feature 1줄 추가(컴파일 타임만, 의존성 버전 불변).
-
-`MENU_EXIT` 확인 대화상자는 적용하지 않았다. 사유: (1) 업데이트·승격 자동 종료 경로는 `MENU_EXIT`을 쓰지 않아 기능과 무관하고, (2) 종료마다 모달을 띄우는 것은 Low 등급에 비해 UX 회귀가 크며, (3) `WM_COMMAND` 잔류 위험은 UIPI(`WM_APP+` 차단 유지) + 동일 사용자 신뢰 경계로 수용한다는 12.2의 판단이 그대로 유효하다. 재검토 조건: 저무결성 프로세스의 메뉴 발송이 실제 악용된 사례가 나오면 그때 다룬다.
-
-
+*적용 기록 끝. 1~9장의 판단은 감사 시점 기준이다.*
