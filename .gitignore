@@ -14,3 +14,7 @@ published-update.json
 # CodeGraph & Local Agent Cache
 .codegraph/
 .system_generated/
+
+# Added by environment hygiene
+__pycache__/
+
