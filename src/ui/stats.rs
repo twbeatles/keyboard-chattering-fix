@@ -126,6 +126,7 @@ pub(crate) fn render_stats(s: &Strings, snap: &StatsSnapshot) -> RenderedStats {
         snap.elevated_foreground,
         &snap.hook_restarted_at,
     ) {
+        (Some(Pause::Timed(until)), _, _) => fill(s.note_paused_until_fmt, &[until]),
         (Some(Pause::App(exe)), _, _) => fill(s.note_suspended_fmt, &[exe]),
         (Some(Pause::Fullscreen(exe)), _, _) => fill(s.note_fullscreen_fmt, &[exe]),
         (None, true, _) if protecting => s.note_elevated.to_string(),

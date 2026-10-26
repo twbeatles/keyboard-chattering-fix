@@ -699,10 +699,38 @@ pub(crate) static SPECS: &[Spec] = &[
         Some(|s| s.filter_mouse),
     ),
     c(
+        ID_MOUSE_MS_LABEL,
+        Kind::Label,
+        KEYS,
+        (32, 163, 150, 20),
+        Some(|s| s.mouse_threshold_label),
+    ),
+    c(
+        ID_MOUSE_MS_EDIT,
+        Kind::NumberEdit,
+        KEYS,
+        (190, 160, 56, 25),
+        None,
+    ),
+    c(
+        ID_MOUSE_MS_UNIT,
+        Kind::Label,
+        KEYS,
+        (252, 163, 26, 20),
+        Some(|s| s.unit_ms),
+    ),
+    c(
+        ID_BTN_MOUSE_MS_SET,
+        Kind::Button,
+        KEYS,
+        (282, 158, 80, 29),
+        Some(|s| s.key_set_btn),
+    ),
+    c(
         ID_MOUSE_HINT,
         Kind::Hint,
         KEYS,
-        (32, 158, 416, 46),
+        (32, 194, 416, 46),
         Some(|s| s.mouse_hint),
     ),
     // Keys & mouse: per-key thresholds card
@@ -710,17 +738,17 @@ pub(crate) static SPECS: &[Spec] = &[
         ID_KEYS_TITLE,
         Kind::Section,
         KEYS,
-        (32, 232, 280, 20),
+        (32, 268, 280, 20),
         Some(|s| s.card_keys),
     ),
     c(
         ID_BTN_KEY_STATS,
         Kind::Button,
         KEYS,
-        (320, 226, 128, 29),
+        (320, 262, 128, 29),
         Some(|s| s.key_stats_btn),
     ),
-    c(ID_KEYS_LIST, Kind::List, KEYS, (32, 258, 416, 222), None),
+    c(ID_KEYS_LIST, Kind::List, KEYS, (32, 296, 416, 184), None),
     c(ID_KEYS_COMBO, Kind::Combo, KEYS, (32, 490, 150, 240), None),
     c(
         ID_KEYS_EDIT,
@@ -795,7 +823,7 @@ pub(crate) fn cards(page: Page, cleaning: bool) -> &'static [(i32, i32, i32, i32
             (16, 493, 448, 103),
         ],
         Page::Advanced => &[(16, 118, 448, 248), (16, 374, 448, 73), (16, 455, 448, 142)],
-        Page::Keys => &[(16, 118, 448, 92), (16, 220, 448, 382)],
+        Page::Keys => &[(16, 118, 448, 130), (16, 256, 448, 346)],
     }
 }
 

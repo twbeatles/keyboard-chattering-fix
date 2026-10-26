@@ -43,7 +43,7 @@ Featuring a native Windows 11 Fluent Card interface, real-time diagnostic teleme
   - `Release` (Default): Measures elapsed time from key release (`Up`) to the next press (`Down`). Highly robust against prolonged holds.
   - `Press`: Measures interval between consecutive accepted presses (`Down` to `Down`).
 - **Auto-Repeat Preservation**: Holding a key forwards continuous down events naturally without false-positive blocks — including after a contact bounce in the middle of a hold, where the next auto-repeat resumes the key instead of being blocked as more chatter.
-- **Mouse Button Chatter (optional)**: Left / right / middle / side buttons can be filtered too (a single click registering as a double-click). The mouse hook is installed only while this is on.
+- **Mouse Button Chatter (optional)**: Left / right / middle / side buttons can be filtered too (a single click registering as a double-click), with their own block window (`iMouseThreshold`, 30 ms by default) so double-clicks keep working. The mouse hook is installed only while this is on.
 - **Release Delay (optional, `iReleaseDeferMs`)**: Holds each release of a held key or button back for a few ms. If the contact bounces back in that time, applications never see the key released — no more dropped movement keys or broken mouse drags in games.
 - **Physical-Key Accuracy**: Keys that share a code (main Enter vs. numpad Enter, arrow cluster vs. numpad arrows) are timed separately.
 - **Microsecond Glitch Filter (`min_chatter_ms`)**: Filters out 0ms-class electrical glitches and buggy hardware events cleanly.
@@ -62,20 +62,21 @@ Featuring a native Windows 11 Fluent Card interface, real-time diagnostic teleme
 - **Recent Blocked Key Badge**: Displays the exact virtual key name and observed gap in milliseconds (`Last blocked: Space (32ms)`).
 - **Top Problematic Key Detection**: Tracks keystrokes per key (0–255) to automatically diagnose your most degraded switch and its failure rate.
 - **History Tab**: Filter the event log by *blocked only* / *all input* / *per-key summary* and by key name; blocked rows are highlighted with their gap in ms. Double-click a per-key row to change that key's threshold. The **Clear key stats** button on the Keys & Mouse tab forgets one key's counters after you replace its switch.
-- **Threshold Suggestions**: For every key, the gaps between release and the next press are collected in a small histogram. When chatter (a few ms) and your real presses (tens of ms) are separated, the Keys & Mouse tab suggests a threshold just above the chatter; when they overlap, it tells you the switch needs cleaning or replacing.
+- **Threshold Suggestions**: For every key, the gaps between release and the next press are collected in a small histogram that is kept across restarts, so rare chatter adds up. When chatter (a few ms) and your real presses (tens of ms) are separated, the Keys & Mouse tab suggests a threshold just above the chatter; when they overlap, it tells you the switch needs cleaning or replacing.
 - **100+ Virtual Key Name Map**: Human-readable names for media keys, volume controls, numpad, F1–F24, and navigation keys.
 
 #### 4. Helpful Tools & Customization
 - **🧹 Keyboard Cleaning Mode**: Locks all key presses so you can clean and wipe keycaps safely. Press `Enter` or click **Finish cleaning** to unlock; it also ends by itself after 5 minutes (`iCleaningTimeoutMin`).
 - **🔊 Custom Audio (.wav) & Tester**: Play custom `.wav` sounds or system beeps on chatter detection, complete with an in-app test button.
 - **⚙️ Windows Keyboard Control Panel**: One-click shortcut to launch Windows Keyboard Properties (`control.exe keyboard`) to calibrate repeat delays and rates.
-- **Per-Key Custom Overrides**: Keep a low global threshold (e.g. 50ms) and give erratic keys or mouse buttons their own, in the **Keys & Mouse** tab (applied and saved at once) or in the settings file.
+- **Per-Key Custom Overrides**: Keep a low global threshold (e.g. 50ms) and give erratic keys or mouse buttons their own, in the **Keys & Mouse** tab (applied and saved at once) or in the settings file. `0` leaves a key or button unfiltered (game double-taps, a mouse button you do not want touched).
 - **Window Close Customization (`bCloseToTray`)**: Choose whether the close button (X) minimizes to tray or exits completely.
 - **⌨️ Global Hotkeys**: Toggle protection or start cleaning mode from anywhere (e.g. `Ctrl+Alt+F12`, Advanced tab). Menus show the registered hotkeys.
 - **🎮 Automatic Pause**: Pause while listed apps (`game.exe; obs64.exe`) or any full-screen app is in front. The badge shows "◐ Paused" and the Home tab says why.
+- **⏸ Pause for a Set Time**: Tray menu or Tools > **Pause for** 15 minutes / 1 hour; protection comes back by itself (a click on the status badge resumes at once).
 - **🛡️ Administrator Windows**: The Home tab warns when a window running as administrator is in front (its input is out of reach). **Tools > Run as administrator** covers it; while elevated, **Start as administrator at sign-in** registers a scheduled task.
 - **🩺 Hook Watchdog**: If Windows silently drops the keyboard hook, the program notices (a probe while you are active) and reinstalls it.
-- **📤 Export / Import**: History as CSV (opens in Excel), settings export and import (this PC's statistics are kept).
+- **📤 Export / Import**: History as CSV with full date and time (opens in Excel), settings export and import (this PC's statistics are kept). Events from an earlier day show their date in the History tab.
 - **💼 Portable Mode**: Put a `settings.ini` next to the executable to keep settings there instead of `%APPDATA%`.
 - **Tray State**: The tray icon turns gray while protection is paused or off.
 
@@ -134,6 +135,7 @@ sMeasureFrom=release   # Measurement baseline: "release" or "press"
 iMinChatterMs=0        # Ignore chatter intervals below this limit (ms)
 bExcludeInjected=1     # Ignore synthetic events from AHK/IME/macros (1=On)
 bFilterMouse=0         # Also filter mouse button chatter (1=On)
+iMouseThreshold=30     # Block window of mouse buttons without their own key.XX (ms, 1–1000)
 iReleaseDeferMs=0      # Hold releases of held keys back this long (0=off, 0–100; 20–40 typical)
 sAutoDisableApps=      # Pause while these apps are in front, e.g. "game.exe; obs64.exe"
 bAutoDisableFullscreen=0 # Pause while any full-screen app is in front (1=On)
@@ -145,9 +147,11 @@ iCleaningTimeoutMin=5  # Cleaning mode ends by itself after N minutes (0 = never
 key.48=120             # Custom 120ms threshold for 'H' key (0x48)
 key.20=80              # Custom 80ms threshold for Spacebar (0x20)
 key.01=30              # Custom 30ms threshold for the left mouse button
+key.02=0               # 0 = never filter this key or button (right mouse button)
 ```
 
 The **Keys & Mouse** tab edits the same `key.XX` lines and writes them immediately; edits made directly in the file while the program runs are kept.
+At the end of the file the program keeps its statistics (`stat.XX`) and the measured gaps behind the suggestions (`sHistMeasure`, `hist.XX`); leave those lines to it. Switching the measurement baseline (`sMeasureFrom`) starts the gap measurement over.
 A `#` or `;` after a space starts a comment, as in the sample (the sound path keeps everything). Files saved in the system code page instead of UTF-8 are read too. A start at sign-in always goes to the tray, whatever `bMinimizeOnLaunch` says.
 
 ---
@@ -255,7 +259,7 @@ The compiled binary will be placed at `target/release/keyboard-chattering-fix.ex
   - `Release` (기본값): 키를 뗀(`Up`) 시점부터 다음 눌린(`Down`) 시점까지의 시간을 측정하여 느린 릴리스에서도 완벽하게 보호합니다.
   - `Press`: 이전 정상 입력(`Down`) 시점부터 다음 입력 시점까지의 간격을 측정합니다.
 - **오토리핏(연속 입력) 보존**: 키를 누르고 있을 때 발생하는 연속 Down 입력은 차단하지 않고 정상 전달합니다. 누르고 있는 도중 접점이 한 번 튀어도, 이어지는 오토리핏은 채터링으로 막지 않고 키 입력을 바로 이어갑니다.
-- **마우스 버튼 채터링 차단 (선택)**: 왼쪽·오른쪽·가운데·옆 버튼의 "한 번 클릭했는데 더블클릭" 현상도 막을 수 있습니다. 켜 둔 동안에만 마우스 훅을 설치합니다.
+- **마우스 버튼 채터링 차단 (선택)**: 왼쪽·오른쪽·가운데·옆 버튼의 "한 번 클릭했는데 더블클릭" 현상도 막을 수 있습니다. 더블클릭이 씹히지 않도록 버튼에는 별도 기준(`iMouseThreshold`, 기본 30ms)을 씁니다. 켜 둔 동안에만 마우스 훅을 설치합니다.
 - **떼기 확인 시간 (선택, `iReleaseDeferMs`)**: 누르고 있는 키·버튼의 뗌을 몇 ms 보류합니다. 그 사이 접점이 다시 붙으면 앱은 키가 떼어진 것을 보지 못하므로, 게임 이동 키 끊김이나 마우스 드래그 끊김이 사라집니다.
 - **물리 키 단위 판단**: 메인 Enter와 숫자패드 Enter, 방향키와 숫자패드 방향키처럼 같은 코드를 쓰는 키를 따로 잽니다.
 - **하드웨어 글리치 필터 (`min_chatter_ms`)**: 0ms 급 드라이버 오류나 기기 이상 입력을 필터링 예외로 지정할 수 있습니다.
@@ -274,20 +278,21 @@ The compiled binary will be placed at `target/release/keyboard-chattering-fix.ex
 - **최근 차단 키 알림 칩**: 가장 최근 차단된 키와 실제 바운스 간격(`최근 차단: Space (32ms 간격)`)을 실시간 표시합니다.
 - **최다 불량 키(Top Chatter Key) 자동 진단**: 256개 가상키별 누적 타건수와 차단수를 분석하여 가장 상태가 나쁜 스위치와 불량 비율을 자동 추적합니다.
 - **기록 탭 (필터 보기)**: "막은 입력만 / 모든 입력 / 키별 통계" 보기와 키 이름 검색으로 차단 이력을 걸러 볼 수 있으며, 막은 입력은 간격(ms)과 함께 강조 표시됩니다. 키별 통계 행을 두 번 클릭하면 그 키의 기준을 바로 바꿀 수 있습니다. 스위치를 교체한 뒤에는 [키·마우스] 탭의 **이 키 통계 지우기** 버튼으로 그 키의 누적 기록을 지울 수 있습니다.
-- **권장 기준 자동 계산**: 키마다 "뗀 순간 → 다음 누름" 간격을 작은 히스토그램으로 모읍니다. 채터링(수 ms)과 평소 입력(수십 ms) 사이가 비어 있으면 [키·마우스] 탭이 채터링 바로 위의 기준을 권장하고, 둘이 겹치면 스위치 청소·교체를 안내합니다.
+- **권장 기준 자동 계산**: 키마다 "뗀 순간 → 다음 누름" 간격을 작은 히스토그램으로 모으고, 재시작해도 이어서 쌓아 드물게 튀는 키도 잡아냅니다. 채터링(수 ms)과 평소 입력(수십 ms) 사이가 비어 있으면 [키·마우스] 탭이 채터링 바로 위의 기준을 권장하고, 둘이 겹치면 스위치 청소·교체를 안내합니다.
 - **100+개 전체 가상키 이름 매핑**: 미디어 키, 볼륨, 넘패드, F1~F24, 방향키 등을 직관적인 이름으로 출력합니다.
 
 #### 4. 유용한 도구 및 편의 기능
 - **🧹 키보드 청소 모드 (Clean Keyboard)**: 키캡을 닦을 때 키가 잘못 입력되지 않도록 모든 키 누름을 일시 차단합니다. 청소 후 `Enter` 키를 누르거나 **청소 끝내기** 버튼을 클릭하면 즉시 잠금이 해제되고, 잊어도 5분 뒤 자동으로 끝납니다(`iCleaningTimeoutMin`).
 - **🔊 커스텀 알림음 (.wav) & 사운드 테스트**: 채터링 차단 시 기본 비프음 외에 사용자가 지정한 `.wav` 효과음을 재생할 수 있으며, UI에서 즉시 테스트 청취가 가능합니다.
 - **⚙️ Windows 키보드 설정 바로가기**: `control.exe keyboard`를 원클릭으로 호출하여 키 반복 속도 및 지연 시간을 조율합니다.
-- **키별 개별 임계값 (Per-Key Override)**: 전체 키에는 50ms 등 낮은 전역값을 두고, 말썽인 키나 마우스 버튼에만 따로 기준을 줄 수 있습니다. [키·마우스] 탭에서 바로 적용·저장되며, 설정 파일로도 지정할 수 있습니다.
+- **키별 개별 임계값 (Per-Key Override)**: 전체 키에는 50ms 등 낮은 전역값을 두고, 말썽인 키나 마우스 버튼에만 따로 기준을 줄 수 있습니다. [키·마우스] 탭에서 바로 적용·저장되며, 설정 파일로도 지정할 수 있습니다. `0`으로 두면 그 키·버튼은 거르지 않습니다(게임의 더블 탭, 건드리고 싶지 않은 마우스 버튼 등).
 - **창 닫기 동작 커스터마이징 (`bCloseToTray`)**: 창 닫기(X 버튼) 시 트레이로 최소화할지, 완전 종료할지 선택 가능합니다.
 - **⌨️ 전역 단축키**: 어디서든 보호 켜기/끄기, 청소 모드 시작(예: `Ctrl+Alt+F12`, 고급 탭). 메뉴에 등록된 단축키가 표시됩니다.
 - **🎮 자동 일시 중지**: 지정한 프로그램(`game.exe; obs64.exe`)이나 전체 화면 앱이 앞에 있으면 잠시 멈춥니다. 상태 표시가 "◐ 잠시 멈춤"으로 바뀌고 홈 화면에 이유가 나옵니다.
+- **⏸ 시간 정해 잠시 멈추기**: 트레이 메뉴나 [도구] 메뉴에서 15분 / 1시간 동안 멈추면, 시간이 지나 저절로 다시 켜집니다(상태 표시를 누르면 바로 다시 켜짐).
 - **🛡️ 관리자 권한 창 대응**: 관리자 권한 창이 앞에 있으면(그 창의 입력은 걸러지지 않음) 홈 화면에 안내합니다. **도구 > 관리자 권한으로 다시 실행**으로 해결하고, 관리자 권한 실행 중에는 **로그인할 때 관리자 권한으로 자동 실행**(작업 스케줄러)을 켤 수 있습니다.
 - **🩺 훅 감시**: Windows가 키보드 훅을 알림 없이 떼어 내면 감지해(사용 중일 때만 확인 신호를 보냄) 다시 설치합니다.
-- **📤 내보내기 / 가져오기**: 기록을 CSV로(엑셀에서 바로 열림), 설정 내보내기·가져오기(이 PC의 통계는 유지).
+- **📤 내보내기 / 가져오기**: 기록을 날짜·시각이 모두 담긴 CSV로(엑셀에서 바로 열림), 설정 내보내기·가져오기(이 PC의 통계는 유지). 기록 탭에서도 오늘이 아닌 입력은 날짜를 함께 보여 줍니다.
 - **💼 포터블 모드**: 실행 파일 옆에 `settings.ini`를 두면 `%APPDATA%` 대신 그 파일을 씁니다.
 - **트레이 상태 표시**: 보호가 꺼졌거나 잠시 멈추면 트레이 아이콘이 회색으로 바뀝니다.
 
@@ -346,6 +351,7 @@ sMeasureFrom=release   # 간격 측정 기준 ("release" 또는 "press")
 iMinChatterMs=0        # 이 값보다 작은 간격은 결함 입력으로 간주하여 통과
 bExcludeInjected=1     # 외부 매크로/IME 합성 입력 제외 (1=권장)
 bFilterMouse=0         # 마우스 버튼 채터링도 막기 (1=켜짐)
+iMouseThreshold=30     # 개별 key.XX가 없는 마우스 버튼의 차단 기준(ms, 1~1000)
 iReleaseDeferMs=0      # 누르고 있는 키의 뗌을 이만큼 보류 (0=끔, 0~100, 보통 20~40)
 sAutoDisableApps=      # 이 프로그램이 앞에 있으면 잠시 멈춤 (예: "game.exe; obs64.exe")
 bAutoDisableFullscreen=0 # 전체 화면 앱이 앞에 있으면 잠시 멈춤 (1=켜짐)
@@ -357,9 +363,11 @@ iCleaningTimeoutMin=5  # 청소 모드 자동 종료(분, 0=끄지 않음)
 key.48=120             # 'H' 키(0x48)에만 120ms 적용
 key.20=80              # 스페이스바(0x20)에만 80ms 적용
 key.01=30              # 마우스 왼쪽 버튼에만 30ms 적용
+key.02=0               # 0 = 이 키·버튼은 거르지 않음 (마우스 오른쪽 버튼)
 ```
 
 [키·마우스] 탭은 같은 `key.XX` 줄을 편집하며 바로 파일에 씁니다. 프로그램 실행 중에 파일을 직접 고친 내용도 보존됩니다.
+파일 끝에는 프로그램이 통계(`stat.XX`)와 권장값 계산용 입력 간격(`sHistMeasure`, `hist.XX`)을 기록합니다. 이 줄들은 손대지 마세요. 간격 측정 기준(`sMeasureFrom`)을 바꾸면 간격은 처음부터 다시 잽니다.
 위 예시처럼 공백 뒤의 `#`·`;`부터는 주석으로 무시합니다(사운드 경로는 그대로 둠). UTF-8이 아닌 시스템 코드 페이지로 저장한 파일도 읽습니다. 로그인할 때 자동으로 시작되면 `bMinimizeOnLaunch`와 관계없이 항상 트레이로 시작합니다.
 
 ---

@@ -336,7 +336,7 @@ unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             match current_page() {
                 _ if showing_cleaning() => {}
                 Page::Settings | Page::Advanced => on_save(hwnd),
-                Page::Keys => keys_page::apply_override(hwnd),
+                Page::Keys => keys_page::on_enter(hwnd),
                 _ => {}
             }
             return;
@@ -399,6 +399,7 @@ unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             (ID_BTN_KEY_SET, BN_CLICKED) => keys_page::apply_override(hwnd),
             (ID_BTN_KEY_RESET, BN_CLICKED) => keys_page::clear_override(hwnd),
             (ID_BTN_KEY_STATS, BN_CLICKED) => keys_page::clear_key_stats(hwnd),
+            (ID_BTN_MOUSE_MS_SET, BN_CLICKED) => keys_page::apply_mouse_threshold(hwnd),
             _ => {}
         }
     }
@@ -634,6 +635,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             WM_TIMER => {
                 commands::cleaning_tick(hwnd);
+                commands::pause_tick(hwnd);
                 if foreground::tick(hwnd) {
                     super::stats::invalidate();
                 }

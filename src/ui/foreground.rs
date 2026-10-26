@@ -1,11 +1,15 @@
 //! Foreground check on the 500 ms timer: pause protection while a listed or
-//! full-screen app is in front (games, anti-cheat), and notice windows that
-//! run as administrator, whose input a non-elevated hook cannot see.
+//! full-screen app is in front (games, anti-cheat), or for a set time
+//! (tray menu), and notice windows that run as administrator, whose input a
+//! non-elevated hook cannot see.
 //!
 //! The process name and elevation are looked up only when the foreground
 //! window changes; the hook reads a single `suspended` flag.
 
-use std::sync::{Mutex, OnceLock};
+use std::{
+    sync::{Mutex, OnceLock},
+    time::Instant,
+};
 
 use windows::{
     Win32::{
@@ -63,10 +67,18 @@ pub(crate) fn covers_monitor(win: RECT, monitor: RECT) -> bool {
 /// Why protection is paused.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Pause {
+    /// Paused for a set time, until this local time (`HH:MM`).
+    Timed(String),
     /// A listed app (its file name).
     App(String),
     /// A full-screen app (its file name).
     Fullscreen(String),
+}
+
+/// A pause for a set time wins over the app in front: it holds whatever
+/// window is active, including this program's own.
+pub(crate) fn with_timed_pause(timed: Option<String>, app: Option<Pause>) -> Option<Pause> {
+    timed.map(Pause::Timed).or(app)
 }
 
 pub(crate) fn pause_reason(
@@ -108,6 +120,28 @@ static CACHE: Mutex<Cache> = Mutex::new(Cache {
 });
 /// (pause reason, elevated window in front while we are not elevated).
 static STATUS: Mutex<(Option<Pause>, bool)> = Mutex::new((None, false));
+/// Pause for a set time: when it ends, and that local time as `HH:MM`.
+static TIMED: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+
+/// Start (`Some`) or cancel (`None`) a pause for a set time. The next
+/// [`tick`] applies it.
+pub(crate) fn set_timed_pause(until: Option<(Instant, String)>) {
+    *TIMED.lock().unwrap() = until;
+}
+
+pub(crate) fn timed_pause_active() -> bool {
+    TIMED.lock().unwrap().is_some()
+}
+
+/// Clear a pause for a set time that has run out; `true` when one did.
+pub(crate) fn end_expired_pause(now: Instant) -> bool {
+    let mut timed = TIMED.lock().unwrap();
+    if timed.as_ref().is_some_and(|(until, _)| now >= *until) {
+        *timed = None;
+        return true;
+    }
+    false
+}
 
 /// Apply the saved choices (startup and every save).
 pub(crate) fn configure(apps: &str, fullscreen: bool) {
@@ -216,7 +250,8 @@ pub(crate) unsafe fn tick(own: HWND) -> bool {
             let c = CONFIG.lock().unwrap();
             (c.apps.clone(), c.fullscreen)
         };
-        let next = if fg.is_invalid() || fg == own {
+        let timed = TIMED.lock().unwrap().as_ref().map(|(_, at)| at.clone());
+        let mut next = if fg.is_invalid() || fg == own {
             (None, false)
         } else {
             let (exe, elevated) = {
@@ -238,6 +273,7 @@ pub(crate) unsafe fn tick(own: HWND) -> bool {
             let reason = pause_reason(listed, fullscreen, pause_fullscreen, &exe);
             (reason, elevated && !self_elevated())
         };
+        next.0 = with_timed_pause(timed, next.0);
         let changed = {
             let mut st = STATUS.lock().unwrap();
             let changed = *st != next;
@@ -302,5 +338,29 @@ mod tests {
         );
         assert_eq!(pause_reason(false, true, false, "video.exe"), None);
         assert_eq!(pause_reason(false, false, true, "x.exe"), None);
+    }
+
+    #[test]
+    fn a_timed_pause_wins_over_the_app_in_front() {
+        let app = Some(Pause::App("game.exe".into()));
+        assert_eq!(
+            with_timed_pause(Some("14:30".into()), app.clone()),
+            Some(Pause::Timed("14:30".into()))
+        );
+        assert_eq!(with_timed_pause(None, app.clone()), app);
+        assert_eq!(with_timed_pause(None, None), None);
+    }
+
+    #[test]
+    fn a_timed_pause_ends_once_its_time_is_up() {
+        let start = Instant::now();
+        let until = start + std::time::Duration::from_secs(900);
+        set_timed_pause(Some((until, "14:30".into())));
+        assert!(timed_pause_active());
+        assert!(!end_expired_pause(start));
+        assert!(timed_pause_active());
+        assert!(end_expired_pause(until));
+        assert!(!timed_pause_active());
+        assert!(!end_expired_pause(until), "ends only once");
     }
 }

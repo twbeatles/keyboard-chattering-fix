@@ -49,6 +49,16 @@ pub fn slot_of(vk: usize, extended: bool) -> usize {
     (vk & 0xFF) | (usize::from(extended) << 8)
 }
 
+/// Default block window of mouse buttons (`iMouseThreshold`): below the
+/// release-to-press gap of a quick double-click, above contact bounce.
+pub const MOUSE_THRESHOLD_DEFAULT_MS: u64 = 30;
+
+/// Virtual-key codes the mouse hook uses for buttons (left, right, middle,
+/// X1, X2). 0x03 is `VK_CANCEL`, a keyboard key.
+pub fn is_mouse_button(vk: usize) -> bool {
+    matches!(vk, 0x01 | 0x02 | 0x04..=0x06)
+}
+
 /// Longest allowed release delay (`iReleaseDeferMs`).
 pub const RELEASE_DEFER_MAX_MS: u64 = 100;
 
@@ -76,6 +86,9 @@ pub enum Decision {
 /// holding a key never loses characters.
 pub struct Debouncer {
     global_threshold: Duration,
+    /// Used for mouse buttons without a per-key override.
+    mouse_threshold: Duration,
+    /// Zero means the key is never filtered.
     per_key: [Option<Duration>; 256],
     measure_from: MeasureFrom,
     min_chatter: Duration,
@@ -118,6 +131,7 @@ impl Debouncer {
     pub fn new(threshold_ms: u64) -> Self {
         Self {
             global_threshold: Duration::from_millis(threshold_ms.clamp(1, 1000)),
+            mouse_threshold: Duration::from_millis(MOUSE_THRESHOLD_DEFAULT_MS),
             per_key: [None; 256],
             measure_from: MeasureFrom::Release,
             min_chatter: Duration::ZERO,
@@ -143,9 +157,29 @@ impl Debouncer {
         }
     }
 
-    /// Gaps measured for `vk` since startup or the last statistics reset.
+    /// Gaps measured for `vk` since the last statistics reset (kept across
+    /// restarts in the settings file).
     pub fn gap_histogram(&self, vk: u8) -> &GapHistogram {
         &self.gap_hist[vk as usize]
+    }
+
+    /// Every key's measured gaps (copied into the settings on save).
+    pub fn gap_histograms(&self) -> &[GapHistogram; 256] {
+        &self.gap_hist
+    }
+
+    /// Adopt the measured gaps saved by an earlier run (startup).
+    pub fn set_gap_histograms(&mut self, hist: &[GapHistogram; 256]) {
+        *self.gap_hist = *hist;
+    }
+
+    /// Forget every measured gap: a gap measured from the other baseline
+    /// ([`MeasureFrom`]) means something else and must not be mixed in.
+    /// Counters are kept.
+    pub fn clear_gap_histograms(&mut self) {
+        for h in self.gap_hist.iter_mut() {
+            *h = [0; GAP_BUCKETS];
+        }
     }
 
     fn record_gap(&mut self, vk: usize, gap: Duration) {
@@ -208,12 +242,29 @@ impl Debouncer {
     }
 
     /// Effective threshold for `vk` in ms and whether it is a per-key
-    /// override (`key.XX` in the settings file) rather than the global one.
+    /// override (`key.XX` in the settings file) rather than the global one
+    /// (or, for a mouse button, the mouse one). 0 means "never filtered".
     pub fn key_threshold_ms(&self, vk: u8) -> (u64, bool) {
         match self.per_key[vk as usize] {
             Some(d) => (d.as_millis() as u64, true),
-            None => (self.threshold_ms(), false),
+            None => (
+                self.effective_threshold(vk as usize).as_millis() as u64,
+                false,
+            ),
         }
+    }
+
+    /// Block window of mouse buttons without their own (`iMouseThreshold`).
+    pub fn set_mouse_threshold_ms(&mut self, ms: u64) {
+        self.mouse_threshold = Duration::from_millis(ms.clamp(1, 1000));
+    }
+
+    pub fn mouse_threshold_ms(&self) -> u64 {
+        self.mouse_threshold.as_millis() as u64
+    }
+
+    pub fn measure_from(&self) -> MeasureFrom {
+        self.measure_from
     }
 
     pub fn set_threshold_ms(&mut self, ms: u64) {
@@ -229,9 +280,10 @@ impl Debouncer {
     }
 
     /// Per-key override (`None` removes it, falling back to global).
-    /// `None` as `ms` clears the override.
+    /// `None` as `ms` clears the override; `Some(0)` never filters the key
+    /// (its presses are still counted).
     pub fn set_key_threshold(&mut self, vk: u8, ms: Option<u64>) {
-        self.per_key[vk as usize] = ms.map(|m| Duration::from_millis(m.clamp(1, 1000)));
+        self.per_key[vk as usize] = ms.map(|m| Duration::from_millis(m.min(1000)));
     }
 
     pub fn set_measure_from(&mut self, m: MeasureFrom) {
@@ -256,7 +308,11 @@ impl Debouncer {
     }
 
     fn effective_threshold(&self, vk: usize) -> Duration {
-        self.per_key[vk].unwrap_or(self.global_threshold)
+        match self.per_key[vk] {
+            Some(d) => d,
+            None if is_mouse_button(vk) => self.mouse_threshold,
+            None => self.global_threshold,
+        }
     }
 
     fn push_log(&mut self, event: LogEvent) {
@@ -1047,5 +1103,68 @@ mod tests {
         d.set_key_threshold(0x41, Some(120));
         assert_eq!(d.key_threshold_ms(0x41), (120, true));
         assert_eq!(d.key_threshold_ms(0x42), (50, false));
+    }
+
+    /// `key.XX=0`: the key is never blocked, but its presses still count.
+    #[test]
+    fn zero_window_never_filters_the_key() {
+        let mut d = Debouncer::new(50);
+        d.set_key_threshold(0x20, Some(0));
+        assert_eq!(d.key_threshold_ms(0x20), (0, true));
+        assert!(d.decide(0x20, KeyEventKind::Down, ms(0)));
+        assert!(d.decide(0x20, KeyEventKind::Up, ms(10)));
+        assert!(d.decide(0x20, KeyEventKind::Down, ms(11)));
+        assert_eq!((d.per_key_presses[0x20], d.per_key_blocked[0x20]), (2, 0));
+        // Other keys keep the global window.
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(100)));
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(110)));
+        assert!(!d.decide(0x41, KeyEventKind::Down, ms(111)));
+    }
+
+    #[test]
+    fn mouse_buttons_use_their_own_window_unless_overridden() {
+        let mut d = Debouncer::new(80);
+        assert_eq!(
+            d.key_threshold_ms(0x01),
+            (MOUSE_THRESHOLD_DEFAULT_MS, false)
+        );
+        // VK_CANCEL (0x03) is a keyboard key: global window.
+        assert_eq!(d.key_threshold_ms(0x03), (80, false));
+        d.set_mouse_threshold_ms(0);
+        assert_eq!(d.mouse_threshold_ms(), 1, "clamped like the global window");
+        d.set_mouse_threshold_ms(40);
+        // A quick double-click (45 ms release-to-press) passes, a 20 ms
+        // bounce does not, while the keyboard keeps its 80 ms.
+        assert!(d.decide(0x01, KeyEventKind::Down, ms(0)));
+        assert!(d.decide(0x01, KeyEventKind::Up, ms(60)));
+        assert!(d.decide(0x01, KeyEventKind::Down, ms(105)));
+        assert!(d.decide(0x01, KeyEventKind::Up, ms(160)));
+        assert!(!d.decide(0x01, KeyEventKind::Down, ms(180)));
+        assert!(d.decide(0x41, KeyEventKind::Down, ms(200)));
+        assert!(d.decide(0x41, KeyEventKind::Up, ms(260)));
+        assert!(!d.decide(0x41, KeyEventKind::Down, ms(305)));
+        // A per-button override wins over the mouse window.
+        d.set_key_threshold(0x02, Some(0));
+        assert_eq!(d.key_threshold_ms(0x02), (0, true));
+        assert_eq!(d.key_threshold_ms(0x04), (40, false));
+    }
+
+    #[test]
+    fn measured_gaps_can_be_restored_and_cleared() {
+        let mut d = Debouncer::new(50);
+        let mut saved: Box<[GapHistogram; 256]> = vec![[0; GAP_BUCKETS]; 256]
+            .into_boxed_slice()
+            .try_into()
+            .unwrap();
+        saved[0x41][1] = 7;
+        d.set_gap_histograms(&saved);
+        assert_eq!(d.gap_histogram(0x41)[1], 7);
+        d.decide(0x41, KeyEventKind::Down, ms(0));
+        d.decide(0x41, KeyEventKind::Up, ms(10));
+        d.decide(0x41, KeyEventKind::Down, ms(16));
+        assert_eq!(d.gap_histogram(0x41)[1], 8, "new gaps add to restored ones");
+        d.clear_gap_histograms();
+        assert_eq!(d.gap_histograms().iter().flatten().sum::<u32>(), 0);
+        assert_eq!(d.per_key_presses[0x41], 2, "counters are kept");
     }
 }

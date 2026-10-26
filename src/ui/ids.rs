@@ -113,6 +113,10 @@ pub(crate) const ID_BTN_KEY_RESET: i32 = 708;
 pub(crate) const ID_BTN_KEY_STATS: i32 = 711;
 pub(crate) const ID_KEYS_ADVICE: i32 = 709;
 pub(crate) const ID_KEYS_NOTE: i32 = 710;
+pub(crate) const ID_MOUSE_MS_LABEL: i32 = 712;
+pub(crate) const ID_MOUSE_MS_EDIT: i32 = 713;
+pub(crate) const ID_MOUSE_MS_UNIT: i32 = 714;
+pub(crate) const ID_BTN_MOUSE_MS_SET: i32 = 715;
 
 // Menu commands (menu bar and tray share them).
 pub(crate) const MENU_SHOW: usize = 1001;
@@ -132,6 +136,9 @@ pub(crate) const MENU_EXPORT_SETTINGS: usize = 1014;
 pub(crate) const MENU_IMPORT_SETTINGS: usize = 1015;
 pub(crate) const MENU_RUN_ELEVATED: usize = 1016;
 pub(crate) const MENU_ELEVATED_AUTOSTART: usize = 1017;
+/// Pause protection for a set time (tray menu, Tools menu).
+pub(crate) const MENU_PAUSE_15: usize = 1018;
+pub(crate) const MENU_PAUSE_60: usize = 1019;
 
 pub(crate) const WM_TRAY: u32 = WM_APP + 1;
 /// Posted from the update/elevation worker threads after the helper is

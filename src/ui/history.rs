@@ -29,7 +29,7 @@ use super::{
     text::{fill_combo, get_text, set_text, to_wide},
 };
 use crate::{
-    app::state::{SHARED, START_CLOCK_MS},
+    app::state::{SHARED, START},
     debounce::LogEvent,
     i18n::{Strings, fill, strings},
 };
@@ -64,17 +64,92 @@ pub(crate) struct Row {
     pub vk: Option<u8>,
 }
 
-/// `HH:MM:SS.mmm` local time for an event `elapsed` after startup, given
-/// the local time of day at startup in ms. Wraps past midnight.
-pub(crate) fn format_clock(base_ms: u64, elapsed: Duration) -> String {
-    let t = (base_ms + elapsed.as_millis() as u64) % 86_400_000;
-    format!(
-        "{:02}:{:02}:{:02}.{:03}",
-        t / 3_600_000,
-        t / 60_000 % 60,
-        t / 1000 % 60,
-        t % 1000
-    )
+const DAY_MS: i64 = 86_400_000;
+
+/// Days since 1970-01-01 of a proleptic Gregorian date.
+pub(crate) fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = i64::from(m);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The date of a day number from [`days_from_civil`].
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(m <= 2), m, d)
+}
+
+/// Turns the monotonic event times (time since startup) into local
+/// wall-clock times. Built from the clock *now* on every render, so the
+/// date stays right across midnight, days of uptime, and clock changes.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Clock {
+    /// Local time (ms since 1970-01-01 00:00, local) at startup.
+    base_ms: i64,
+    /// Today's local day number.
+    today: i64,
+}
+
+impl Clock {
+    /// `now_local_ms` and `elapsed` (time since startup) read together.
+    pub(crate) fn new(now_local_ms: i64, elapsed: Duration) -> Self {
+        Self {
+            base_ms: now_local_ms - elapsed.as_millis() as i64,
+            today: now_local_ms.div_euclid(DAY_MS),
+        }
+    }
+
+    /// The local clock right now.
+    fn now() -> Self {
+        let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+        let day = days_from_civil(i64::from(t.wYear), u32::from(t.wMonth), u32::from(t.wDay));
+        let ms = ((i64::from(t.wHour) * 60 + i64::from(t.wMinute)) * 60 + i64::from(t.wSecond))
+            * 1000
+            + i64::from(t.wMilliseconds);
+        let elapsed = START.get().map(|s| s.elapsed()).unwrap_or_default();
+        Self::new(day * DAY_MS + ms, elapsed)
+    }
+
+    fn parts(&self, t: Duration) -> (i64, i64) {
+        let local = self.base_ms + t.as_millis() as i64;
+        (local.div_euclid(DAY_MS), local.rem_euclid(DAY_MS))
+    }
+
+    /// List cell: `HH:MM:SS.mmm` today, `MM-DD HH:MM:SS` on an earlier day.
+    pub(crate) fn list_time(&self, t: Duration) -> String {
+        let (day, ms) = self.parts(t);
+        let (h, m, sec) = (ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60);
+        if day == self.today {
+            format!("{h:02}:{m:02}:{sec:02}.{:03}", ms % 1000)
+        } else {
+            let (_, month, d) = civil_from_days(day);
+            format!("{month:02}-{d:02} {h:02}:{m:02}:{sec:02}")
+        }
+    }
+
+    /// CSV cell: `YYYY-MM-DD HH:MM:SS.mmm`, always with the date.
+    pub(crate) fn full_time(&self, t: Duration) -> String {
+        let (day, ms) = self.parts(t);
+        let (y, month, d) = civil_from_days(day);
+        format!(
+            "{y:04}-{month:02}-{d:02} {:02}:{:02}:{:02}.{:03}",
+            ms / 3_600_000,
+            ms / 60_000 % 60,
+            ms / 1000 % 60,
+            ms % 1000
+        )
+    }
 }
 
 /// Event rows, newest first, filtered by view and key query.
@@ -83,7 +158,17 @@ pub(crate) fn render_events(
     events: &[LogEvent],
     view: HistoryView,
     query: &str,
-    clock_base_ms: u64,
+    clock: &Clock,
+) -> Vec<Row> {
+    event_rows(s, events, view, query, |t| clock.list_time(t))
+}
+
+fn event_rows(
+    s: &Strings,
+    events: &[LogEvent],
+    view: HistoryView,
+    query: &str,
+    time: impl Fn(Duration) -> String,
 ) -> Vec<Row> {
     events
         .iter()
@@ -92,7 +177,7 @@ pub(crate) fn render_events(
         .filter(|e| key_matches(e.vk, query))
         .map(|e| Row {
             cells: vec![
-                format_clock(clock_base_ms, e.time),
+                time(e.time),
                 vk_name(e.vk),
                 (if e.blocked {
                     s.result_blocked
@@ -108,6 +193,16 @@ pub(crate) fn render_events(
             vk: Some(e.vk),
         })
         .collect()
+}
+
+/// A key's block window as shown in the lists: `50 ms`, `80 ms (custom)`,
+/// or "Not filtered" for a per-key 0.
+pub(crate) fn threshold_cell(s: &Strings, ms: u64, custom: bool) -> String {
+    match (ms, custom) {
+        (0, true) => s.threshold_off.to_string(),
+        (ms, true) => fill(s.threshold_custom_fmt, &[&ms.to_string()]),
+        (ms, false) => format!("{ms} ms"),
+    }
 }
 
 /// Cumulative per-key counters plus the effective threshold of each key.
@@ -146,11 +241,7 @@ pub(crate) fn render_keys(s: &Strings, t: &KeyTotals, query: &str) -> Vec<Row> {
                     t.presses[i].to_string(),
                     t.blocked[i].to_string(),
                     format!("{rate:.1}%"),
-                    if custom {
-                        fill(s.threshold_custom_fmt, &[&ms.to_string()])
-                    } else {
-                        format!("{ms} ms")
-                    },
+                    threshold_cell(s, ms, custom),
                 ],
                 highlight: t.blocked[i] > 0,
                 vk: Some(vk),
@@ -199,7 +290,7 @@ pub(crate) fn render_csv(
     s: &Strings,
     events: &[LogEvent],
     totals: &KeyTotals,
-    clock_base_ms: u64,
+    clock: &Clock,
 ) -> String {
     let mut out = String::from("\u{FEFF}");
     let header = |cols: &[&str]| cols.iter().map(|c| c.to_string()).collect::<Vec<_>>();
@@ -207,7 +298,7 @@ pub(crate) fn render_csv(
         &mut out,
         &header(&[s.col_time, s.col_key, s.col_result, s.col_gap]),
     );
-    for row in render_events(s, events, HistoryView::All, "", clock_base_ms)
+    for row in event_rows(s, events, HistoryView::All, "", |t| clock.full_time(t))
         .into_iter()
         .rev()
     {
@@ -254,7 +345,7 @@ pub(crate) fn csv_snapshot() -> Option<String> {
         strings(current_lang()),
         &events,
         &totals,
-        START_CLOCK_MS.get().copied().unwrap_or(0),
+        &Clock::now(),
     ))
 }
 
@@ -269,8 +360,8 @@ fn columns(s: &Strings, view: HistoryView) -> Vec<(&'static str, i32, bool)> {
             (s.col_threshold, 94, true),
         ],
         _ => vec![
-            (s.col_time, 124, false),
-            (s.col_key, 120, false),
+            (s.col_time, 136, false),
+            (s.col_key, 108, false),
             (s.col_result, 80, false),
             (s.col_gap, 100, true),
         ],
@@ -491,13 +582,7 @@ pub(crate) unsafe fn refresh(hwnd: HWND, force: bool) {
 
         let s = strings(current_lang());
         let rows = match &snapshot {
-            Snapshot::Events(events) => render_events(
-                s,
-                events,
-                view,
-                &query,
-                START_CLOCK_MS.get().copied().unwrap_or(0),
-            ),
+            Snapshot::Events(events) => render_events(s, events, view, &query, &Clock::now()),
             Snapshot::Keys(totals) => render_keys(s, totals, &query),
         };
         let count = rows.len();
@@ -757,25 +842,39 @@ mod tests {
         ]
     }
 
+    /// 1970-01-01 00:00 local at startup, read 5 s later (same day).
+    fn epoch_clock() -> Clock {
+        Clock::new(5_000, Duration::from_millis(5_000))
+    }
+
     #[test]
-    fn clock_formats_and_wraps_past_midnight() {
-        assert_eq!(format_clock(0, Duration::ZERO), "00:00:00.000");
-        let base = (13 * 3600 + 5 * 60 + 9) * 1000 + 7;
-        assert_eq!(
-            format_clock(base, Duration::from_millis(1_000)),
-            "13:05:10.007"
-        );
-        let almost_midnight = 86_400_000 - 500;
-        assert_eq!(
-            format_clock(almost_midnight, Duration::from_millis(1_500)),
-            "00:00:01.000"
-        );
+    fn day_numbers_round_trip_through_dates() {
+        assert_eq!(days_from_civil(1970, 1, 1), 0);
+        assert_eq!(days_from_civil(2000, 3, 1), 11_017);
+        assert_eq!(days_from_civil(1969, 12, 31), -1);
+        for (y, m, d) in [(2024, 2, 29), (2026, 10, 26), (2100, 3, 1), (1999, 12, 31)] {
+            assert_eq!(civil_from_days(days_from_civil(y, m, d)), (y, m, d));
+        }
+    }
+
+    #[test]
+    fn times_carry_the_date_once_the_day_changed() {
+        // Started 2026-10-25 23:59:59.500 local; now 2026-10-26 00:00:10.
+        let day = days_from_civil(2026, 10, 26);
+        let now = day * DAY_MS + 10_000;
+        let clock = Clock::new(now, Duration::from_millis(10_500));
+        let before_midnight = Duration::from_millis(200);
+        let after_midnight = Duration::from_millis(1_500);
+        assert_eq!(clock.list_time(before_midnight), "10-25 23:59:59");
+        assert_eq!(clock.list_time(after_midnight), "00:00:01.000");
+        assert_eq!(clock.full_time(before_midnight), "2026-10-25 23:59:59.700");
+        assert_eq!(clock.full_time(after_midnight), "2026-10-26 00:00:01.000");
     }
 
     #[test]
     fn blocked_view_lists_only_blocked_newest_first() {
         let s = strings(Language::Ko);
-        let rows = render_events(s, &sample(), HistoryView::Blocked, "", 0);
+        let rows = render_events(s, &sample(), HistoryView::Blocked, "", &epoch_clock());
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].cells, ["00:00:02.000", "Space", "막음", "30 ms"]);
         assert_eq!(rows[1].cells[1], "A");
@@ -785,7 +884,7 @@ mod tests {
     #[test]
     fn all_view_highlights_blocked_rows_and_shows_dash_gap() {
         let s = strings(Language::En);
-        let rows = render_events(s, &sample(), HistoryView::All, "", 0);
+        let rows = render_events(s, &sample(), HistoryView::All, "", &epoch_clock());
         assert_eq!(rows.len(), 4);
         assert_eq!(rows[0].cells, ["00:00:03.000", "B", "Passed", "-"]);
         let highlighted: Vec<bool> = rows.iter().map(|r| r.highlight).collect();
@@ -795,10 +894,11 @@ mod tests {
     #[test]
     fn key_query_filters_events() {
         let s = strings(Language::En);
-        let rows = render_events(s, &sample(), HistoryView::All, "space", 0);
+        let clock = epoch_clock();
+        let rows = render_events(s, &sample(), HistoryView::All, "space", &clock);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cells[1], "Space");
-        assert!(render_events(s, &sample(), HistoryView::All, "F12", 0).is_empty());
+        assert!(render_events(s, &sample(), HistoryView::All, "F12", &clock).is_empty());
     }
 
     fn totals() -> KeyTotals {
@@ -861,12 +961,12 @@ mod tests {
     #[test]
     fn csv_lists_events_oldest_first_then_the_key_summary() {
         let s = strings(Language::En);
-        let csv = render_csv(s, &sample(), &totals(), 0);
+        let csv = render_csv(s, &sample(), &totals(), &epoch_clock());
         assert!(csv.starts_with('\u{FEFF}'));
         let lines: Vec<&str> = csv.trim_start_matches('\u{FEFF}').split("\r\n").collect();
         assert_eq!(lines[0], "Time,Key,Result,Gap");
-        assert_eq!(lines[1], "00:00:01.000,A,Passed,-");
-        assert_eq!(lines[4], "00:00:03.000,B,Passed,-");
+        assert_eq!(lines[1], "1970-01-01 00:00:01.000,A,Passed,-");
+        assert_eq!(lines[4], "1970-01-01 00:00:03.000,B,Passed,-");
         assert_eq!(lines[5], "");
         assert_eq!(lines[6], "Key,Presses,Blocked,Rate,Block window");
         assert_eq!(lines[7], "Space,40,10,25.0%,80 ms (custom)");
@@ -879,7 +979,7 @@ mod tests {
     #[test]
     fn column_count_matches_rendered_cells() {
         let s = strings(Language::En);
-        let events = render_events(s, &sample(), HistoryView::All, "", 0);
+        let events = render_events(s, &sample(), HistoryView::All, "", &epoch_clock());
         assert_eq!(columns(s, HistoryView::All).len(), events[0].cells.len());
         let keys = render_keys(s, &totals(), "");
         assert_eq!(columns(s, HistoryView::Keys).len(), keys[0].cells.len());

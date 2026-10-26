@@ -139,11 +139,9 @@ pub(crate) unsafe fn import_settings(hwnd: HWND) {
             return;
         };
         if let Some(shared) = SHARED.get() {
-            let g = shared.lock().unwrap();
-            imported.total_presses = g.debouncer.total_presses;
-            imported.blocked_presses = g.debouncer.blocked_presses;
-            imported.per_key_presses = g.debouncer.per_key_presses;
-            imported.per_key_blocked = g.debouncer.per_key_blocked;
+            // This PC's counters and measured gaps (the gaps only when the
+            // imported baseline matches; `on_save` below clears them too).
+            imported.take_live_stats(&shared.lock().unwrap().debouncer);
         }
         // On disk first: the save below takes file-owned values (per-key
         // windows) from the file.

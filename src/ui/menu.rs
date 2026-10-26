@@ -12,7 +12,10 @@ use super::{
     elevation, foreground::self_elevated, hotkeys, ids::*, state::current_lang, text::to_wide,
     tray::with_hotkey,
 };
-use crate::{app::state::SHARED, i18n::strings};
+use crate::{
+    app::state::SHARED,
+    i18n::{Strings, strings},
+};
 
 unsafe fn item(menu: HMENU, id: usize, text: &str) {
     unsafe {
@@ -31,6 +34,17 @@ unsafe fn popup(bar: HMENU, title: &str, sub: HMENU) {
     unsafe {
         let v = to_wide(title);
         let _ = AppendMenuW(bar, MF_POPUP, sub.0 as usize, PCWSTR(v.as_ptr()));
+    }
+}
+
+/// "Pause for" submenu (tray and Tools menus). Owned by the menu it is
+/// appended to, which destroys it.
+pub(crate) unsafe fn pause_menu(s: &Strings) -> windows::core::Result<HMENU> {
+    unsafe {
+        let sub = CreatePopupMenu()?;
+        item(sub, MENU_PAUSE_15, s.menu_pause_15);
+        item(sub, MENU_PAUSE_60, s.menu_pause_60);
+        Ok(sub)
     }
 }
 
@@ -65,6 +79,9 @@ pub(crate) unsafe fn install(hwnd: HWND) {
             MENU_CLEANING,
             &with_hotkey(s.menu_cleaning, hotkeys::cleaning_label()),
         );
+        if let Ok(sub) = pause_menu(s) {
+            popup(tools, s.menu_pause_for, sub);
+        }
         separator(tools);
         item(tools, MENU_RESET_STATS, &format!("{}…", s.reset_stats_btn));
         item(tools, MENU_CLEAR_LOG, s.menu_clear_log);

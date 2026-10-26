@@ -18,7 +18,7 @@ use super::{
         bring_existing_to_front, show_already_running, try_acquire_single_instance,
         wait_for_other_instance,
     },
-    state::{SHARED, START, START_CLOCK_MS},
+    state::{SHARED, START},
 };
 use crate::{config, debounce::Debouncer, input};
 
@@ -42,10 +42,9 @@ fn init_shared(settings: &config::Settings) {
     debouncer.set_measure_from(settings.measure_from);
     debouncer.set_min_chatter_ms(settings.min_chatter_ms);
     debouncer.set_release_defer_ms(settings.release_defer_ms);
-    debouncer.total_presses = settings.total_presses;
-    debouncer.blocked_presses = settings.blocked_presses;
-    debouncer.per_key_presses = settings.per_key_presses;
-    debouncer.per_key_blocked = settings.per_key_blocked;
+    debouncer.set_mouse_threshold_ms(settings.mouse_threshold_ms);
+    // After the baseline: measured gaps are only adopted under their own.
+    settings.restore_live_stats(&mut debouncer);
     debouncer.record_all_keys = settings.record_all_keys;
     debouncer.set_log_limit(settings.log_limit);
 
@@ -60,13 +59,6 @@ fn init_shared(settings: &config::Settings) {
         inject: Default::default(),
     }));
     let _ = START.set(Instant::now());
-    let _ = START_CLOCK_MS.set(local_time_of_day_ms());
-}
-
-fn local_time_of_day_ms() -> u64 {
-    let t = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
-    ((t.wHour as u64 * 60 + t.wMinute as u64) * 60 + t.wSecond as u64) * 1000
-        + t.wMilliseconds as u64
 }
 
 /// Update-helper handshake: the helper relaunches this executable with

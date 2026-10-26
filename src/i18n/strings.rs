@@ -194,6 +194,13 @@ define_strings! {
         update_elevated_fmt,
         cleaning_auto_ended,
         update_managed_fmt,
+        threshold_off,
+        mouse_threshold_label,
+        menu_pause_for,
+        menu_pause_15,
+        menu_pause_60,
+        note_paused_until_fmt,
+        pause_ended,
     ],
     lists: [
         history_views,
@@ -288,13 +295,13 @@ static KO: Strings = Strings {
     log_note: "기록은 [기록] 탭에서 보고, 파일 메뉴에서 CSV로 내보낼 수 있어요. 키별 차단 기준은 [키·마우스] 탭에서 정해요.",
 
     filter_mouse: "마우스 버튼도 막기 (클릭이 두 번 되는 문제)",
-    mouse_hint: "켜면 마우스 버튼에도 같은 차단 기준을 쓰고 클릭도 통계에 세요. 더블클릭이 잘 안 되면 아래 목록에서 그 버튼의 기준을 낮추세요.",
+    mouse_hint: "켜면 마우스 버튼은 위 기준으로 막아요. 더블클릭이 잘 안 되면 기준을 낮추고, 버튼별 기준은 아래 목록에서 정하세요(0 ms = 거르지 않음).",
     card_keys: "키별 차단 기준",
     col_reco: "권장",
     key_set_btn: "적용",
     key_reset_btn: "기본값으로",
     key_stats_btn: "이 키 통계 지우기",
-    keys_note: "적용·기본값·통계 지우기는 누르는 즉시 저장돼요. 권장값은 이번 실행 중에 잰 입력 간격으로 계산해요.",
+    keys_note: "적용·기본값·통계 지우기는 즉시 저장돼요. 0 ms = 거르지 않음. 권장값은 지금까지 잰 입력 간격으로 계산해요.",
     advice_pick: "목록에서 키를 고르면 그 키에 맞는 권장 기준을 보여 드려요.",
     advice_need_fmt: "{}: 권장값을 계산하려면 이 키를 더 눌러야 해요 ({}/{}회).",
     advice_ok_fmt: "{}: 채터링으로 볼 만큼 빠른 재입력이 없었어요. 지금 기준이면 충분해요.",
@@ -372,6 +379,13 @@ static KO: Strings = Strings {
     update_elevated_fmt: "새 버전 v{}이(가) 있습니다.\n관리자 권한으로 실행 중에는 안전을 위해 앱 안에서 업데이트하지 않아요(임시 폴더의 파일을 관리자 권한으로 실행하게 되기 때문이에요). 프로그램을 종료하고 일반 권한으로 다시 실행한 뒤 업데이트하세요.",
     cleaning_auto_ended: "청소 모드를 자동으로 끝냈어요.",
     update_managed_fmt: "새 버전 v{}이(가) 있습니다.\n이 프로그램은 {}(으)로 설치되어 있으니 다음 명령으로 업데이트하세요:\n\n{}",
+    threshold_off: "거르지 않음",
+    mouse_threshold_label: "마우스 버튼 기준",
+    menu_pause_for: "시간 정해 잠시 멈추기",
+    menu_pause_15: "15분 동안",
+    menu_pause_60: "1시간 동안",
+    note_paused_until_fmt: "{}까지 채터링 막기를 잠시 멈췄어요. 상태 표시를 누르거나 트레이 메뉴에서 바로 다시 켤 수 있어요.",
+    pause_ended: "잠시 멈춤이 끝나 채터링 막기를 다시 켰어요.",
 };
 
 static EN: Strings = Strings {
@@ -461,13 +475,13 @@ static EN: Strings = Strings {
     log_note: "See it in the History tab or export it as CSV from the File menu. Per-key block windows are in the Keys/Mouse tab.",
 
     filter_mouse: "Also filter mouse buttons (clicks registering twice)",
-    mouse_hint: "When on, mouse buttons share the block window and clicks count in the statistics. If double-clicks stop working, lower that button's window below.",
+    mouse_hint: "When on, mouse buttons use the window above and clicks are counted. If double-clicks stop working, lower it; set single buttons below (0 ms = not filtered).",
     card_keys: "Per-key block window",
     col_reco: "Suggested",
     key_set_btn: "Apply",
     key_reset_btn: "Default",
     key_stats_btn: "Clear key stats",
-    keys_note: "Apply, Default and Clear key stats are saved right away. Suggestions come from the gaps measured since the program started.",
+    keys_note: "Apply, Default and Clear key stats save at once; 0 ms = not filtered. Suggestions use every gap measured so far.",
     advice_pick: "Pick a key in the list to see a suggested window for it.",
     advice_need_fmt: "{}: press this key a few more times for a suggestion ({}/{}).",
     advice_ok_fmt: "{}: no repeat fast enough to be chatter so far. The current window is fine.",
@@ -545,6 +559,13 @@ static EN: Strings = Strings {
     update_elevated_fmt: "A new version v{} is available.\nWhile running as administrator, updates are not installed from inside the app for safety (that would run files from the temporary folder as administrator). Exit the program, start it again without administrator rights, and update then.",
     cleaning_auto_ended: "Cleaning mode ended automatically.",
     update_managed_fmt: "A new version v{} is available.\nThis copy was installed with {}, so update it with:\n\n{}",
+    threshold_off: "Not filtered",
+    mouse_threshold_label: "Mouse button window",
+    menu_pause_for: "Pause for",
+    menu_pause_15: "15 minutes",
+    menu_pause_60: "1 hour",
+    note_paused_until_fmt: "Chatter blocking is paused until {}. Click the status badge or use the tray menu to resume now.",
+    pause_ended: "The pause is over: chatter blocking is back on.",
 };
 
 pub fn strings(lang: Language) -> &'static Strings {

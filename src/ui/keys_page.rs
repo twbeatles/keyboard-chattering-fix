@@ -20,7 +20,7 @@ use windows::Win32::{
 
 use super::{
     dialog::msg_box,
-    history::{set_columns, setup_list, theme_list, write_cell},
+    history::{set_columns, setup_list, theme_list, threshold_cell, write_cell},
     ids::*,
     keys::{selectable_vks, vk_name},
     layout::{Page, current_page, showing_cleaning},
@@ -138,11 +138,7 @@ pub(crate) fn render_rows(s: &Strings, snap: &KeysSnapshot) -> Vec<KeyRow> {
                 vk,
                 cells: vec![
                     vk_name(vk),
-                    if custom {
-                        fill(s.threshold_custom_fmt, &[&ms.to_string()])
-                    } else {
-                        format!("{ms} ms")
-                    },
+                    threshold_cell(s, ms, custom),
                     advice_cell(s, advice),
                     snap.blocked[i].to_string(),
                 ],
@@ -244,8 +240,16 @@ pub(crate) unsafe fn init(hwnd: HWND) {
         let names: Vec<String> = picker_vks().iter().map(|&vk| vk_name(vk)).collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         fill_combo(hwnd, ID_KEYS_COMBO, &refs, 0);
-        if let Ok(edit) = GetDlgItem(Some(hwnd), ID_KEYS_EDIT) {
-            SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(4)), Some(LPARAM(0)));
+        for id in [ID_KEYS_EDIT, ID_MOUSE_MS_EDIT] {
+            if let Ok(edit) = GetDlgItem(Some(hwnd), id) {
+                SendMessageW(edit, EM_SETLIMITTEXT, Some(WPARAM(4)), Some(LPARAM(0)));
+            }
+        }
+        let mouse_ms = SHARED
+            .get()
+            .map(|g| g.lock().unwrap().debouncer.mouse_threshold_ms());
+        if let Some(ms) = mouse_ms {
+            set_text(hwnd, ID_MOUSE_MS_EDIT, &ms.to_string());
         }
     }
 }
@@ -476,6 +480,38 @@ pub(crate) unsafe fn clear_key_stats(hwnd: HWND) {
     }
 }
 
+/// Mouse "Apply": the window of every button without its own.
+pub(crate) unsafe fn apply_mouse_threshold(hwnd: HWND) {
+    unsafe {
+        let Ok(ms) = get_text(hwnd, ID_MOUSE_MS_EDIT).parse::<u64>() else {
+            let _ = windows::Win32::System::Diagnostics::Debug::MessageBeep(MB_ICONWARNING);
+            return;
+        };
+        let (ms, written) = settings_form::set_mouse_threshold(ms);
+        // Show the value in use (clamped to 1–1000).
+        set_text(hwnd, ID_MOUSE_MS_EDIT, &ms.to_string());
+        invalidate();
+        refresh(hwnd, true);
+        if !written {
+            let s = strings(current_lang());
+            msg_box(hwnd, s.title, s.save_failed, MB_OK | MB_ICONWARNING);
+        }
+    }
+}
+
+/// Enter on the Keys tab applies the field it was pressed in.
+pub(crate) unsafe fn on_enter(hwnd: HWND) {
+    unsafe {
+        let in_mouse_field = GetDlgItem(Some(hwnd), ID_MOUSE_MS_EDIT)
+            .is_ok_and(|edit| windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() == edit);
+        if in_mouse_field {
+            apply_mouse_threshold(hwnd);
+        } else {
+            apply_override(hwnd);
+        }
+    }
+}
+
 pub(crate) unsafe fn on_mouse_toggled(hwnd: HWND, on: bool) {
     unsafe {
         if !settings_form::set_mouse_filter(on) {
@@ -604,6 +640,23 @@ mod tests {
             [true, false, false]
         );
         assert_eq!(rows[0].cells.len(), columns(s).len());
+    }
+
+    /// A key whose chatter was measured in an earlier run (restored gaps)
+    /// gets its suggestion right away, not "Need data"; a key set to 0 is
+    /// shown as not filtered.
+    #[test]
+    fn restored_gaps_suggest_at_once_and_zero_reads_not_filtered() {
+        let s = strings(Language::En);
+        let mut snap = snapshot();
+        snap.thresholds[0x20] = (0, true);
+        let rows = render_rows(s, &snap);
+        assert_eq!(rows[0].cells[2], "20 ms");
+        assert_eq!(rows[1].cells, ["Space", "Not filtered", "Need data", "0"]);
+        assert_eq!(
+            strings(Language::Ko).threshold_off,
+            render_rows(strings(Language::Ko), &snap)[1].cells[1]
+        );
     }
 
     #[test]

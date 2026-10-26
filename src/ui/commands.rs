@@ -13,7 +13,7 @@ use windows::{
 
 use super::{
     dialog::{msg_box, show_about},
-    elevation, files, history,
+    elevation, files, foreground, history,
     ids::*,
     settings_form::persist_live,
     state::current_lang,
@@ -47,12 +47,58 @@ pub(crate) unsafe fn hide_to_tray(hwnd: HWND) {
 }
 
 /// Turn protection on/off immediately; the tick syncs pill, toggle, tray.
+/// Either choice ends a pause for a set time: the user decided.
 pub(crate) unsafe fn set_protection(hwnd: HWND, on: bool) {
     unsafe {
         if let Some(g) = SHARED.get() {
             g.lock().unwrap().enabled = on;
         }
+        if foreground::timed_pause_active() {
+            foreground::set_timed_pause(None);
+            foreground::tick(hwnd);
+            super::stats::invalidate();
+        }
         update_stats(hwnd);
+    }
+}
+
+/// Local `HH:MM` that is `minutes` after `now_minute_of_day` (wraps at
+/// midnight): when a pause for a set time ends.
+pub(crate) fn clock_after(now_minute_of_day: u32, minutes: u32) -> String {
+    let t = (now_minute_of_day + minutes) % (24 * 60);
+    format!("{:02}:{:02}", t / 60, t % 60)
+}
+
+/// Pause protection for `minutes` (tray and Tools menus). Protection is on
+/// again afterwards, even if it was off before: that is what "pause" means.
+/// Not saved: a restart during the pause starts protected.
+pub(crate) unsafe fn pause_for(hwnd: HWND, minutes: u32) {
+    unsafe {
+        let now = windows::Win32::System::SystemInformation::GetLocalTime();
+        let ends = clock_after(u32::from(now.wHour) * 60 + u32::from(now.wMinute), minutes);
+        let until = Instant::now() + Duration::from_secs(u64::from(minutes) * 60);
+        if let Some(g) = SHARED.get() {
+            g.lock().unwrap().enabled = true;
+        }
+        foreground::set_timed_pause(Some((until, ends)));
+        // Release delay: the hook stops judging events while paused, so a
+        // held-back release must not be sent after a press that passed.
+        crate::input::hook::flush_deferred_releases();
+        foreground::tick(hwnd);
+        super::stats::invalidate();
+        update_stats(hwnd);
+    }
+}
+
+/// Timer tick: end a pause for a set time once it has run out.
+pub(crate) unsafe fn pause_tick(hwnd: HWND) {
+    unsafe {
+        if foreground::end_expired_pause(Instant::now()) {
+            foreground::tick(hwnd);
+            super::stats::invalidate();
+            update_stats(hwnd);
+            tray::balloon(hwnd, strings(current_lang()).pause_ended);
+        }
     }
 }
 
@@ -142,7 +188,13 @@ pub(crate) unsafe fn run(hwnd: HWND, cmd: usize) {
         match cmd {
             MENU_SHOW => show_window(hwnd),
             MENU_HIDE => hide_to_tray(hwnd),
-            MENU_TOGGLE => set_protection(hwnd, !protection_on()),
+            // While paused for a set time, the toggle (pill, hotkey, menu)
+            // resumes instead of switching protection off.
+            MENU_TOGGLE => {
+                set_protection(hwnd, foreground::timed_pause_active() || !protection_on())
+            }
+            MENU_PAUSE_15 => pause_for(hwnd, 15),
+            MENU_PAUSE_60 => pause_for(hwnd, 60),
             MENU_CLEANING => set_cleaning(hwnd, true),
             MENU_RESET_STATS => {
                 let answer = msg_box(
@@ -196,6 +248,13 @@ pub(crate) unsafe fn run(hwnd: HWND, cmd: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_end_is_shown_as_a_local_clock_time() {
+        assert_eq!(clock_after(14 * 60 + 5, 15), "14:20");
+        assert_eq!(clock_after(23 * 60 + 50, 60), "00:50");
+        assert_eq!(clock_after(0, 0), "00:00");
+    }
 
     #[test]
     fn cleaning_limit_counts_minutes_and_zero_disables_it() {

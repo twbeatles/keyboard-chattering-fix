@@ -263,10 +263,7 @@ fn persist_with(change: impl FnOnce(&mut Settings)) -> bool {
     let live = SHARED.get().map(|shared| {
         let g = shared.lock().unwrap();
         s.enabled = g.enabled;
-        s.total_presses = g.debouncer.total_presses;
-        s.blocked_presses = g.debouncer.blocked_presses;
-        s.per_key_presses = g.debouncer.per_key_presses;
-        s.per_key_blocked = g.debouncer.per_key_blocked;
+        s.take_live_stats(&g.debouncer);
         LiveFingerprint {
             total: g.debouncer.total_presses,
             blocked: g.debouncer.blocked_presses,
@@ -280,12 +277,13 @@ fn persist_with(change: impl FnOnce(&mut Settings)) -> bool {
     written
 }
 
-/// Set (`Some`) or clear (`None`) one key's block window, apply it to the
-/// live filter, and write it to the settings file right away. The rest of
-/// the file's per-key values are re-read first, so a concurrent edit of the
-/// file is kept. Returns whether the change reached disk.
+/// Set (`Some`, 0 = never filter) or clear (`None`) one key's block window,
+/// apply it to the live filter, and write it to the settings file right
+/// away. The rest of the file's per-key values are re-read first, so a
+/// concurrent edit of the file is kept. Returns whether the change reached
+/// disk.
 pub(crate) fn set_key_override(vk: u8, ms: Option<u64>) -> bool {
-    let ms = ms.map(|m| m.clamp(1, 1000));
+    let ms = ms.map(|m| m.min(1000));
     let mut per_key = None;
     let written = persist_with(|s| {
         s.per_key_ms[vk as usize] = ms;
@@ -301,6 +299,12 @@ pub(crate) fn set_key_override(vk: u8, ms: Option<u64>) -> bool {
     written
 }
 
+/// Whether a Save switches the gap baseline, which voids the gaps
+/// measured so far (they mean something else under the other one).
+fn baseline_changed(live: MeasureFrom, saved: MeasureFrom) -> bool {
+    live != saved
+}
+
 /// What a Save starts from: the file as it is now, so per-key values edited
 /// in it are kept. When the file cannot be read at all, the last saved
 /// settings stand in: an unreadable file must never pass for one whose
@@ -314,6 +318,18 @@ fn save_base(disk: Option<Settings>, saved: Settings) -> Settings {
 pub(crate) fn set_mouse_filter(on: bool) -> bool {
     crate::input::hook::set_mouse_filter(on);
     persist_with(|s| s.filter_mouse = on)
+}
+
+/// Mouse buttons' block window (Keys tab): applied and saved at once.
+/// Returns the value used (clamped) and whether it reached disk.
+pub(crate) fn set_mouse_threshold(ms: u64) -> (u64, bool) {
+    let ms = ms.clamp(1, 1000);
+    if let Some(shared) = SHARED.get() {
+        shared.lock().unwrap().debouncer.set_mouse_threshold_ms(ms);
+    }
+    let written = persist_with(|s| s.mouse_threshold_ms = ms);
+    history::invalidate();
+    (ms, written)
 }
 
 /// Timer tick: persist counters every few minutes when they changed, so a
@@ -494,6 +510,12 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
             for (vk, ms) in new_settings.per_key_ms.iter().enumerate() {
                 g.debouncer.set_key_threshold(vk as u8, *ms);
             }
+            g.debouncer
+                .set_mouse_threshold_ms(new_settings.mouse_threshold_ms);
+            if baseline_changed(g.debouncer.measure_from(), measure) {
+                // Gaps from the old baseline would skew every suggestion.
+                g.debouncer.clear_gap_histograms();
+            }
             g.debouncer.set_measure_from(measure);
             g.debouncer.set_min_chatter_ms(min_chatter);
             g.debouncer.set_release_defer_ms(release_defer);
@@ -502,10 +524,7 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
             g.enabled = enabled;
             g.play_sound = sound;
             g.exclude_injected = exclude_injected;
-            new_settings.total_presses = g.debouncer.total_presses;
-            new_settings.blocked_presses = g.debouncer.blocked_presses;
-            new_settings.per_key_presses = g.debouncer.per_key_presses;
-            new_settings.per_key_blocked = g.debouncer.per_key_blocked;
+            new_settings.take_live_stats(&g.debouncer);
             LiveFingerprint {
                 total: g.debouncer.total_presses,
                 blocked: g.debouncer.blocked_presses,
@@ -516,6 +535,12 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
         // swapped in under the lock.
         apply_sound_async(sound_file.clone());
         crate::input::hook::set_mouse_filter(new_settings.filter_mouse);
+        // A value edited in the file is applied by Save, like `key.XX`.
+        set_field(
+            hwnd,
+            ID_MOUSE_MS_EDIT,
+            &new_settings.mouse_threshold_ms.to_string(),
+        );
         super::foreground::configure(&auto_apps, auto_fullscreen);
         let hotkey_problems = super::hotkeys::apply(hwnd, &hotkey_toggle, &hotkey_cleaning);
         super::menu::install(hwnd);
@@ -573,6 +598,16 @@ mod tests {
             (base.per_key_ms[0x41], base.per_key_ms[0x42]),
             (Some(90), None)
         );
+    }
+
+    #[test]
+    fn only_a_switched_baseline_voids_the_measured_gaps() {
+        assert!(baseline_changed(MeasureFrom::Release, MeasureFrom::Press));
+        assert!(baseline_changed(MeasureFrom::Press, MeasureFrom::Release));
+        assert!(!baseline_changed(
+            MeasureFrom::Release,
+            MeasureFrom::Release
+        ));
     }
 
     #[test]

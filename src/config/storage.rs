@@ -9,7 +9,9 @@ use std::{collections::HashMap, fs, path::PathBuf};
 
 use super::model::Settings;
 use crate::{
-    debounce::{LOG_LIMIT_MAX, LOG_LIMIT_MIN, MeasureFrom, RELEASE_DEFER_MAX_MS},
+    debounce::{
+        GAP_BUCKETS, GapHistogram, LOG_LIMIT_MAX, LOG_LIMIT_MIN, MeasureFrom, RELEASE_DEFER_MAX_MS,
+    },
     i18n::LanguagePref,
 };
 
@@ -83,7 +85,7 @@ fn decode_system_code_page(bytes: &[u8]) -> Option<String> {
     }
 }
 
-/// Every key this program writes (`key.XX`/`stat.XX` aside).
+/// Every key this program writes (`key.XX`/`stat.XX`/`hist.XX` aside).
 const KNOWN_KEYS: &[&str] = &[
     "iThreshold",
     "bFilterEnabled",
@@ -100,6 +102,7 @@ const KNOWN_KEYS: &[&str] = &[
     "iMinChatterMs",
     "bExcludeInjected",
     "bFilterMouse",
+    "iMouseThreshold",
     "iReleaseDeferMs",
     "sAutoDisableApps",
     "bAutoDisableFullscreen",
@@ -108,6 +111,7 @@ const KNOWN_KEYS: &[&str] = &[
     "iCleaningTimeoutMin",
     "iTotalPresses",
     "iBlockedPresses",
+    "sHistMeasure",
 ];
 
 /// Whether `text` is this program's settings file: the section header or
@@ -120,7 +124,8 @@ fn looks_like_settings(text: &str) -> bool {
         line == "[KeyboardChatteringFix]"
             || line.split_once('=').is_some_and(|(k, _)| {
                 let k = k.trim();
-                KNOWN_KEYS.contains(&k) || k.starts_with("key.") || k.starts_with("stat.")
+                KNOWN_KEYS.contains(&k)
+                    || ["key.", "stat.", "hist."].iter().any(|p| k.starts_with(p))
             })
     })
 }
@@ -233,11 +238,7 @@ fn parse(text: &str) -> Settings {
         s.language = LanguagePref::from_setting(v);
     }
     if let Some(v) = map.get("sMeasureFrom") {
-        s.measure_from = if v.eq_ignore_ascii_case("press") {
-            MeasureFrom::Press
-        } else {
-            MeasureFrom::Release
-        };
+        s.measure_from = measure_from(v);
     }
     if let Some(v) = map.get("iMinChatterMs")
         && let Ok(n) = v.parse::<u64>()
@@ -249,6 +250,11 @@ fn parse(text: &str) -> Settings {
     }
     if let Some(v) = map.get("bFilterMouse") {
         s.filter_mouse = v != "0";
+    }
+    if let Some(v) = map.get("iMouseThreshold")
+        && let Ok(n) = v.parse::<u64>()
+    {
+        s.mouse_threshold_ms = n.clamp(1, 1000);
     }
     if let Some(v) = map.get("iReleaseDeferMs")
         && let Ok(n) = v.parse::<u64>()
@@ -299,10 +305,72 @@ fn parse(text: &str) -> Settings {
         if let Some(hex) = k.strip_prefix("key.")
             && let (Ok(vk), Ok(ms)) = (u8::from_str_radix(hex, 16), v.parse::<u64>())
         {
-            s.per_key_ms[vk as usize] = Some(ms.clamp(1, 1000));
+            // 0 = never filter this key.
+            s.per_key_ms[vk as usize] = Some(ms.min(1000));
+        }
+    }
+    // Measured gaps: hist.<hex vk>=<bucket>:<count>,... (non-zero buckets
+    // only). They only mean something under the baseline they were measured
+    // from, so a file whose sMeasureFrom was changed by hand drops them.
+    let baseline = map
+        .get("sHistMeasure")
+        .map_or(s.measure_from, |v| measure_from(v));
+    if baseline == s.measure_from {
+        for (k, v) in &map {
+            if let Some(hex) = k.strip_prefix("hist.")
+                && let Ok(vk) = u8::from_str_radix(hex, 16)
+            {
+                parse_histogram(v, &mut s.gap_hist[vk as usize]);
+            }
         }
     }
     s
+}
+
+fn measure_from(v: &str) -> MeasureFrom {
+    if v.eq_ignore_ascii_case("press") {
+        MeasureFrom::Press
+    } else {
+        MeasureFrom::Release
+    }
+}
+
+fn measure_from_value(m: MeasureFrom) -> &'static str {
+    match m {
+        MeasureFrom::Press => "press",
+        MeasureFrom::Release => "release",
+    }
+}
+
+/// `0:3,12:5,40:312` into `h`. A malformed pair or a bucket out of range is
+/// skipped on its own, like any other unreadable value.
+fn parse_histogram(v: &str, h: &mut GapHistogram) {
+    for pair in v.split(',') {
+        if let Some((bucket, count)) = pair.split_once(':')
+            && let (Ok(bucket), Ok(count)) =
+                (bucket.trim().parse::<usize>(), count.trim().parse::<u32>())
+            && bucket < GAP_BUCKETS
+        {
+            h[bucket] = count;
+        }
+    }
+}
+
+/// `hist.XX` lines for every key with measured gaps (empty when none).
+fn histogram_lines(s: &Settings) -> String {
+    let mut text = String::new();
+    for (vk, h) in s.gap_hist.iter().enumerate() {
+        let pairs: Vec<String> = h
+            .iter()
+            .enumerate()
+            .filter(|&(_, &n)| n > 0)
+            .map(|(bucket, n)| format!("{bucket}:{n}"))
+            .collect();
+        if !pairs.is_empty() {
+            text.push_str(&format!("hist.{vk:02X}={}\n", pairs.join(",")));
+        }
+    }
+    text
 }
 
 /// Persist settings atomically (temp file + `.bak` + rename).
@@ -314,7 +382,7 @@ pub fn save(s: &Settings) -> bool {
         let _ = fs::create_dir_all(dir);
     }
     let mut text = format!(
-        "[KeyboardChatteringFix]\niThreshold={}\nbFilterEnabled={}\nbPlaySound={}\nlpSoundFile={}\nbMinimizeOnLaunch={}\nbCloseToTray={}\nbRecordAllKeypress={}\niLogLimit={}\nsLanguage={}\nsMeasureFrom={}\niMinChatterMs={}\nbExcludeInjected={}\nbFilterMouse={}\niReleaseDeferMs={}\nsAutoDisableApps={}\nbAutoDisableFullscreen={}\nsHotkeyToggle={}\nsHotkeyCleaning={}\niCleaningTimeoutMin={}\niTotalPresses={}\niBlockedPresses={}\n",
+        "[KeyboardChatteringFix]\niThreshold={}\nbFilterEnabled={}\nbPlaySound={}\nlpSoundFile={}\nbMinimizeOnLaunch={}\nbCloseToTray={}\nbRecordAllKeypress={}\niLogLimit={}\nsLanguage={}\nsMeasureFrom={}\niMinChatterMs={}\nbExcludeInjected={}\nbFilterMouse={}\niMouseThreshold={}\niReleaseDeferMs={}\nsAutoDisableApps={}\nbAutoDisableFullscreen={}\nsHotkeyToggle={}\nsHotkeyCleaning={}\niCleaningTimeoutMin={}\niTotalPresses={}\niBlockedPresses={}\n",
         s.threshold_ms,
         if s.enabled { 1 } else { 0 },
         if s.play_sound { 1 } else { 0 },
@@ -324,13 +392,11 @@ pub fn save(s: &Settings) -> bool {
         if s.record_all_keys { 1 } else { 0 },
         s.log_limit,
         s.language.setting_value(),
-        match s.measure_from {
-            MeasureFrom::Press => "press",
-            MeasureFrom::Release => "release",
-        },
+        measure_from_value(s.measure_from),
         s.min_chatter_ms,
         if s.exclude_injected { 1 } else { 0 },
         if s.filter_mouse { 1 } else { 0 },
+        s.mouse_threshold_ms,
         s.release_defer_ms,
         one_line(&s.auto_disable_apps),
         if s.auto_disable_fullscreen { 1 } else { 0 },
@@ -354,6 +420,15 @@ pub fn save(s: &Settings) -> bool {
         if presses > 0 || blocked > 0 {
             text.push_str(&format!("stat.{vk:02X}={presses},{blocked}\n"));
         }
+    }
+    // Long and machine-written: last, behind a comment, so hand edits of the
+    // lines above stay easy.
+    let hist = histogram_lines(s);
+    if !hist.is_empty() {
+        text.push_str(&format!(
+            "; Measured key gaps for the threshold suggestion (written by the program)\nsHistMeasure={}\n{hist}",
+            measure_from_value(s.measure_from)
+        ));
     }
     // Atomic write: stage to a temp file in the same directory, keep the
     // previous generation as .bak, then rename over the main file, so a
@@ -478,7 +553,9 @@ mod tests {
             assert_eq!(s.per_key_ms[0x48], Some(120));
             assert_eq!(s.per_key_ms[0x20], Some(80));
             assert_eq!(s.per_key_ms[0x01], Some(30));
-            assert_eq!(s.per_key_ms.iter().flatten().count(), 3);
+            assert_eq!(s.per_key_ms[0x02], Some(0), "key.02=0: never filtered");
+            assert_eq!(s.per_key_ms.iter().flatten().count(), 4);
+            assert_eq!(s.mouse_threshold_ms, 30);
         }
     }
 
@@ -686,6 +763,7 @@ sLanguage={text}
                 close_to_tray: false,
                 language: LanguagePref::Fixed(Language::En),
                 per_key_ms,
+                mouse_threshold_ms: 45,
                 measure_from: MeasureFrom::Press,
                 min_chatter_ms: 9,
                 exclude_injected: false,
@@ -710,6 +788,11 @@ sLanguage={text}
                     counts[0x20] = 40;
                     counts
                 },
+                gap_hist: {
+                    let mut hist = crate::config::model::empty_histograms();
+                    hist[0x20][2] = 9;
+                    hist
+                },
             };
             assert!(save(&s));
             // No staging file may be left behind by the atomic write.
@@ -731,6 +814,8 @@ sLanguage={text}
             assert_eq!(back.min_chatter_ms, 9);
             assert!(!back.exclude_injected);
             assert!(back.filter_mouse);
+            assert_eq!(back.mouse_threshold_ms, 45);
+            assert_eq!(back.gap_hist[0x20][2], 9);
             assert_eq!(back.release_defer_ms, 30);
             assert_eq!(back.auto_disable_apps, "game.exe; other");
             assert!(back.auto_disable_fullscreen);
@@ -910,6 +995,92 @@ sLanguage={text}
             assert!(load_from(&bad).is_none());
             assert!(load_from(&dir.join("missing.ini")).is_none());
         });
+    }
+
+    /// Measured gaps survive a restart (the suggestion needs rare chatter
+    /// to add up), only non-zero buckets of used keys are written, and they
+    /// come last, after a comment.
+    #[test]
+    fn measured_gaps_round_trip_compactly() {
+        with_isolated_appdata(|dir| {
+            let mut s = Settings::default();
+            s.gap_hist[0x41][0] = 3;
+            s.gap_hist[0x41][40] = 312;
+            s.gap_hist[0x20][16] = 20;
+            assert!(save(&s));
+            let text =
+                std::fs::read_to_string(dir.join("KeyboardChatteringFix").join("settings.ini"))
+                    .unwrap();
+            let tail: Vec<&str> = text.lines().rev().take(4).collect();
+            assert_eq!(
+                tail,
+                [
+                    "hist.41=0:3,40:312",
+                    "hist.20=16:20",
+                    "sHistMeasure=release",
+                    "; Measured key gaps for the threshold suggestion (written by the program)",
+                ]
+            );
+            let back = load();
+            assert_eq!(back.gap_hist[0x41], s.gap_hist[0x41]);
+            assert_eq!(back.gap_hist[0x20], s.gap_hist[0x20]);
+            assert_eq!(back.gap_hist[0x42], [0; GAP_BUCKETS]);
+            // Nothing measured: no histogram block at all.
+            assert!(save(&Settings::default()));
+            let text =
+                std::fs::read_to_string(dir.join("KeyboardChatteringFix").join("settings.ini"))
+                    .unwrap();
+            assert!(!text.contains("hist") && !text.contains("sHistMeasure"));
+        });
+    }
+
+    #[test]
+    fn malformed_gap_entries_are_skipped_one_by_one() {
+        let s = parse(
+            "[KeyboardChatteringFix]\nhist.41=0:3,99:5,x:1,2:y,3:4,7\nhist.GG=1:1\nhist.42=\n",
+        );
+        let mut want = [0; GAP_BUCKETS];
+        want[0] = 3;
+        want[3] = 4;
+        assert_eq!(s.gap_hist[0x41], want);
+        assert_eq!(s.gap_hist[0x42], [0; GAP_BUCKETS]);
+    }
+
+    /// Gaps measured from the release mean something else once the baseline
+    /// was switched to the press by hand: they are dropped, not mixed.
+    #[test]
+    fn gaps_from_another_baseline_are_dropped() {
+        let other = parse(
+            "[KeyboardChatteringFix]\nsMeasureFrom=press\nsHistMeasure=release\nhist.41=1:5\n",
+        );
+        assert_eq!(other.gap_hist[0x41], [0; GAP_BUCKETS]);
+        let same =
+            parse("[KeyboardChatteringFix]\nsMeasureFrom=press\nsHistMeasure=press\nhist.41=1:5\n");
+        assert_eq!(same.gap_hist[0x41][1], 5);
+        // Written by hand without the tag: taken as the file's baseline.
+        let untagged = parse("[KeyboardChatteringFix]\nhist.41=1:5\n");
+        assert_eq!(untagged.gap_hist[0x41][1], 5);
+    }
+
+    #[test]
+    fn a_file_of_measured_gaps_alone_still_counts_as_settings() {
+        assert!(looks_like_settings("hist.41=1:5\n"));
+        assert!(looks_like_settings("iMouseThreshold=30\n"));
+        assert!(!looks_like_settings("history=1\n"));
+    }
+
+    /// `key.XX=0` means "never filter this key"; the mouse window is clamped
+    /// like the global one and defaults when absent.
+    #[test]
+    fn zero_per_key_window_and_mouse_window_parse() {
+        let s = parse("[KeyboardChatteringFix]\nkey.02=0\nkey.41=5000\niMouseThreshold=0\n");
+        assert_eq!(s.per_key_ms[0x02], Some(0));
+        assert_eq!(s.per_key_ms[0x41], Some(1000));
+        assert_eq!(s.mouse_threshold_ms, 1);
+        assert_eq!(
+            parse("[KeyboardChatteringFix]\n").mouse_threshold_ms,
+            crate::debounce::MOUSE_THRESHOLD_DEFAULT_MS
+        );
     }
 
     #[test]

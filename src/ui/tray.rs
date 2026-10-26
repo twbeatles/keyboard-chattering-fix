@@ -192,7 +192,8 @@ pub(crate) unsafe fn show_tray_menu(hwnd: HWND) {
         };
         item(MENU_SHOW, s.menu_show, MF_ENABLED);
         sep();
-        let toggle = if state() == TrayState::Off {
+        // Paused for a set time: the toggle resumes (see `commands::run`).
+        let toggle = if state() == TrayState::Off || super::foreground::timed_pause_active() {
             s.menu_enable
         } else {
             s.menu_disable
@@ -202,6 +203,10 @@ pub(crate) unsafe fn show_tray_menu(hwnd: HWND) {
             &with_hotkey(toggle, hotkeys::toggle_label()),
             MF_ENABLED,
         );
+        if let Ok(sub) = super::menu::pause_menu(s) {
+            let title = to_wide(s.menu_pause_for);
+            let _ = AppendMenuW(menu, MF_POPUP, sub.0 as usize, PCWSTR(title.as_ptr()));
+        }
         item(
             MENU_CLEANING,
             &with_hotkey(s.menu_cleaning, hotkeys::cleaning_label()),
