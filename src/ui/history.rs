@@ -196,10 +196,10 @@ fn event_rows(
 }
 
 /// A key's block window as shown in the lists: `50 ms`, `80 ms (custom)`,
-/// or "Not filtered" for a per-key 0.
+/// or "Not filtered" for a per-key 0 and for Shift/Ctrl by default.
 pub(crate) fn threshold_cell(s: &Strings, ms: u64, custom: bool) -> String {
     match (ms, custom) {
-        (0, true) => s.threshold_off.to_string(),
+        (0, _) => s.threshold_off.to_string(),
         (ms, true) => fill(s.threshold_custom_fmt, &[&ms.to_string()]),
         (ms, false) => format!("{ms} ms"),
     }
