@@ -157,6 +157,47 @@ pub(crate) fn prefill_ms(snap: &KeysSnapshot, vk: u8) -> u64 {
     }
 }
 
+/// What "Apply suggestions" changes: (key, current window, suggested
+/// window) for every key whose suggestion differs from its window. Keys
+/// set to 0 were left unfiltered on purpose and are skipped.
+pub(crate) fn suggested_changes(snap: &KeysSnapshot) -> Vec<(u8, u64, u64)> {
+    (0..=255u8)
+        .filter_map(|vk| {
+            let (cur, custom) = snap.thresholds[vk as usize];
+            match recommend(&snap.hist[vk as usize]) {
+                Advice::Suggest { ms, .. } if ms != cur && !(custom && cur == 0) => {
+                    Some((vk, cur, ms))
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Confirmation text listing the changes (`A: 35 -> 20 ms`), at most
+/// `MAX_LISTED` lines.
+pub(crate) fn changes_text(s: &Strings, changes: &[(u8, u64, u64)]) -> String {
+    const MAX_LISTED: usize = 12;
+    let mut lines: Vec<String> = changes
+        .iter()
+        .take(MAX_LISTED)
+        .map(|&(vk, cur, ms)| format!("{}: {cur} → {ms} ms", vk_name(vk)))
+        .collect();
+    if changes.len() > MAX_LISTED {
+        lines.push("…".to_string());
+    }
+    fill(
+        s.apply_all_confirm_fmt,
+        &[
+            &changes.len().to_string(),
+            &lines.join(
+                "
+",
+            ),
+        ],
+    )
+}
+
 fn columns(s: &Strings) -> [(&'static str, i32, bool); 4] {
     [
         (s.col_key, 104, false),
@@ -480,6 +521,43 @@ pub(crate) unsafe fn clear_key_stats(hwnd: HWND) {
     }
 }
 
+/// "Apply suggestions": every key's suggested window at once, after a
+/// confirmation listing the changes.
+pub(crate) unsafe fn apply_all_suggestions(hwnd: HWND) {
+    unsafe {
+        let Some((_, snap)) = take_snapshot() else {
+            return;
+        };
+        let s = strings(current_lang());
+        let changes = suggested_changes(&snap);
+        if changes.is_empty() {
+            msg_box(hwnd, s.title, s.apply_all_none, MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        let answer = msg_box(
+            hwnd,
+            s.key_apply_all_btn,
+            &changes_text(s, &changes),
+            MB_YESNO | MB_ICONQUESTION,
+        );
+        if answer != IDYES {
+            return;
+        }
+        let set: Vec<(u8, Option<u64>)> =
+            changes.iter().map(|&(vk, _, ms)| (vk, Some(ms))).collect();
+        let written = settings_form::set_key_overrides(&set);
+        invalidate();
+        refresh(hwnd, true);
+        let selected = STATE.lock().unwrap().selected;
+        if let Some(vk) = selected {
+            select_key(hwnd, vk, true);
+        }
+        if !written {
+            msg_box(hwnd, s.title, s.save_failed, MB_OK | MB_ICONWARNING);
+        }
+    }
+}
+
 /// Mouse "Apply": the window of every button without its own.
 pub(crate) unsafe fn apply_mouse_threshold(hwnd: HWND) {
     unsafe {
@@ -690,6 +768,42 @@ mod tests {
                 assert!(!line.contains("{}"), "{lang:?}: {line}");
             }
         }
+    }
+
+    /// "Apply suggestions" takes every key with a differing suggestion and
+    /// leaves keys set to 0 (not filtered) alone.
+    #[test]
+    fn apply_all_changes_suggested_keys_but_not_unfiltered_ones() {
+        let mut snap = snapshot();
+        // D: chatter at 0-4 ms, real presses from 35 ms -> 10 ms.
+        for (gap, n) in [(1u64, 5u32), (35, 3), (80, 40)] {
+            snap.hist[0x44][(gap / GAP_BUCKET_MS) as usize] += n;
+        }
+        assert_eq!(suggested_changes(&snap), [(0x41, 50, 20), (0x44, 50, 10)]);
+        // A key already at its suggestion has nothing to change.
+        snap.thresholds[0x41] = (20, true);
+        snap.thresholds[0x44] = (0, true);
+        assert_eq!(suggested_changes(&snap), []);
+
+        snap.thresholds[0x41] = (50, false);
+        for lang in Language::ALL.iter().copied() {
+            let text = changes_text(strings(lang), &suggested_changes(&snap));
+            assert!(text.contains("A: 50 → 20 ms"), "{lang:?}: {text}");
+            assert!(!text.contains("{}"), "{lang:?}: {text}");
+        }
+        let many: Vec<(u8, u64, u64)> = (0x41..0x50).map(|vk| (vk, 35, 20)).collect();
+        let text = changes_text(strings(Language::En), &many);
+        assert!(text.starts_with("Apply the suggested window to 15 keys?"));
+        assert_eq!(
+            text.matches(
+                " ms
+"
+            )
+            .count(),
+            12,
+            "{text}"
+        );
+        assert!(text.contains("…"));
     }
 
     #[test]

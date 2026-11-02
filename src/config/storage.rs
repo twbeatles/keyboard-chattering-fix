@@ -533,7 +533,7 @@ mod tests {
         for sample in &samples {
             let s = parse(sample);
             let d = Settings::default();
-            assert_eq!(s.threshold_ms, 50);
+            assert_eq!(s.threshold_ms, d.threshold_ms);
             assert!(s.enabled);
             assert!(!s.play_sound, "bPlaySound=0 with a comment is off");
             assert_eq!(s.sound_file, None);

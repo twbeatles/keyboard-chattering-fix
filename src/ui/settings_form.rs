@@ -283,10 +283,17 @@ fn persist_with(change: impl FnOnce(&mut Settings)) -> bool {
 /// concurrent edit of the file is kept. Returns whether the change reached
 /// disk.
 pub(crate) fn set_key_override(vk: u8, ms: Option<u64>) -> bool {
-    let ms = ms.map(|m| m.min(1000));
+    set_key_overrides(&[(vk, ms)])
+}
+
+/// [`set_key_override`] for several keys with one write ("Apply
+/// suggestions").
+pub(crate) fn set_key_overrides(changes: &[(u8, Option<u64>)]) -> bool {
     let mut per_key = None;
     let written = persist_with(|s| {
-        s.per_key_ms[vk as usize] = ms;
+        for &(vk, ms) in changes {
+            s.per_key_ms[vk as usize] = ms.map(|m| m.min(1000));
+        }
         per_key = Some(s.per_key_ms);
     });
     if let (Some(per_key), Some(shared)) = (per_key, SHARED.get()) {

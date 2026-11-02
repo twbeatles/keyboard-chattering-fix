@@ -117,6 +117,7 @@ pub(crate) const ID_MOUSE_MS_LABEL: i32 = 712;
 pub(crate) const ID_MOUSE_MS_EDIT: i32 = 713;
 pub(crate) const ID_MOUSE_MS_UNIT: i32 = 714;
 pub(crate) const ID_BTN_MOUSE_MS_SET: i32 = 715;
+pub(crate) const ID_BTN_KEY_APPLY_ALL: i32 = 716;
 
 // Menu commands (menu bar and tray share them).
 pub(crate) const MENU_SHOW: usize = 1001;

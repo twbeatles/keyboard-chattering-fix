@@ -119,6 +119,9 @@ define_strings! {
         key_set_btn,
         key_reset_btn,
         key_stats_btn,
+        key_apply_all_btn,
+        apply_all_confirm_fmt,
+        apply_all_none,
         keys_note,
         advice_pick,
         advice_need_fmt,
@@ -301,7 +304,14 @@ static KO: Strings = Strings {
     key_set_btn: "적용",
     key_reset_btn: "기본값으로",
     key_stats_btn: "이 키 통계 지우기",
-    keys_note: "적용·기본값·통계 지우기는 즉시 저장돼요. 0 ms = 거르지 않음. 권장값은 지금까지 잰 입력 간격으로 계산해요.",
+    key_apply_all_btn: "권장값 모두 적용",
+    apply_all_confirm_fmt: "권장값을 키 {}개에 적용할까요?
+
+{}
+
+0 ms(거르지 않음)로 둔 키는 그대로 둡니다. 바로 저장돼요.",
+    apply_all_none: "지금 적용할 권장값이 없어요. 권장값은 튄 입력과 평소 입력이 뚜렷하게 나뉜 키에만 나옵니다.",
+    keys_note: "적용·권장값 적용·기본값·통계 지우기는 즉시 저장돼요. 0 ms = 거르지 않음. 권장값은 지금까지 잰 입력 간격으로 계산해요.",
     advice_pick: "목록에서 키를 고르면 그 키에 맞는 권장 기준을 보여 드려요.",
     advice_need_fmt: "{}: 권장값을 계산하려면 이 키를 더 눌러야 해요 ({}/{}회).",
     advice_ok_fmt: "{}: 채터링으로 볼 만큼 빠른 재입력이 없었어요. 지금 기준이면 충분해요.",
@@ -476,12 +486,19 @@ static EN: Strings = Strings {
 
     filter_mouse: "Also filter mouse buttons (clicks registering twice)",
     mouse_hint: "When on, mouse buttons use the window above and clicks are counted. If double-clicks stop working, lower it; set single buttons below (0 ms = not filtered).",
-    card_keys: "Per-key block window",
+    card_keys: "Per-key windows",
     col_reco: "Suggested",
     key_set_btn: "Apply",
     key_reset_btn: "Default",
     key_stats_btn: "Clear key stats",
-    keys_note: "Apply, Default and Clear key stats save at once; 0 ms = not filtered. Suggestions use every gap measured so far.",
+    key_apply_all_btn: "Apply suggestions",
+    apply_all_confirm_fmt: "Apply the suggested window to {} keys?
+
+{}
+
+Keys set to 0 ms (not filtered) are left alone. Saved at once.",
+    apply_all_none: "No suggestion to apply yet. A key gets one once its bounces and real presses are clearly apart.",
+    keys_note: "Apply, suggestions, Default and Clear key stats save at once; 0 ms = not filtered. Suggestions use every gap measured so far.",
     advice_pick: "Pick a key in the list to see a suggested window for it.",
     advice_need_fmt: "{}: press this key a few more times for a suggestion ({}/{}).",
     advice_ok_fmt: "{}: no repeat fast enough to be chatter so far. The current window is fine.",

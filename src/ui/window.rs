@@ -399,6 +399,7 @@ unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             (ID_BTN_KEY_SET, BN_CLICKED) => keys_page::apply_override(hwnd),
             (ID_BTN_KEY_RESET, BN_CLICKED) => keys_page::clear_override(hwnd),
             (ID_BTN_KEY_STATS, BN_CLICKED) => keys_page::clear_key_stats(hwnd),
+            (ID_BTN_KEY_APPLY_ALL, BN_CLICKED) => keys_page::apply_all_suggestions(hwnd),
             (ID_BTN_MOUSE_MS_SET, BN_CLICKED) => keys_page::apply_mouse_threshold(hwnd),
             _ => {}
         }

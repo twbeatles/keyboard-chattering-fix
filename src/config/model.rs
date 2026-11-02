@@ -4,7 +4,10 @@
 //! sound-path validation in `sound`.
 
 use crate::{
-    debounce::{Debouncer, GAP_BUCKETS, GapHistogram, MOUSE_THRESHOLD_DEFAULT_MS, MeasureFrom},
+    debounce::{
+        Debouncer, GAP_BUCKETS, GapHistogram, MOUSE_THRESHOLD_DEFAULT_MS, MeasureFrom,
+        THRESHOLD_DEFAULT_MS,
+    },
     i18n::{Language, LanguagePref, system_language},
 };
 
@@ -110,7 +113,7 @@ impl Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            threshold_ms: 50,
+            threshold_ms: THRESHOLD_DEFAULT_MS,
             enabled: true,
             play_sound: false,
             sound_file: None,

@@ -70,7 +70,7 @@ Featuring a native Windows 11 Fluent Card interface, real-time diagnostic teleme
 - **🧹 Keyboard Cleaning Mode**: Locks all key presses so you can clean and wipe keycaps safely. Press `Enter` or click **Finish cleaning** to unlock; it also ends by itself after 5 minutes (`iCleaningTimeoutMin`).
 - **🔊 Custom Audio (.wav) & Tester**: Play custom `.wav` sounds or system beeps on chatter detection, complete with an in-app test button.
 - **⚙️ Windows Keyboard Control Panel**: One-click shortcut to launch Windows Keyboard Properties (`control.exe keyboard`) to calibrate repeat delays and rates.
-- **Per-Key Custom Overrides**: Keep a low global threshold (e.g. 50ms) and give erratic keys or mouse buttons their own, in the **Keys & Mouse** tab (applied and saved at once) or in the settings file. `0` leaves a key or button unfiltered (game double-taps, a mouse button you do not want touched).
+- **Per-Key Custom Overrides**: Keep a low global threshold (e.g. 35ms) and give erratic keys or mouse buttons their own, in the **Keys & Mouse** tab (applied and saved at once) or in the settings file. `0` leaves a key or button unfiltered (game double-taps, a mouse button you do not want touched).
 - **Window Close Customization (`bCloseToTray`)**: Choose whether the close button (X) minimizes to tray or exits completely.
 - **⌨️ Global Hotkeys**: Toggle protection or start cleaning mode from anywhere (e.g. `Ctrl+Alt+F12`, Advanced tab). Menus show the registered hotkeys.
 - **🎮 Automatic Pause**: Pause while listed apps (`game.exe; obs64.exe`) or any full-screen app is in front. The badge shows "◐ Paused" and the Home tab says why.
@@ -123,7 +123,7 @@ Settings are saved in `%APPDATA%\KeyboardChatteringFix\settings.ini` (or in `set
 
 ```ini
 [KeyboardChatteringFix]
-iThreshold=50          # Global chatter threshold in ms (1–1000)
+iThreshold=35          # Global chatter threshold in ms (1–1000)
 bFilterEnabled=1       # Enable (1) or disable (0) chatter filtering
 bPlaySound=0           # Play notification sound on block (1=On, 0=Off)
 lpSoundFile=           # Path to custom .wav file (empty = default beep)
@@ -159,8 +159,8 @@ A `#` or `;` after a space starts a comment, as in the sample (the sound path ke
 
 ### Tuning the Threshold
 
-1. Start with the default (50 ms, measured from key release). Chatter gaps are usually a few to about 20 ms; common guides suggest starting between 20 and 50 ms.
-2. Use the keyboard normally for a while, then open **Keys & Mouse**. Keys that chattered are listed with a **Suggested** value; select one and press **Apply**.
+1. Start with the default (35 ms, measured from key release). Chatter gaps are usually a few to about 20 ms, while a fast deliberate re-press of the same key (`ll`, or Korean `안녕`, `빨리`, `ㅋㅋ`) can come as early as 35 ms. Up to v0.3.5 the default was 50 ms; a settings file that still says 50 keeps it.
+2. Use the keyboard normally for a while, then open **Keys & Mouse**. Keys that chattered are listed with a **Suggested** value; select one and press **Apply**, or press **Apply suggestions** to give every such key its suggestion at once (keys set to 0 are left alone).
 3. If double typing persists on one key, raise only that key. If fast intentional repeats (e.g. `ll`, `ee`) get swallowed, lower the global value.
 4. "Check switch" means bounces and real presses overlap, so no threshold can separate them. Clean (compressed air / contact cleaner) or replace the switch.
 
@@ -287,7 +287,7 @@ The compiled binary will be placed at `target/release/keyboard-chattering-fix.ex
 - **🧹 키보드 청소 모드 (Clean Keyboard)**: 키캡을 닦을 때 키가 잘못 입력되지 않도록 모든 키 누름을 일시 차단합니다. 청소 후 `Enter` 키를 누르거나 **청소 끝내기** 버튼을 클릭하면 즉시 잠금이 해제되고, 잊어도 5분 뒤 자동으로 끝납니다(`iCleaningTimeoutMin`).
 - **🔊 커스텀 알림음 (.wav) & 사운드 테스트**: 채터링 차단 시 기본 비프음 외에 사용자가 지정한 `.wav` 효과음을 재생할 수 있으며, UI에서 즉시 테스트 청취가 가능합니다.
 - **⚙️ Windows 키보드 설정 바로가기**: `control.exe keyboard`를 원클릭으로 호출하여 키 반복 속도 및 지연 시간을 조율합니다.
-- **키별 개별 임계값 (Per-Key Override)**: 전체 키에는 50ms 등 낮은 전역값을 두고, 말썽인 키나 마우스 버튼에만 따로 기준을 줄 수 있습니다. [키·마우스] 탭에서 바로 적용·저장되며, 설정 파일로도 지정할 수 있습니다. `0`으로 두면 그 키·버튼은 거르지 않습니다(게임의 더블 탭, 건드리고 싶지 않은 마우스 버튼 등).
+- **키별 개별 임계값 (Per-Key Override)**: 전체 키에는 35ms 등 낮은 전역값을 두고, 말썽인 키나 마우스 버튼에만 따로 기준을 줄 수 있습니다. [키·마우스] 탭에서 바로 적용·저장되며, 설정 파일로도 지정할 수 있습니다. `0`으로 두면 그 키·버튼은 거르지 않습니다(게임의 더블 탭, 건드리고 싶지 않은 마우스 버튼 등).
 - **창 닫기 동작 커스터마이징 (`bCloseToTray`)**: 창 닫기(X 버튼) 시 트레이로 최소화할지, 완전 종료할지 선택 가능합니다.
 - **⌨️ 전역 단축키**: 어디서든 보호 켜기/끄기, 청소 모드 시작(예: `Ctrl+Alt+F12`, 고급 탭). 메뉴에 등록된 단축키가 표시됩니다.
 - **🎮 자동 일시 중지**: 지정한 프로그램(`game.exe; obs64.exe`)이나 전체 화면 앱이 앞에 있으면 잠시 멈춥니다. 상태 표시가 "◐ 잠시 멈춤"으로 바뀌고 홈 화면에 이유가 나옵니다.
@@ -340,7 +340,7 @@ keyboard-chattering-fix/
 
 ```ini
 [KeyboardChatteringFix]
-iThreshold=50          # 전역 채터링 임계값(ms). 이 시간 내의 재입력은 차단됨
+iThreshold=35          # 전역 채터링 임계값(ms). 이 시간 내의 재입력은 차단됨
 bFilterEnabled=1       # 채터링 필터 활성화 (1=켜짐, 0=꺼짐)
 bPlaySound=0           # 차단 시 알림음 재생 여부 (1=켜짐, 0=꺼짐)
 lpSoundFile=           # 사용자 지정 .wav 사운드 파일 경로 (비우면 기본 비프음)
@@ -376,8 +376,8 @@ key.02=0               # 0 = 이 키·버튼은 거르지 않음 (마우스 오�
 
 ### 차단 기준 맞추기
 
-1. 기본값(50ms, 키를 뗀 순간부터)으로 시작하세요. 채터링 간격은 보통 수 ms~20ms 정도이고, 일반적인 가이드는 20~50ms에서 시작하기를 권합니다.
-2. 한동안 평소처럼 쓴 뒤 [키·마우스] 탭을 열면, 튄 적이 있는 키가 **권장** 값과 함께 나옵니다. 키를 고르고 **적용**을 누르세요.
+1. 기본값(35ms, 키를 뗀 순간부터)으로 시작하세요. 채터링 간격은 보통 수 ms~20ms 정도인 반면, 같은 키를 일부러 빠르게 다시 누르는 입력(`안녕`의 ㄴㄴ, `빨리`의 ㄹㄹ, `ㅋㅋ`, `ll`)은 35ms 안팎까지 짧아집니다. v0.3.5까지는 기본값이 50ms였고, 설정 파일에 50이 저장돼 있으면 그 값을 그대로 씁니다.
+2. 한동안 평소처럼 쓴 뒤 [키·마우스] 탭을 열면, 튄 적이 있는 키가 **권장** 값과 함께 나옵니다. 키를 고르고 **적용**을 누르거나, **권장값 모두 적용**으로 권장값이 있는 키 전체에 한 번에 적용하세요(0으로 둔 키는 그대로 둠).
 3. 특정 키만 계속 두 번 입력되면 그 키만 올리세요. 일부러 빠르게 누른 연타(`ll`, `ee` 등)가 씹히면 전체 기준을 낮추세요.
 4. "스위치 점검"은 튄 입력과 평소 입력의 간격이 겹친다는 뜻으로, 어떤 기준으로도 둘을 구분할 수 없습니다. 에어 블로워·접점 부활제로 청소하거나 스위치를 교체하세요.
 

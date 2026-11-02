@@ -49,6 +49,12 @@ pub fn slot_of(vk: usize, extended: bool) -> usize {
     (vk & 0xFF) | (usize::from(extended) << 8)
 }
 
+/// Default block window of keys (`iThreshold`). Bounces measured from
+/// the release cluster under about 25 ms, while a fast real re-press of
+/// the same key — `안녕` (S S), `빨리` (F F), `ㅋㅋ`, `ll` — starts around
+/// 35 ms, so a wider default swallowed such letters.
+pub const THRESHOLD_DEFAULT_MS: u64 = 35;
+
 /// Default block window of mouse buttons (`iMouseThreshold`): below the
 /// release-to-press gap of a quick double-click, above contact bounce.
 pub const MOUSE_THRESHOLD_DEFAULT_MS: u64 = 30;
