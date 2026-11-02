@@ -123,9 +123,12 @@ pub struct Debouncer {
     pending_up: [Option<Duration>; SLOTS],
     /// Modifier keys held right now (see [`modifier_bit`]).
     mods: u8,
-    /// `mods` at each slot's last press: a re-press under another modifier
-    /// state is a different character, not chatter.
-    press_mods: [u8; SLOTS],
+    /// Bumped whenever `mods` changes (a held modifier's auto-repeat does
+    /// not count).
+    mod_epoch: u32,
+    /// `mod_epoch` at each slot's last release: a modifier pressed or
+    /// released after it means the user typed on purpose (see `judge_down`).
+    release_epoch: [u32; SLOTS],
     pub total_presses: u64,
     pub blocked_presses: u64,
     pub per_key_presses: [u64; 256],
@@ -168,7 +171,8 @@ impl Debouncer {
             held: [false; SLOTS],
             pending_up: [None; SLOTS],
             mods: 0,
-            press_mods: [0; SLOTS],
+            mod_epoch: 0,
+            release_epoch: [0; SLOTS],
             total_presses: 0,
             blocked_presses: 0,
             per_key_presses: [0; 256],
@@ -394,10 +398,17 @@ impl Debouncer {
         let slot = slot_of(vk, extended);
         let vk = vk & 0xFF;
 
+        // Modifier changes before this event: a modifier's own press is
+        // not a change since its own release.
+        let epoch = self.mod_epoch;
         let bit = modifier_bit(vk);
-        match kind {
-            KeyEventKind::Down => self.mods |= bit,
-            KeyEventKind::Up => self.mods &= !bit,
+        let mods = match kind {
+            KeyEventKind::Down => self.mods | bit,
+            KeyEventKind::Up => self.mods & !bit,
+        };
+        if mods != self.mods {
+            self.mods = mods;
+            self.mod_epoch = self.mod_epoch.wrapping_add(1);
         }
 
         // Cleaning mode: block every press; Enter (0x0D) ends it. Releases
@@ -424,6 +435,7 @@ impl Debouncer {
                     // still stands for both.
                     return Decision::Block;
                 }
+                self.release_epoch[slot] = self.mod_epoch;
                 // Keys that are never filtered are not held back either: a
                 // late Shift release would shift the next key (`깨` -> `꺠`).
                 if !self.release_defer.is_zero()
@@ -454,10 +466,10 @@ impl Debouncer {
                     // press as usual.
                     self.held[slot] = false;
                     self.last_release[slot] = Some(released);
-                    let then_pass = self.judge_down(slot, vk, now);
+                    let then_pass = self.judge_down(slot, vk, epoch, now);
                     return Decision::Flush { then_pass };
                 }
-                if self.judge_down(slot, vk, now) {
+                if self.judge_down(slot, vk, epoch, now) {
                     Decision::Pass
                 } else {
                     Decision::Block
@@ -467,11 +479,10 @@ impl Debouncer {
     }
 
     /// The press half of the filter: `true` forwards the press.
-    fn judge_down(&mut self, slot: usize, vk: usize, now: Duration) -> bool {
+    fn judge_down(&mut self, slot: usize, vk: usize, epoch: u32, now: Duration) -> bool {
         self.total_presses += 1;
         self.per_key_presses[vk] += 1;
-        let mods_changed = self.press_mods[slot] != self.mods;
-        self.press_mods[slot] = self.mods;
+        let mods_changed = self.release_epoch[slot] != epoch;
 
         // No release in between: genuine auto-repeat, never chatter.
         if self.held[slot] {
@@ -495,9 +506,12 @@ impl Debouncer {
                 self.log_passed(vk, now, Some(gap));
                 return true;
             }
-            // A modifier went down or up since the last press of this key:
-            // the user typed another character on purpose (`ㅆ` then `ㅅ`
-            // in `있습니다`), which a bouncing contact cannot do.
+            // A modifier went down or up after this key's release: the user
+            // typed another character on purpose (`ㅆ` then `ㅅ` in
+            // `있습니다`, or Shift let go and pressed again for `쌌`), which a
+            // bouncing contact cannot do. Counted from the release, not the
+            // press: Shift is often let go before the letter (Shift+T, Shift
+            // up, T up), and a bounce after that must still be blocked.
             if gap < self.effective_threshold(vk) && !mods_changed {
                 // The switch is physically down again: a further Down
                 // before the next Up is the keyboard's auto-repeat of a
@@ -696,6 +710,44 @@ mod tests {
         // Same state again (no Shift): a fast re-press is chatter.
         assert!(!d.decide(T, KeyEventKind::Down, ms(150)));
         assert_eq!((d.per_key_presses[T], d.per_key_blocked[T]), (4, 2));
+    }
+
+    /// Fast `ㅆ` (or a capital `T`): Shift is let go before the letter.
+    /// A bounce of the letter after its release is still chatter, though
+    /// the modifier state differs from that at its press (`있` -> `있ㅅ`).
+    #[test]
+    fn a_modifier_released_before_the_key_does_not_let_its_bounce_through() {
+        const LSHIFT: usize = 0xA0;
+        const T: usize = 0x54;
+        let mut d = Debouncer::new(50);
+        assert!(d.decide(LSHIFT, KeyEventKind::Down, ms(0)));
+        assert!(d.decide(T, KeyEventKind::Down, ms(10)));
+        assert!(d.decide(LSHIFT, KeyEventKind::Up, ms(40)));
+        assert!(d.decide(T, KeyEventKind::Up, ms(60)));
+        assert!(!d.decide(T, KeyEventKind::Down, ms(65)));
+        assert_eq!(d.per_key_blocked[T], 1);
+    }
+
+    /// `쌌`: Shift+T, Shift up, K, Shift down again, T. The modifier state
+    /// at both presses is the same, but Shift moved in between.
+    #[test]
+    fn a_modifier_pressed_again_between_presses_makes_a_new_keystroke() {
+        const LSHIFT: usize = 0xA0;
+        const T: usize = 0x54;
+        const K: usize = 0x4B;
+        let mut d = Debouncer::new(50);
+        assert!(d.decide(LSHIFT, KeyEventKind::Down, ms(0)));
+        assert!(d.decide(T, KeyEventKind::Down, ms(10)));
+        assert!(d.decide(T, KeyEventKind::Up, ms(60)));
+        assert!(d.decide(LSHIFT, KeyEventKind::Up, ms(65)));
+        assert!(d.decide(K, KeyEventKind::Down, ms(70)));
+        assert!(d.decide(LSHIFT, KeyEventKind::Down, ms(90)));
+        assert!(d.decide(T, KeyEventKind::Down, ms(100)));
+        // Shift's own auto-repeat while held is no modifier change.
+        assert!(d.decide(T, KeyEventKind::Up, ms(150)));
+        assert!(d.decide(LSHIFT, KeyEventKind::Down, ms(155)));
+        assert!(!d.decide(T, KeyEventKind::Down, ms(160)));
+        assert_eq!((d.per_key_presses[T], d.per_key_blocked[T]), (3, 1));
     }
 
     /// With a release delay on, a held-back Shift release reached
