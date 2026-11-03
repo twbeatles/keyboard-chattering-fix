@@ -47,7 +47,7 @@ fn workspace_uses_edition_2024_and_resolver_3() {
 
 #[test]
 fn gen_keyword_not_used_as_identifier() {
-    let hook = read("src/input/hook.rs");
+    let hook = read("src/input/hook/control.rs");
     assert!(
         !hook.contains("let gen =") && !hook.contains("if gen =="),
         "`gen` is a reserved keyword in edition 2024; use `generation`"
@@ -69,7 +69,7 @@ fn extern_block_is_marked_unsafe() {
 
 #[test]
 fn env_mutation_is_wrapped_in_unsafe() {
-    for relative in ["src/config/storage.rs", "src/app/bootstrap.rs"] {
+    for relative in ["src/config/storage/tests.rs", "src/app/bootstrap.rs"] {
         let text = read(relative);
         let lines: Vec<&str> = text.lines().collect();
         for (index, line) in lines.iter().enumerate() {
@@ -78,9 +78,10 @@ fn env_mutation_is_wrapped_in_unsafe() {
                 && !trimmed.starts_with("//")
             {
                 let same_line = trimmed.contains("unsafe");
-                let prev_is_unsafe_open = index > 0
-                    && lines[index - 1].trim() == "unsafe {"
-                    && line.starts_with("            ");
+                // The call must sit directly inside an `unsafe {` block; the
+                // block's own indentation is irrelevant (folder-split files
+                // are dedented one level relative to the old single file).
+                let prev_is_unsafe_open = index > 0 && lines[index - 1].trim() == "unsafe {";
                 assert!(
                     same_line || prev_is_unsafe_open,
                     "{relative} must wrap env mutation in `unsafe`: {trimmed}"

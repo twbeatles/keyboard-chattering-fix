@@ -78,7 +78,7 @@
 - 앱은 헬퍼의 버전 리소스를 읽어 `ProductName`이
   `Keyboard Chatter Fix Updater`이고 버전이
   `[HELPER_MIN_VERSION, 앱 VERSION]` 범위인 경우에만 사용합니다
-  (`src/updater/staging.rs`). 버전 리소스가 없는 구형 헬퍼는 허용합니다.
+  (`src/updater/staging/helper.rs`). 버전 리소스가 없는 구형 헬퍼는 허용합니다.
 - 그래서 헬퍼 CLI(`--pid --current --replacement --sha256 --relaunch-arg
   --timeout-secs`)는 **추가만 가능**합니다. 플래그를 없애거나 의미를 바꾸면
   `HELPER_MIN_VERSION`을 올리고, 사용자가 릴리스 zip의 헬퍼로 교체해야 함을

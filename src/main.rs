@@ -8,13 +8,25 @@
 //!
 //! - `app`: startup orchestration (`bootstrap`), terminal CLI (`cli`),
 //!   single-instance guard (`instance`), process-wide state (`state`)
-//! - `input`: low-level keyboard hook (`hook`) and audio feedback (`sound`)
-//! - `config`: settings model, atomic persistence, startup entry, sound path
+//! - `input`: low-level keyboard hook (`hook`:
+//!   `queue`/`procs`/`send`/`control`) and audio feedback (`sound`)
+//! - `config`: settings model (`model`), atomic persistence (`storage`:
+//!   `paths`/`encoding`/`guard`/`parse`/`serialize`/`io`), startup entry
+//!   (`autostart`: `key`/`task`/`consts`/`marker`/`run`), sound path (`sound`)
 //! - `debounce`: time-based chatter filter core
-//! - `recommend`: per-key threshold advice from measured gaps
-//! - `i18n`: language selection and localizable strings
-//! - `ui`: native Win32 presentation (window, tray, paint, forms, update flow)
-//! - `updater`: signed release-update client over GitHub Releases
+//!   (`types`/`filter`/`thresholds`/`stats`)
+//! - `recommend`: per-key threshold advice from measured gaps (`advice`)
+//! - `i18n`: language selection (`language`) and localizable strings
+//!   (`strings`: `schema`/`ko`/`en`/`api`)
+//! - `ui`: native Win32 presentation — `window` (`nonce`/`create`/`handlers`/
+//!   `dark_menu`/`session`/`proc`), `stats` (`model`/`render`/`tick`/`update`),
+//!   `history` (`view`/`clock`/`rows`/`csv`/`table`), `keys_page`
+//!   (`model`/`table`/`actions`), `layout` (`page`/`kinds`/`specs`/`query`/
+//!   `state`), `settings_form` (`fields`/`persist`/`sound`/`save`), plus tray,
+//!   paint, commands, update flow
+//! - `updater`: signed release-update client over GitHub Releases — `staging`
+//!   (`guard`/`helper`/`stage`/`launch`) among `error`/`model`/`version`/
+//!   `canonical`/`manifest`/`http`
 
 #![cfg_attr(not(test), windows_subsystem = "windows")]
 
