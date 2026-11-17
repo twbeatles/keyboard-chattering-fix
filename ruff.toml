@@ -1,0 +1,8 @@
+# kcfix-rs Ruff 단계적 도입 — S1_BASE (2026-11-16)
+# S2 이후 규칙은 검증 후 확장. ruff 기본값 광범위라 단계를 명시 범위로 고정.
+line-length = 88
+preview = false
+
+[lint]
+select = ["E4", "E7", "E9", "F", "I", "B"]
+fixable = []

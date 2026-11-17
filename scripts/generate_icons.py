@@ -1,6 +1,7 @@
-import math
 import os
+
 from PIL import Image, ImageDraw, ImageFilter
+
 
 def create_keyboard_icon():
     # 512x512 고해상도로 렌더링한 후 256x256 등으로 리사이즈하여 고품질 안티에일리어싱 적용

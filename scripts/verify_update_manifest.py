@@ -68,8 +68,8 @@ def _parse_expiry(value: object) -> "datetime | None":
             continue
     try:
         return datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        raise ValueError(f"expires_at is not a valid timestamp: {value!r}")
+    except ValueError as err:
+        raise ValueError(f"expires_at is not a valid timestamp: {value!r}") from err
 
 
 def validate_payload(payload: dict[str, object]) -> None:
