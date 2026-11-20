@@ -1,10 +1,10 @@
 {
-    "version": "0.3.5",
+    "version": "0.3.6",
     "description": "Keyboard and mouse-button chatter filter for Windows: stops keys and clicks from registering twice.",
     "homepage": "https://github.com/twbeatles/keyboard-chattering-fix",
     "license": "MIT",
-    "url": "https://github.com/twbeatles/keyboard-chattering-fix/releases/download/v0.3.5/KeyboardChatteringFix.zip",
-    "hash": "e86801e59f6202291cdcdf3738515f7afe5c3ad0e67a1bc93b28ffeb694e6d18",
+    "url": "https://github.com/twbeatles/keyboard-chattering-fix/releases/download/v0.3.6/KeyboardChatteringFix.zip",
+    "hash": "3beade6b05817508fc7c54f43d504deab561c0ef5ccf2de758b07c5031cc91c4",
     "bin": "KeyboardChatteringFix.exe",
     "shortcuts": [
         [
