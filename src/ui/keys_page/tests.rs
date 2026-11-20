@@ -45,8 +45,8 @@ fn snapshot() -> Box<KeysSnapshot> {
     snap.presses[0x42] = 300;
     snap.hist[0x42][GAP_BUCKETS - 1] = 300;
     // Left mouse: gaps overlap, nothing blocked -> listed to check.
-    for i in 0..40 {
-        snap.hist[0x01][i] = 1;
+    for slot in snap.hist[0x01].iter_mut().take(40) {
+        *slot = 1;
     }
     snap
 }

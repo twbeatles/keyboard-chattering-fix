@@ -127,8 +127,7 @@ impl Debouncer {
     pub fn top_chattered_key(&self) -> Option<(u8, u64, f64)> {
         let mut best_vk = None;
         let mut max_blocked = 0;
-        for vk in 0..256 {
-            let blocked = self.per_key_blocked[vk];
+        for (vk, &blocked) in self.per_key_blocked.iter().enumerate().take(256) {
             if blocked > max_blocked {
                 max_blocked = blocked;
                 best_vk = Some(vk as u8);
