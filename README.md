@@ -7,7 +7,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-Windows_10%2F11-0078D6?logo=windows&logoColor=white" alt="Platform" />
-  <img src="https://img.shields.io/badge/Language-English_%7C_한국어-005FB8" alt="Languages" />
+  <img src="https://img.shields.io/badge/Language-English_%7C_한국어_%7C_%E6%97%A5%E6%9C%AC%E8%AA%9E-005FB8" alt="Languages" />
   <img src="https://img.shields.io/badge/Built_with-Rust-DEA584?logo=rust&logoColor=white" alt="Rust" />
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License" />
 </p>
@@ -47,6 +47,7 @@ Just launch it and leave it in the system tray: it blocks accidental bounces in 
 #### 1. Smart Real-Time Filtering
 - **Blocks bounces, keeps real typing**: Only ignores rapid unintended re-presses within your block window (default **35 ms** from key release). Normal fast typing, held-key auto-repeat, and software input (IMEs, AutoHotkey, remote desktop) pass through cleanly.
 - **Optional mouse button filtering**: Stops single clicks on left, right, middle, or side mouse buttons from firing twice, using a separate default window (**30 ms**) so intentional double-clicks keep working.
+- **Optional wheel reversal filtering**: Stops a worn wheel encoder from briefly scrolling the other way (blocks an opposite-direction tick within **80 ms**; same-direction scrolling always passes, `key.0A` tunes the window).
 - **Hold stabilization (`Release delay`)**: Optionally holds back a key or button release for a short window (e.g. 20–40 ms) so a brief mid-hold contact flicker doesn't drop a mouse drag or interrupt movement in games.
 - **Physical-key awareness**: Main `Enter`/arrows and numpad `Enter`/arrows are tracked independently so switching between them never triggers false blocks.
 
@@ -57,6 +58,7 @@ Just launch it and leave it in the system tray: it blocks accidental bounces in 
 #### 3. Live Diagnostics & History (**Home** & **History** tabs)
 - **At-a-glance health**: See total presses, blocked bounces, block rate, the most recent blocked key, and which key fails most often.
 - **Filterable log & CSV export**: View *Blocked only*, *All input*, or *Per-key summary*, search by key name, double-click a key row to jump straight to tuning it, or export the log to an Excel-ready CSV file (**File > Export history (CSV)…**).
+- **Switch deterioration watch**: The per-key summary shows each key's blocked count for the trailing 7 days. When a key's chatter jumps (20+ blocks in 7 days and several times the previous week), a tray balloon suggests checking the switch — once per key per day.
 
 #### 4. Keyboard Cleaning Mode
 - Lock all key presses with one click (from the **Home** tab, tray menu, or a hotkey) so you can safely wipe your keyboard.
@@ -64,15 +66,16 @@ Just launch it and leave it in the system tray: it blocks accidental bounces in 
 
 #### 5. Auto Pause & Quick Tray Controls
 - **Auto pause for games & apps**: Automatically step aside while full-screen apps or specific executables (e.g. `game.exe; obs64.exe`) are in front.
+- **Per-app block windows**: Give individual apps their own window instead of the global one (e.g. `game.exe=80; editor.exe=25` in **Settings**). `0` never filters that app. Per-key overrides still win.
 - **Timed pause**: Pause protection for **15 minutes** or **1 hour** from the tray or **Tools** menu; protection resumes automatically when time is up.
 - **Global hotkeys**: Toggle protection or start cleaning mode from anywhere (configured in the **Advanced** tab).
 - **Tray-friendly**: Closing the window (`X`) keeps protection running in the system tray (the icon turns gray when paused or off).
 
 #### 6. Native Windows Experience & Convenience
-- **Auto theme & language**: Automatically matches Windows Dark/Light mode and switches between **English** and **Korean** based on your Windows language (or pin your preference in **Settings**).
+- **Auto theme & language**: Automatically matches Windows Dark/Light mode and switches between **English**, **Korean**, and **Japanese** based on your Windows language (or pin your preference in **Settings**).
 - **Custom block sound**: Play the system beep or your own `.wav` sound whenever a bounce is blocked, with an in-app preview button.
 - **Portable mode**: Place a `settings.ini` file next to the `.exe` to store settings locally instead of `%APPDATA%`.
-- **Safe updates**: Use **Help > Check for Updates…** (or right-click the tray icon > **Check for Updates**) to verify and install signed updates safely.
+- **Safe updates**: Use **Help > Check for Updates…** (or right-click the tray icon > **Check for Updates**) to verify and install signed updates safely. The app also checks by itself about once a week and shows only a tray balloon when a new version is out (click it to update; turn it off in **Settings** with automatic update check).
 
 ---
 
@@ -127,9 +130,13 @@ sMeasureFrom=release   # Measurement baseline: "release" or "press"
 iMinChatterMs=0        # Ignore chatter intervals below this limit (ms)
 bExcludeInjected=1     # Ignore synthetic events from AHK/IME/macros (1=On)
 bFilterMouse=0         # Also filter mouse button chatter (1=On)
+bFilterWheel=0         # Also filter wheel reversals (scroll jumping the other way, 1=On)
+bAutoCheckUpdate=1     # Check for updates automatically about once a week (1=On)
+iLastUpdateCheck=0     # Unix time of the last finished update check (managed by the program)
 iMouseThreshold=30     # Block window of mouse buttons without their own key.XX (ms, 1–1000)
 iReleaseDeferMs=0      # Hold releases of held keys back this long (0=off, 0–100; 20–40 typical)
 sAutoDisableApps=      # Pause while these apps are in front, e.g. "game.exe; obs64.exe"
+sAppProfiles=          # Per-app block windows, e.g. "game.exe=80; editor.exe=25" (0 = never filter)
 bAutoDisableFullscreen=0 # Pause while any full-screen app is in front (1=On)
 sHotkeyToggle=         # Hotkey that toggles protection, e.g. "Ctrl+Alt+F12" (empty = none)
 sHotkeyCleaning=       # Hotkey that starts cleaning mode, e.g. "Ctrl+Alt+F11"
@@ -142,7 +149,7 @@ key.01=30              # Custom 30ms threshold for the left mouse button
 key.02=0               # 0 = never filter this key or button (right mouse button)
 ```
 
-> Statistics (`stat.XX`) and measured gap histograms (`sHistMeasure`, `hist.XX`) are managed automatically at the bottom of the file.
+> Statistics (`stat.XX`), measured gap histograms (`sHistMeasure`, `hist.XX`), daily per-key totals (`day.YYYYMMDD`), and deterioration warnings (`alert.YYYYMMDD`) are managed automatically at the bottom of the file.
 
 #### Command Line Options
 
@@ -152,6 +159,7 @@ key.02=0               # 0 = never filter this key or button (right mouse button
 | `--check-update` | Check for a newer release |
 | `--check-helper` | Verify `kcfix-updater.exe` is usable (exit code 0) |
 | `--check-language` | Show which language `auto` selects on this PC |
+| `--toggle` / `--pause-15` / `--pause-60` / `--resume` / `--cleaning` | Control the running instance instead of starting a new copy (e.g. from AutoHotkey, Stream Deck, Task Scheduler). Needs the same elevation when the app runs as administrator |
 
 #### Checking for Updates & Release Pipeline
 - Use **Help > Check for Updates…**, right-click the tray icon > **Check for Updates**, or run `KeyboardChatteringFix.exe --check-update`.
@@ -206,6 +214,7 @@ The compiled binary is created at `target/release/keyboard-chattering-fix.exe`.
 #### 1. 똑똑한 실시간 채터링 차단
 - **튀는 입력만 정밀 차단**: 키를 뗀 직후 아주 짧은 시간(기본 **35 ms**) 안에 다시 들어오는 오입력만 막아 줍니다. 평소 타자, 키를 꾹 누르는 연속 입력(오토리핏), 한글 쌍자음 입력(`ㅆ`, `뺐`, `있습니다` 등), 원격 데스크톱 및 매크로 프로그램 입력은 자연스럽게 통과합니다.
 - **마우스 버튼 채터링 방지 (선택)**: 왼쪽·오른쪽·가운데·측면 버튼의 원치 않는 더블클릭도 막아 줍니다. 의도적인 빠른 더블클릭이 씹히지 않도록 마우스에는 별도 기준(기본 **30 ms**)을 적용합니다.
+- **마우스 휠 튐 방지 (선택)**: 마모된 휠이 반대 방향으로 잠깐 튀는 스크롤을 막아 줍니다(반대 방향 틱이 **80 ms** 안에 오면 차단, 같은 방향 스크롤은 항상 통과, `key.0A`로 조절).
 - **눌림 유지 보정 (`떼기 확인 시간`)**: 키나 버튼을 누르고 있는 도중 접점이 미세하게 떨어졌다 붙는 현상을 보완해(예: 20~40 ms 설정), 게임 중 이동 끊김이나 마우스 드래그 풀림을 줄여 줍니다.
 - **물리 키 구분**: 일반 `Enter`·방향키와 숫자패드 `Enter`·방향키를 서로 다른 키로 구분해 오작동을 막습니다.
 
@@ -216,6 +225,7 @@ The compiled binary is created at `target/release/keyboard-chattering-fix.exe`.
 #### 3. 한눈에 보는 통계와 기록 (**홈** / **기록** 탭)
 - **실시간 입력 통계**: 전체 입력 수, 막은 횟수, 차단 비율(%), 가장 최근에 막은 키, 가장 자주 튀는 키를 실시간으로 확인할 수 있습니다.
 - **상세 입력 기록 & 엑셀 내보내기**: *막은 입력만 / 모든 입력 / 키별 통계* 보기를 전환하고 키 이름으로 검색할 수 있습니다. 통계 행을 두 번 클릭하면 해당 키 설정으로 바로 이동하며, **파일 > 기록 내보내기(CSV)…**로 엑셀에서 바로 열리는 기록 파일을 저장할 수 있습니다.
+- **스위치 열화 감시**: 키별 통계에 최근 7일간 막은 횟수가 표시됩니다. 어느 키의 채터링이 갑자기 늘면(7일간 20회 이상, 이전 주 대비 수 배) 트레이 풍선으로 스위치 점검을 안내합니다(키당 하루 한 번).
 
 #### 4. 키보드 청소 모드
 - **홈** 탭 버튼, 트레이 아이콘 우클릭 메뉴, 또는 단축키로 **키보드 청소 모드**를 켜면 모든 키 입력을 일시 잠가 안심하고 키보드를 닦을 수 있습니다.
@@ -223,15 +233,16 @@ The compiled binary is created at `target/release/keyboard-chattering-fix.exe`.
 
 #### 5. 상황별 자동 일시 중지 & 빠른 제어
 - **게임·전체 화면 자동 일시 중지**: 특정 프로그램(예: `game.exe; obs64.exe`)이나 전체 화면 앱이 앞에 있을 때는 보호를 자동으로 잠시 멈춥니다.
+- **앱별 차단 기준**: 전역 기준 대신 앱마다 다른 기준을 쓸 수 있습니다(**설정**에서 예: `game.exe=80; editor.exe=25`). `0`이면 그 앱은 막지 않습니다. 키별 개별 기준이 있으면 그게 우선합니다.
 - **시간 정해 잠시 멈추기**: 트레이 메뉴 또는 **도구** 메뉴에서 **15분** 또는 **1시간** 동안 잠시 멈출 수 있으며, 시간이 지나면 자동으로 보호가 재개됩니다.
 - **전역 단축키**: 어떤 화면에서든 보호 켜기/끄기 및 청소 모드를 바로 실행할 수 있습니다(**고급** 탭에서 지정).
 - **깔끔한 트레이 상주**: 창을 닫아도(`X`) 트레이에서 계속 보호하며, 보호가 꺼지거나 멈추면 트레이 아이콘이 회색으로 바뀝니다.
 
 #### 6. Windows에 맞춘 편의 기능
-- **다크/라이트 모드 & 언어 자동 맞춤**: Windows 테마와 언어 설정(한국어 / English)을 자동으로 따라가며, **설정** 탭에서 원하는 언어로 고정할 수도 있습니다.
+- **다크/라이트 모드 & 언어 자동 맞춤**: Windows 테마와 언어 설정(한국어 / English / 日本語)을 자동으로 따라가며, **설정** 탭에서 원하는 언어로 고정할 수도 있습니다.
 - **알림음 & 커스텀 `.wav` 지원**: 입력을 막았을 때 기본 알림음이나 원하는 `.wav` 파일을 재생할 수 있고, 설정 화면에서 바로 미리 들어볼 수 있습니다.
 - **포터블 모드**: 실행 파일 옆에 `settings.ini` 파일을 두면 `%APPDATA%` 대신 해당 파일에 설정을 저장합니다.
-- **안전한 업데이트 확인**: **도움말 > 업데이트 확인** 또는 트레이 아이콘 우클릭 → **업데이트 확인**으로 새 버전을 확인하고 안전하게 업데이트할 수 있습니다.
+- **안전한 업데이트 확인**: **도움말 > 업데이트 확인** 또는 트레이 아이콘 우클릭 → **업데이트 확인**으로 새 버전을 확인하고 안전하게 업데이트할 수 있습니다. 주 1회 정도는 프로그램이 알아서 확인하고, 새 버전이 있을 때만 트레이 풍선으로 알려 줍니다(클릭하면 업데이트, 끄려면 **[설정]** 에서 자동 확인 해제).
 
 ---
 
@@ -286,9 +297,13 @@ sMeasureFrom=release   # 간격 측정 기준 ("release" 또는 "press")
 iMinChatterMs=0        # 이 값보다 작은 간격은 결함 입력으로 간주하여 통과
 bExcludeInjected=1     # 외부 매크로/IME 합성 입력 제외 (1=권장)
 bFilterMouse=0         # 마우스 버튼 채터링도 막기 (1=켜짐)
+bFilterWheel=0         # 마우스 휠 튐(반대 방향 스크롤)도 막기 (1=켜짐)
+bAutoCheckUpdate=1     # 업데이트를 자동으로 확인 (주 1회 정도, 1=켜짐)
+iLastUpdateCheck=0     # 마지막 업데이트 확인 시각(Unix 시간, 프로그램이 관리)
 iMouseThreshold=30     # 개별 key.XX가 없는 마우스 버튼의 차단 기준(ms, 1~1000)
 iReleaseDeferMs=0      # 누르고 있는 키의 뗌을 이만큼 보류 (0=끔, 0~100, 보통 20~40)
 sAutoDisableApps=      # 이 프로그램이 앞에 있으면 잠시 멈춤 (예: "game.exe; obs64.exe")
+sAppProfiles=          # 앱별 차단 기준 (예: "game.exe=80; editor.exe=25", 0 = 그 앱은 거르지 않음)
 bAutoDisableFullscreen=0 # 전체 화면 앱이 앞에 있으면 잠시 멈춤 (1=켜짐)
 sHotkeyToggle=         # 보호 켜기/끄기 단축키 (예: "Ctrl+Alt+F12", 비우면 없음)
 sHotkeyCleaning=       # 청소 모드 단축키 (예: "Ctrl+Alt+F11")
@@ -301,7 +316,7 @@ key.01=30              # 마우스 왼쪽 버튼에만 30ms 적용
 key.02=0               # 0 = 이 키·버튼은 거르지 않음 (마우스 오른쪽 버튼)
 ```
 
-> 파일 하단의 누적 통계(`stat.XX`)와 권장 기준 계산용 간격 데이터(`sHistMeasure`, `hist.XX`)는 프로그램이 자동으로 관리합니다.
+> 파일 하단의 누적 통계(`stat.XX`), 권장 기준 계산용 간격 데이터(`sHistMeasure`, `hist.XX`), 일자별 키 입력(`day.YYYYMMDD`), 열화 경고 기록(`alert.YYYYMMDD`)은 프로그램이 자동으로 관리합니다.
 
 #### 명령줄 옵션
 
@@ -311,6 +326,7 @@ key.02=0               # 0 = 이 키·버튼은 거르지 않음 (마우스 오�
 | `--check-update` | 새 릴리스 확인 |
 | `--check-helper` | 프로그램 옆 `kcfix-updater.exe` 사용 가능 여부 확인 (정상이면 종료 코드 0) |
 | `--check-language` | 현재 PC에서 `auto`가 선택하는 언어 확인 |
+| `--toggle` / `--pause-15` / `--pause-60` / `--resume` / `--cleaning` | 새 창을 띄우지 않고 실행 중인 프로그램에 명령 전달 (AutoHotkey·Stream Deck·작업 스케줄러용). 관리자 권한으로 실행 중이면 같은 권한으로 실행해야 함 |
 
 #### 업데이트 확인 및 배포 구조
 - 창 메뉴의 **도움말 > 업데이트 확인**, 트레이 아이콘 우클릭 → **업데이트 확인**, 또는 터미널에서 `KeyboardChatteringFix.exe --check-update`로 확인할 수 있습니다.

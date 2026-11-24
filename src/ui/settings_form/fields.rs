@@ -94,6 +94,7 @@ pub(crate) unsafe fn load_into_form(hwnd: HWND, init: &Settings) {
         );
         set_field(hwnd, ID_EDIT_DEFER, &init.release_defer_ms.to_string());
         set_field(hwnd, ID_EDIT_AUTO_APPS, &init.auto_disable_apps);
+        set_field(hwnd, ID_EDIT_APP_PROFILES, &init.app_profiles);
         set_field(hwnd, ID_EDIT_HOTKEY_TOGGLE, &init.hotkey_toggle);
         set_field(hwnd, ID_EDIT_HOTKEY_CLEAN, &init.hotkey_cleaning);
         for id in [
@@ -117,9 +118,11 @@ pub(crate) unsafe fn load_into_form(hwnd: HWND, init: &Settings) {
         set_toggle(hwnd, ID_TOGGLE_AUTOSTART, config::autostart_enabled());
         set_toggle(hwnd, ID_TOGGLE_MINIMIZE, init.minimize_on_launch);
         set_toggle(hwnd, ID_TOGGLE_CLOSE_TO_TRAY, init.close_to_tray);
+        set_toggle(hwnd, ID_TOGGLE_AUTO_UPDATE, init.auto_check_update);
         set_toggle(hwnd, ID_TOGGLE_EXCLUDE_INJECTED, init.exclude_injected);
         set_toggle(hwnd, ID_TOGGLE_RECORD_ALL, init.record_all_keys);
         set_toggle(hwnd, ID_TOGGLE_MOUSE, init.filter_mouse);
+        set_toggle(hwnd, ID_TOGGLE_WHEEL, init.filter_wheel);
         set_toggle(
             hwnd,
             ID_TOGGLE_AUTO_FULLSCREEN,

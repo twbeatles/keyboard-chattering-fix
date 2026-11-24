@@ -1,4 +1,4 @@
-use super::types::{VK_PACKET, VK_PROCESSKEY};
+use super::types::{VK_PACKET, VK_PROCESSKEY, WHEEL_REVERSE_MS};
 use super::*;
 use std::time::Duration;
 
@@ -699,6 +699,32 @@ fn zero_window_never_filters_the_key() {
 }
 
 #[test]
+fn app_profile_overrides_global_but_not_per_key() {
+    let mut d = Debouncer::new(50);
+    assert_eq!(d.effective_threshold(0x41), Duration::from_millis(50));
+    d.set_app_threshold(Some(80));
+    assert_eq!(d.effective_threshold(0x41), Duration::from_millis(80));
+    // Mouse buttons and the wheel follow the profile too.
+    assert_eq!(d.effective_threshold(0x01), Duration::from_millis(80));
+    assert_eq!(d.key_threshold_ms(0x0A), (80, false));
+    // A per-key override still wins over the profile.
+    d.set_key_threshold(0x41, Some(120));
+    assert_eq!(d.key_threshold_ms(0x41), (120, true));
+    assert_eq!(d.effective_threshold(0x41), Duration::from_millis(120));
+    // Zero never filters (but still counts presses).
+    d.set_app_threshold(Some(0));
+    assert!(d.decide(0x20, KeyEventKind::Down, ms(0)));
+    assert!(d.decide(0x20, KeyEventKind::Up, ms(10)));
+    assert!(d.decide(0x20, KeyEventKind::Down, ms(11)));
+    assert_eq!((d.per_key_presses[0x20], d.per_key_blocked[0x20]), (2, 0));
+    // Clearing restores the global (and wheel) windows.
+    d.set_key_threshold(0x41, None);
+    d.set_app_threshold(None);
+    assert_eq!(d.effective_threshold(0x41), Duration::from_millis(50));
+    assert_eq!(d.key_threshold_ms(0x0A), (WHEEL_REVERSE_MS, false));
+}
+
+#[test]
 fn mouse_buttons_use_their_own_window_unless_overridden() {
     let mut d = Debouncer::new(80);
     assert_eq!(
@@ -724,6 +750,86 @@ fn mouse_buttons_use_their_own_window_unless_overridden() {
     d.set_key_threshold(0x02, Some(0));
     assert_eq!(d.key_threshold_ms(0x02), (0, true));
     assert_eq!(d.key_threshold_ms(0x04), (40, false));
+}
+
+#[test]
+fn wheel_same_direction_always_passes() {
+    use super::WheelAxis::Vertical as V;
+    let mut d = Debouncer::new(50);
+    assert!(d.decide_wheel(120, ms(0), V));
+    assert!(d.decide_wheel(120, ms(5), V));
+    assert!(d.decide_wheel(240, ms(10), V));
+    assert_eq!(d.blocked_presses, 0);
+    assert_eq!(d.per_key_presses[WHEEL_VK], 3);
+}
+
+#[test]
+fn wheel_fast_reversal_is_blocked_but_next_forward_passes() {
+    use super::WheelAxis::Vertical as V;
+    let mut d = Debouncer::new(50);
+    assert!(d.decide_wheel(120, ms(0), V));
+    // 10 ms later the encoder briefly reports the opposite direction.
+    assert!(!d.decide_wheel(-120, ms(10), V));
+    assert_eq!(d.per_key_blocked[WHEEL_VK], 1);
+    assert_eq!(d.last_blocked, Some((WHEEL_VK as u8, ms(10))));
+    // The blocked tick did not move the direction: scrolling on passes.
+    assert!(d.decide_wheel(120, ms(20), V));
+    assert_eq!(d.blocked_presses, 1);
+    // A slow intentional direction change passes.
+    assert!(d.decide_wheel(-120, ms(500), V));
+    assert_eq!(d.blocked_presses, 1);
+}
+
+#[test]
+fn wheel_window_boundary_and_zero_override() {
+    use super::WheelAxis::Vertical as V;
+    let mut d = Debouncer::new(50);
+    assert!(d.decide_wheel(120, ms(0), V));
+    // Exactly the window: forwards.
+    assert!(d.decide_wheel(-120, ms(WHEEL_REVERSE_MS), V));
+    // Per-key override wins, and 0 never filters.
+    d.set_key_threshold(WHEEL_VK as u8, Some(200));
+    assert!(!d.decide_wheel(120, ms(WHEEL_REVERSE_MS + 10), V));
+    d.set_key_threshold(WHEEL_VK as u8, Some(0));
+    assert!(d.decide_wheel(-120, ms(WHEEL_REVERSE_MS + 20), V));
+    assert_eq!(d.blocked_presses, 1);
+    // Clearing the wheel's stats forgets its direction too.
+    d.clear_key_stats(WHEEL_VK as u8);
+    assert!(d.decide_wheel(-120, ms(WHEEL_REVERSE_MS + 30), V));
+    d.reset_stats();
+    assert!(d.decide_wheel(120, ms(10_000), V));
+    assert_eq!((d.total_presses, d.blocked_presses), (1, 0));
+}
+
+#[test]
+fn wheel_axes_are_tracked_independently() {
+    use super::WheelAxis::{Horizontal as H, Vertical as V};
+    let mut d = Debouncer::new(50);
+    assert!(d.decide_wheel(120, ms(0), V));
+    // A horizontal tick right after a vertical one is a new axis, never a
+    // reversal of the vertical scroll.
+    assert!(d.decide_wheel(-120, ms(10), H));
+    assert_eq!(d.blocked_presses, 0);
+    // Reversals are judged per axis: both of these are chatter-fast.
+    assert!(!d.decide_wheel(-120, ms(20), V));
+    assert!(!d.decide_wheel(120, ms(30), H));
+    assert_eq!(d.blocked_presses, 2);
+}
+
+/// The Keys tab shows `key_threshold_ms`; it must agree with the window
+/// `decide_wheel` actually filters with (ISSUE-001).
+#[test]
+fn wheel_threshold_display_matches_the_filter_window() {
+    use super::types::WHEEL_VK;
+    let mut d = Debouncer::new(50);
+    assert_eq!(
+        d.key_threshold_ms(WHEEL_VK as u8),
+        (WHEEL_REVERSE_MS, false)
+    );
+    d.set_key_threshold(WHEEL_VK as u8, Some(200));
+    assert_eq!(d.key_threshold_ms(WHEEL_VK as u8), (200, true));
+    d.set_key_threshold(WHEEL_VK as u8, Some(0));
+    assert_eq!(d.key_threshold_ms(WHEEL_VK as u8), (0, true));
 }
 
 #[test]

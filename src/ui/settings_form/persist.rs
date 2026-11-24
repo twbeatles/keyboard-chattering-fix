@@ -71,6 +71,11 @@ pub(crate) unsafe fn persist_live() -> bool {
 
 /// [`persist_live`] with one immediate change applied on top of the file's
 /// current per-key values (the Keys tab: per-key windows, mouse filter).
+///
+/// Lock order (never invert it): `SAVED` first, then `SHARED` briefly for the
+/// live counters. No path holds `SHARED` while locking `SAVED`, so the hook
+/// thread (which only takes `SHARED`) can never deadlock against a settings
+/// write.
 pub(super) fn persist_with(change: impl FnOnce(&mut Settings)) -> bool {
     let Some(saved) = SAVED.get() else {
         return false;
@@ -82,9 +87,9 @@ pub(super) fn persist_with(change: impl FnOnce(&mut Settings)) -> bool {
     }
     change(&mut s);
     let live = SHARED.get().map(|shared| {
-        let g = shared.lock().unwrap();
+        let mut g = shared.lock().unwrap();
         s.enabled = g.enabled;
-        s.take_live_stats(&g.debouncer);
+        s.take_live_stats(&mut g.debouncer);
         LiveFingerprint {
             total: g.debouncer.total_presses,
             blocked: g.debouncer.blocked_presses,
@@ -127,6 +132,13 @@ pub(crate) fn set_key_overrides(changes: &[(u8, Option<u64>)]) -> bool {
     written
 }
 
+/// Record a finished update check (manual or automatic): the next
+/// automatic check runs a week after `stamp`. Called from the update worker
+/// thread; it only touches the timestamp and the live counters.
+pub(crate) fn note_update_checked(stamp: u64) -> bool {
+    persist_with(|s| s.last_update_check_unix = stamp)
+}
+
 /// Whether a Save switches the gap baseline, which voids the gaps
 /// measured so far (they mean something else under the other one).
 pub(super) fn baseline_changed(live: MeasureFrom, saved: MeasureFrom) -> bool {
@@ -145,7 +157,25 @@ pub(super) fn save_base(disk: Option<Settings>, saved: Settings) -> Settings {
 /// hook) and is saved right away, like the protection switch.
 pub(crate) fn set_mouse_filter(on: bool) -> bool {
     crate::input::hook::set_mouse_filter(on);
+    if let Some(shared) = SHARED.get() {
+        shared.lock().unwrap().filter_mouse = on;
+    }
     persist_with(|s| s.filter_mouse = on)
+}
+
+/// Wheel filter switch: shares the mouse hook; applies at once like the
+/// mouse switch. Turning it off forgets the last scroll direction.
+pub(crate) fn set_wheel_filter(on: bool) -> bool {
+    crate::input::hook::set_wheel_filter(on);
+    if let Some(shared) = SHARED.get() {
+        let mut g = shared.lock().unwrap();
+        g.filter_wheel = on;
+        if !on {
+            g.debouncer.last_wheel_v = None;
+            g.debouncer.last_wheel_h = None;
+        }
+    }
+    persist_with(|s| s.filter_wheel = on)
 }
 
 /// Mouse buttons' block window (Keys tab): applied and saved at once.

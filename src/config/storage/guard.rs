@@ -24,9 +24,13 @@ pub(super) const KNOWN_KEYS: &[&str] = &[
     "iMinChatterMs",
     "bExcludeInjected",
     "bFilterMouse",
+    "bFilterWheel",
+    "bAutoCheckUpdate",
+    "iLastUpdateCheck",
     "iMouseThreshold",
     "iReleaseDeferMs",
     "sAutoDisableApps",
+    "sAppProfiles",
     "bAutoDisableFullscreen",
     "sHotkeyToggle",
     "sHotkeyCleaning",
@@ -47,7 +51,9 @@ pub(super) fn looks_like_settings(text: &str) -> bool {
             || line.split_once('=').is_some_and(|(k, _)| {
                 let k = k.trim();
                 KNOWN_KEYS.contains(&k)
-                    || ["key.", "stat.", "hist."].iter().any(|p| k.starts_with(p))
+                    || ["key.", "stat.", "hist.", "day.", "alert."]
+                        .iter()
+                        .any(|p| k.starts_with(p))
             })
     })
 }

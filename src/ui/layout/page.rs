@@ -10,7 +10,7 @@ use super::super::ids::*;
 
 /// Logical client size of the main window (scaled by DPI at creation).
 pub(crate) const CLIENT_W: i32 = 480;
-pub(crate) const CLIENT_H: i32 = 690;
+pub(crate) const CLIENT_H: i32 = 742;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Page {

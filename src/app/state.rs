@@ -20,6 +20,8 @@ use crate::{
 pub(crate) struct Shared {
     pub debouncer: Debouncer,
     pub enabled: bool,
+    pub filter_mouse: bool,
+    pub filter_wheel: bool,
     pub play_sound: bool,
     /// Custom sound validated once at startup/save time, never per keystroke.
     /// The UTF-16 encoding is precomputed so the hook plays it with zero

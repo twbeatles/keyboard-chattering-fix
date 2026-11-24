@@ -34,7 +34,7 @@ use windows::Win32::{
 use super::queue::{HOOK_EVENTS, INJECT_MARK, PROBE_VK, PROBES_SEEN, apply};
 use crate::{
     app::state::{SHARED, START},
-    debounce::{Decision, KeyEventKind},
+    debounce::{Decision, KeyEventKind, WheelAxis},
 };
 
 pub(super) unsafe extern "system" fn hook_proc(
@@ -101,8 +101,20 @@ pub(super) unsafe extern "system" fn hook_proc(
     }
 }
 
+/// Axis and signed tick count of a `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL`
+/// message (`None` for anything else). The high word of `mouseData` is the
+/// signed tick count.
+pub(super) fn wheel_delta(msg: u32, mouse_data: u32) -> Option<(WheelAxis, i32)> {
+    let axis = match msg {
+        WM_MOUSEWHEEL => WheelAxis::Vertical,
+        WM_MOUSEHWHEEL => WheelAxis::Horizontal,
+        _ => return None,
+    };
+    Some((axis, ((mouse_data >> 16) as u16 as i16) as i32))
+}
+
 /// Virtual-key code and direction of a mouse button message; `None` for
-/// movement, the wheel, and anything else that is not a button.
+/// movement, the wheels, and anything else that is not a button.
 pub(super) fn mouse_button(msg: u32, mouse_data: u32) -> Option<(usize, KeyEventKind)> {
     use KeyEventKind::{Down, Up};
     Some(match msg {
@@ -145,10 +157,34 @@ pub(super) unsafe extern "system" fn mouse_proc(
                     let skip = g.debouncer.cleaning_mode
                         || !g.enabled
                         || g.suspended
+                        || !g.filter_mouse
                         || (g.exclude_injected && ms.flags & LLMHF_INJECTED != 0);
                     if !skip {
                         let d = g.debouncer.decide_event(vk, false, kind, start.elapsed());
                         if apply(&mut g, d, vk, 0, kind) {
+                            return LRESULT(1);
+                        }
+                    }
+                }
+            } else if let Some((axis, delta)) = wheel_delta(wparam.0 as u32, ms.mouseData) {
+                if ms.dwExtraInfo == INJECT_MARK {
+                    return CallNextHookEx(None, ncode, wparam, lparam);
+                }
+                if let (Some(shared), Some(start)) = (SHARED.get(), START.get()) {
+                    let mut g = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                    let skip = g.debouncer.cleaning_mode
+                        || !g.enabled
+                        || g.suspended
+                        || !g.filter_wheel
+                        || (g.exclude_injected && ms.flags & LLMHF_INJECTED != 0);
+                    if !skip {
+                        HOOK_EVENTS.fetch_add(1, Ordering::Relaxed);
+                        if !g.debouncer.decide_wheel(delta, start.elapsed(), axis) {
+                            if g.play_sound {
+                                super::super::sound::play_notification_sound(
+                                    g.sound_file.as_ref().map(|s| s.wide.as_slice()),
+                                );
+                            }
                             return LRESULT(1);
                         }
                     }

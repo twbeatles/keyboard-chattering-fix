@@ -19,11 +19,12 @@
 pub enum Language {
     Ko,
     En,
+    Ja,
 }
 
 impl Language {
     /// Every shipped language, in picker order.
-    pub const ALL: &'static [Language] = &[Language::Ko, Language::En];
+    pub const ALL: &'static [Language] = &[Language::Ko, Language::En, Language::Ja];
 
     /// Used when the system language is not shipped (and as the reference
     /// translation the others are tested against).
@@ -34,6 +35,7 @@ impl Language {
         match self {
             Language::Ko => "ko",
             Language::En => "en",
+            Language::Ja => "ja",
         }
     }
 
@@ -42,6 +44,7 @@ impl Language {
         match self {
             Language::Ko => "한국어",
             Language::En => "English",
+            Language::Ja => "日本語",
         }
     }
 
@@ -121,7 +124,8 @@ impl LanguagePref {
 }
 
 /// The language Windows shows its UI in, reduced to a shipped language:
-/// Korean for a Korean system, otherwise [`Language::FALLBACK`] (English).
+/// Korean for a Korean system, Japanese for a Japanese one, otherwise
+/// [`Language::FALLBACK`] (English).
 /// Only the first (primary) display language counts, matching what the
 /// user sees in the rest of Windows.
 pub fn system_language() -> Language {
@@ -215,17 +219,11 @@ mod tests {
         assert_eq!(Language::from_locale_name(" ko-KR "), Language::Ko);
         assert_eq!(Language::from_locale_name("en-US"), Language::En);
         assert_eq!(Language::from_locale_name("en-GB"), Language::En);
+        assert_eq!(Language::from_locale_name("ja-JP"), Language::Ja);
+        assert_eq!(Language::from_locale_name("ja"), Language::Ja);
+        assert_eq!(Language::from_locale_name(" JA_JP "), Language::Ja);
         // Not shipped -> English, including scripts and look-alike prefixes.
-        for other in [
-            "ja-JP",
-            "de-DE",
-            "zh-Hans-CN",
-            "fr-FR",
-            "kok-IN",
-            "",
-            "-",
-            "x",
-        ] {
+        for other in ["de-DE", "zh-Hans-CN", "fr-FR", "kok-IN", "", "-", "x"] {
             assert_eq!(
                 Language::from_locale_name(other),
                 Language::FALLBACK,
@@ -258,13 +256,18 @@ mod tests {
             LanguagePref::from_setting("EN"),
             LanguagePref::Fixed(Language::En)
         );
+        assert_eq!(
+            LanguagePref::from_setting("ja"),
+            LanguagePref::Fixed(Language::Ja)
+        );
         // Typos and unshipped languages never pin a wrong language.
         assert_eq!(LanguagePref::from_setting("klingon"), LanguagePref::Auto);
-        assert_eq!(LanguagePref::from_setting("ja"), LanguagePref::Auto);
+        assert_eq!(LanguagePref::from_setting("de"), LanguagePref::Auto);
         for pref in [
             LanguagePref::Auto,
             LanguagePref::Fixed(Language::Ko),
             LanguagePref::Fixed(Language::En),
+            LanguagePref::Fixed(Language::Ja),
         ] {
             assert_eq!(LanguagePref::from_setting(pref.setting_value()), pref);
         }

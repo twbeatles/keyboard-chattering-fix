@@ -3,5 +3,5 @@
 
 pub(crate) mod bootstrap;
 pub(crate) mod cli;
-mod instance;
+pub(crate) mod instance;
 pub(crate) mod state;

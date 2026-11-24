@@ -38,7 +38,7 @@ use super::control::{
     HOOK_GEN, HOOK_THREAD_ID, flush_deferred_releases, restart, set_mouse_filter,
     spawn_hook_thread, start, stop,
 };
-use super::procs::mouse_button;
+use super::procs::{mouse_button, wheel_delta};
 use super::queue::{INJECT_MARK, InjectQueue, Injection};
 use super::send::{input_for, retry_send};
 
@@ -56,6 +56,8 @@ fn ensure_test_shared() {
         Mutex::new(Shared {
             debouncer: crate::debounce::Debouncer::new(50),
             enabled: false,
+            filter_mouse: false,
+            filter_wheel: false,
             play_sound: false,
             sound_file: None,
             exclude_injected: true,
@@ -254,9 +256,25 @@ fn mouse_buttons_map_to_their_virtual_keys() {
     assert_eq!(mouse_button(WM_XBUTTONDOWN, 1 << 16), Some((0x05, Down)));
     assert_eq!(mouse_button(WM_XBUTTONUP, 2 << 16), Some((0x06, Up)));
     assert_eq!(mouse_button(WM_XBUTTONDOWN, 3 << 16), None);
-    // Movement and the wheel never reach the filter.
+    // Movement and the wheel are not buttons; the wheel has its own path.
     assert_eq!(mouse_button(WM_MOUSEMOVE, 0), None);
     assert_eq!(mouse_button(WM_MOUSEWHEEL, 120 << 16), None);
+}
+
+#[test]
+fn wheel_delta_reads_the_signed_high_word() {
+    use crate::debounce::WheelAxis::{Horizontal, Vertical};
+    assert_eq!(wheel_delta(WM_MOUSEWHEEL, 120 << 16), Some((Vertical, 120)));
+    assert_eq!(
+        wheel_delta(WM_MOUSEWHEEL, (u32::from(-120i16 as u16)) << 16),
+        Some((Vertical, -120))
+    );
+    assert_eq!(
+        wheel_delta(WM_MOUSEHWHEEL, 120 << 16),
+        Some((Horizontal, 120))
+    );
+    assert_eq!(wheel_delta(WM_MOUSEMOVE, 120 << 16), None);
+    assert_eq!(wheel_delta(WM_LBUTTONDOWN, 0), None);
 }
 
 #[test]

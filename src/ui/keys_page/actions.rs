@@ -20,7 +20,7 @@ use super::super::{
     ids::*,
     paint::{ThemeColors, theme_is_dark},
     settings_form,
-    state::current_lang,
+    state::{SAVED, current_lang},
     text::{combo_sel, get_text, set_text},
 };
 use super::model::{advice_line, changes_text, prefill_ms, suggested_changes};
@@ -177,6 +177,19 @@ pub(crate) unsafe fn clear_key_stats(hwnd: HWND) {
         if let Some(shared) = SHARED.get() {
             shared.lock().unwrap().debouncer.clear_key_stats(vk);
         }
+        // The day history is per-key statistics too: a replaced switch
+        // must not inherit the old switch's trend.
+        if let Some(saved) = SAVED.get() {
+            let mut saved = saved.lock().unwrap();
+            for entry in saved.day_history.iter_mut() {
+                let i = vk as usize;
+                entry.presses[i] = 0;
+                entry.blocked[i] = 0;
+            }
+            for (_, vks) in saved.alerted.iter_mut() {
+                vks.retain(|&k| k != vk);
+            }
+        }
         let written = settings_form::persist_live();
         after_change(hwnd, vk, written);
     }
@@ -254,6 +267,15 @@ pub(crate) unsafe fn on_enter(hwnd: HWND) {
 pub(crate) unsafe fn on_mouse_toggled(hwnd: HWND, on: bool) {
     unsafe {
         if !settings_form::set_mouse_filter(on) {
+            let s = strings(current_lang());
+            msg_box(hwnd, s.title, s.save_failed, MB_OK | MB_ICONWARNING);
+        }
+    }
+}
+
+pub(crate) unsafe fn on_wheel_toggled(hwnd: HWND, on: bool) {
+    unsafe {
+        if !settings_form::set_wheel_filter(on) {
             let s = strings(current_lang());
             msg_box(hwnd, s.title, s.save_failed, MB_OK | MB_ICONWARNING);
         }

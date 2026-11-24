@@ -60,6 +60,26 @@ pub const THRESHOLD_DEFAULT_MS: u64 = 35;
 /// release-to-press gap of a quick double-click, above contact bounce.
 pub const MOUSE_THRESHOLD_DEFAULT_MS: u64 = 30;
 
+/// Virtual-key code used for mouse-wheel ticks in counters, the event log,
+/// and per-key overrides (`key.0A`). `0x0A`/`0x0B` are reserved by Windows
+/// and never arrive from the keyboard or button hooks, so there is no
+/// collision with real input.
+pub const WHEEL_VK: usize = 0x0A;
+
+/// Which wheel axis a tick came from. The two axes are tracked
+/// independently, so scrolling one way never looks like a reversal of the
+/// other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WheelAxis {
+    Vertical,
+    Horizontal,
+}
+
+/// Reversal window of the mouse wheel (`bFilterWheel`): a scroll tick in
+/// the opposite direction within this time is a worn-encoder bounce.
+/// Same-direction scrolling always passes, however fast.
+pub const WHEEL_REVERSE_MS: u64 = 80;
+
 /// Virtual-key codes the mouse hook uses for buttons (left, right, middle,
 /// X1, X2). 0x03 is `VK_CANCEL`, a keyboard key.
 pub fn is_mouse_button(vk: usize) -> bool {

@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use super::super::model::Settings;
+use super::super::model::{DayEntry, Settings};
 use crate::{
     debounce::{
         GAP_BUCKETS, GapHistogram, LOG_LIMIT_MAX, LOG_LIMIT_MIN, MeasureFrom, RELEASE_DEFER_MAX_MS,
@@ -30,13 +30,16 @@ pub(super) fn strip_inline_comment<'a>(key: &str, value: &'a str) -> &'a str {
     if key == "lpSoundFile" {
         return value;
     }
+    /// `;` also separates list values (`a.exe ; b.exe`, `g.exe=80; e.exe=25`).
+    fn semicolon_is_separator(key: &str) -> bool {
+        key == "sAutoDisableApps" || key == "sAppProfiles"
+    }
     let cut = value
         .char_indices()
         .find(|&(i, c)| {
             matches!(c, '#' | ';')
                 && value[..i].ends_with(char::is_whitespace)
-                // `;` also separates excluded apps (`a.exe ; b.exe`).
-                && !(c == ';' && key == "sAutoDisableApps")
+                && !(c == ';' && semicolon_is_separator(key))
         })
         .map_or(value.len(), |(i, _)| i);
     value[..cut].trim_end()
@@ -109,6 +112,17 @@ pub(super) fn parse(text: &str) -> Settings {
     if let Some(v) = map.get("bFilterMouse") {
         s.filter_mouse = v != "0";
     }
+    if let Some(v) = map.get("bFilterWheel") {
+        s.filter_wheel = v != "0";
+    }
+    if let Some(v) = map.get("bAutoCheckUpdate") {
+        s.auto_check_update = v != "0";
+    }
+    if let Some(v) = map.get("iLastUpdateCheck")
+        && let Ok(n) = v.parse::<u64>()
+    {
+        s.last_update_check_unix = n;
+    }
     if let Some(v) = map.get("iMouseThreshold")
         && let Ok(n) = v.parse::<u64>()
     {
@@ -121,6 +135,9 @@ pub(super) fn parse(text: &str) -> Settings {
     }
     if let Some(v) = map.get("sAutoDisableApps") {
         s.auto_disable_apps = v.clone();
+    }
+    if let Some(v) = map.get("sAppProfiles") {
+        s.app_profiles = v.clone();
     }
     if let Some(v) = map.get("bAutoDisableFullscreen") {
         s.auto_disable_fullscreen = v != "0";
@@ -167,6 +184,47 @@ pub(super) fn parse(text: &str) -> Settings {
             s.per_key_ms[vk as usize] = Some(ms.min(1000));
         }
     }
+    // A repeated date keeps its last line, like every other key (the map
+    // above already dedupes full keys). A line with nothing readable in it
+    // adds no entry.
+    for (k, v) in &map {
+        if let Some(date) = k.strip_prefix("day.").and_then(|h| h.parse::<u32>().ok())
+            && date != 0
+        {
+            let mut presses = [0u64; 256];
+            let mut blocked = [0u64; 256];
+            parse_day_counts(v, &mut presses, &mut blocked);
+            if presses.iter().any(|&n| n > 0) || blocked.iter().any(|&n| n > 0) {
+                s.day_history.push(DayEntry {
+                    date,
+                    presses,
+                    blocked,
+                });
+            }
+        }
+    }
+    s.day_history.sort_by_key(|e| e.date);
+    for (k, v) in &map {
+        if let Some(date) = k.strip_prefix("alert.").and_then(|h| h.parse::<u32>().ok())
+            && date != 0
+        {
+            let mut vks: Vec<u8> = v
+                .split(',')
+                .filter_map(|h| u8::from_str_radix(h.trim(), 16).ok())
+                .collect();
+            vks.sort_unstable();
+            vks.dedup();
+            match s.alerted.iter_mut().find(|(d, _)| *d == date) {
+                Some((_, list)) => {
+                    list.extend(vks.iter().copied());
+                    list.sort_unstable();
+                    list.dedup();
+                }
+                None => s.alerted.push((date, vks)),
+            }
+        }
+    }
+    s.alerted.sort_by_key(|(date, _)| *date);
     // Measured gaps: hist.<hex vk>=<bucket>:<count>,... (non-zero buckets
     // only). They only mean something under the baseline they were measured
     // from, so a file whose sMeasureFrom was changed by hand drops them.
@@ -190,6 +248,26 @@ pub(super) fn measure_from(v: &str) -> MeasureFrom {
         MeasureFrom::Press
     } else {
         MeasureFrom::Release
+    }
+}
+
+/// `41:100:3,20:5:1` (vk:presses:blocked) into the day's counters.
+/// A malformed entry or an out-of-range vk is skipped on its own, like any
+/// other unreadable value.
+pub(super) fn parse_day_counts(v: &str, presses: &mut [u64; 256], blocked: &mut [u64; 256]) {
+    for entry in v.split(',') {
+        let mut parts = entry.split(':');
+        if let (Some(vk), Some(p), Some(b), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+            && let (Ok(vk), Ok(p), Ok(b)) = (
+                u8::from_str_radix(vk.trim(), 16),
+                p.trim().parse::<u64>(),
+                b.trim().parse::<u64>(),
+            )
+        {
+            presses[vk as usize] = presses[vk as usize].saturating_add(p);
+            blocked[vk as usize] = blocked[vk as usize].saturating_add(b);
+        }
     }
 }
 

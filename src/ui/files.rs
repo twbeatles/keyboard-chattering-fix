@@ -141,7 +141,11 @@ pub(crate) unsafe fn import_settings(hwnd: HWND) {
         if let Some(shared) = SHARED.get() {
             // This PC's counters and measured gaps (the gaps only when the
             // imported baseline matches; `on_save` below clears them too).
-            imported.take_live_stats(&shared.lock().unwrap().debouncer);
+            // Day history is this PC's too: the file's days belong to
+            // another machine and would poison the trend diagnosis.
+            imported.day_history.clear();
+            imported.alerted.clear();
+            imported.take_live_stats(&mut shared.lock().unwrap().debouncer);
         }
         // On disk first: the save below takes file-owned values (per-key
         // windows) from the file.

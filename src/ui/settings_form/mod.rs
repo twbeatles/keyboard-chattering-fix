@@ -7,8 +7,8 @@ mod sound;
 mod tests;
 pub(crate) use fields::{load_into_form, mark_dirty, tick};
 pub(crate) use persist::{
-    autosave_tick, persist_live, set_key_override, set_key_overrides, set_mouse_filter,
-    set_mouse_threshold,
+    autosave_tick, note_update_checked, persist_live, set_key_override, set_key_overrides,
+    set_mouse_filter, set_mouse_threshold, set_wheel_filter,
 };
 pub(crate) use save::on_save;
 pub(crate) use sound::{browse_sound, on_language_changed, preview_sound};

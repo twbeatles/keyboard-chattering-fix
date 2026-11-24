@@ -97,12 +97,15 @@ fn totals() -> KeyTotals {
     let mut t = KeyTotals {
         presses: [0; 256],
         blocked: [0; 256],
+        week_blocked: [0; 256],
         thresholds: [(50, false); 256],
     };
     t.presses[0x41] = 100;
     t.blocked[0x41] = 5;
+    t.week_blocked[0x41] = 2;
     t.presses[0x20] = 40;
     t.blocked[0x20] = 10;
+    t.week_blocked[0x20] = 7;
     t.presses[0x42] = 300;
     t.thresholds[0x20] = (80, true);
     t
@@ -115,9 +118,9 @@ fn key_summary_sorts_by_blocked_and_marks_overrides() {
     assert_eq!(rows.len(), 3);
     assert_eq!(
         rows[0].cells,
-        ["Space", "40", "10", "25.0%", "80 ms (개별)"]
+        ["Space", "40", "10", "25.0%", "80 ms (개별)", "7"]
     );
-    assert_eq!(rows[1].cells, ["A", "100", "5", "5.0%", "50 ms"]);
+    assert_eq!(rows[1].cells, ["A", "100", "5", "5.0%", "50 ms", "2"]);
     assert_eq!(rows[2].cells[0], "B");
     assert_eq!(
         rows.iter().map(|r| r.highlight).collect::<Vec<_>>(),
@@ -131,6 +134,7 @@ fn key_summary_skips_unused_keys_and_honours_query() {
     let empty = KeyTotals {
         presses: [0; 256],
         blocked: [0; 256],
+        week_blocked: [0; 256],
         thresholds: [(50, false); 256],
     };
     assert!(render_keys(s, &empty, "").is_empty());
@@ -160,8 +164,8 @@ fn csv_lists_events_oldest_first_then_the_key_summary() {
     assert_eq!(lines[1], "1970-01-01 00:00:01.000,A,Passed,-");
     assert_eq!(lines[4], "1970-01-01 00:00:03.000,B,Passed,-");
     assert_eq!(lines[5], "");
-    assert_eq!(lines[6], "Key,Presses,Blocked,Rate,Block window");
-    assert_eq!(lines[7], "Space,40,10,25.0%,80 ms (custom)");
+    assert_eq!(lines[6], "Key,Presses,Blocked,Rate,Block window,7-day");
+    assert_eq!(lines[7], "Space,40,10,25.0%,80 ms (custom),7");
     // Fields with separators or quotes are quoted.
     assert_eq!(csv_field("a,b"), "\"a,b\"");
     assert_eq!(csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");

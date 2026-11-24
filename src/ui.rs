@@ -37,7 +37,7 @@ mod files;
 mod foreground;
 mod history;
 mod hotkeys;
-mod ids;
+pub(crate) mod ids;
 mod keys;
 mod keys_page;
 mod layout;

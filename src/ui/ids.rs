@@ -100,8 +100,13 @@ pub(crate) const ID_LABEL_HOTKEY_CLEAN: i32 = 522;
 pub(crate) const ID_BTN_SAVE: i32 = 600;
 pub(crate) const ID_SAVE_STATUS: i32 = 601;
 
+// Settings: per-app block windows.
+pub(crate) const ID_LABEL_APP_PROFILES: i32 = 719;
+pub(crate) const ID_EDIT_APP_PROFILES: i32 = 720;
+
 // Keys & mouse.
 pub(crate) const ID_TOGGLE_MOUSE: i32 = 700;
+pub(crate) const ID_TOGGLE_WHEEL: i32 = 717;
 pub(crate) const ID_MOUSE_HINT: i32 = 701;
 pub(crate) const ID_KEYS_TITLE: i32 = 702;
 pub(crate) const ID_KEYS_LIST: i32 = 703;
@@ -118,6 +123,8 @@ pub(crate) const ID_MOUSE_MS_EDIT: i32 = 713;
 pub(crate) const ID_MOUSE_MS_UNIT: i32 = 714;
 pub(crate) const ID_BTN_MOUSE_MS_SET: i32 = 715;
 pub(crate) const ID_BTN_KEY_APPLY_ALL: i32 = 716;
+// Settings: automatic update check.
+pub(crate) const ID_TOGGLE_AUTO_UPDATE: i32 = 718;
 
 // Menu commands (menu bar and tray share them).
 pub(crate) const MENU_SHOW: usize = 1001;
@@ -140,6 +147,9 @@ pub(crate) const MENU_ELEVATED_AUTOSTART: usize = 1017;
 /// Pause protection for a set time (tray menu, Tools menu).
 pub(crate) const MENU_PAUSE_15: usize = 1018;
 pub(crate) const MENU_PAUSE_60: usize = 1019;
+/// Turn protection back on (clears a timed pause). Not in any menu: it is
+/// the `--resume` CLI control of the running instance.
+pub(crate) const MENU_RESUME: usize = 1020;
 
 pub(crate) const WM_TRAY: u32 = WM_APP + 1;
 /// Posted from the update/elevation worker threads after the helper is

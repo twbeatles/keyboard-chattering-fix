@@ -1,7 +1,7 @@
 //! Chatter-filter core: the `Debouncer` state and its accept/block decisions.
 use super::types::{
     Decision, GAP_BUCKETS, GapHistogram, KeyEventKind, LogEvent, MOUSE_THRESHOLD_DEFAULT_MS,
-    MeasureFrom, SLOTS, VK_PACKET, VK_PROCESSKEY, modifier_bit, slot_of,
+    MeasureFrom, SLOTS, VK_PACKET, VK_PROCESSKEY, WHEEL_VK, WheelAxis, modifier_bit, slot_of,
 };
 use std::{collections::VecDeque, time::Duration};
 
@@ -20,9 +20,24 @@ pub struct Debouncer {
     pub(crate) min_chatter: Duration,
     /// How long a release of a held key is held back (zero = off).
     pub(crate) release_defer: Duration,
+    /// Block window while a profiled app is in front (`app.EXE=ms` in the
+    /// settings, `None` = no profile active). Per-key overrides still win;
+    /// `Some(ZERO)` never filters (but still counts presses).
+    pub(crate) app_threshold: Option<Duration>,
     pub(crate) last_release: [Option<Duration>; SLOTS],
     pub(crate) last_press: [Option<Duration>; SLOTS],
     pub(crate) held: [bool; SLOTS],
+    /// Last passed vertical wheel tick: direction (+1 / -1) and time.
+    pub(crate) last_wheel_v: Option<(i8, Duration)>,
+    /// Last passed horizontal wheel tick, tracked independently.
+    pub(crate) last_wheel_h: Option<(i8, Duration)>,
+    /// Today's per-key presses, consumed by `take_live_stats` into the
+    /// persisted day history (never read back into the filter).
+    pub(crate) day_presses: [u64; 256],
+    /// Today's per-key blocks, consumed the same way.
+    pub(crate) day_blocked: [u64; 256],
+    /// Local YYYYMMDD the day counters belong to (0 = not started yet).
+    pub(crate) day_date: u32,
     /// Release time of each held-back `Up` (see [`Decision::Defer`]).
     pub(crate) pending_up: [Option<Duration>; SLOTS],
     /// Modifier keys held right now (see [`modifier_bit`]).
@@ -66,9 +81,15 @@ impl Debouncer {
             measure_from: MeasureFrom::Release,
             min_chatter: Duration::ZERO,
             release_defer: Duration::ZERO,
+            app_threshold: None,
             last_release: [None; SLOTS],
             last_press: [None; SLOTS],
             held: [false; SLOTS],
+            last_wheel_v: None,
+            last_wheel_h: None,
+            day_presses: [0; 256],
+            day_blocked: [0; 256],
+            day_date: 0,
             pending_up: [None; SLOTS],
             mods: 0,
             mod_epoch: 0,
@@ -95,6 +116,61 @@ impl Debouncer {
     #[cfg(test)]
     pub fn decide(&mut self, vk: usize, kind: KeyEventKind, now: Duration) -> bool {
         self.decide_event(vk, false, kind, now) == Decision::Pass
+    }
+
+    /// Classify one mouse-wheel tick: `true` forwards it.
+    ///
+    /// Only a direction reversal inside the wheel window is chatter (a worn
+    /// encoder briefly reports the opposite direction). Same-direction
+    /// ticks always pass, however fast, so fast scrolling is unaffected.
+    /// Each axis compares only against its own last passed tick, so a
+    /// vertical scroll followed by a horizontal one is never a reversal.
+    /// `key.0A` overrides the window (`WHEEL_REVERSE_MS` by default);
+    /// `Some(0)` never filters the wheel. Blocked reversals do not move the
+    /// axis state, so the next tick still compares against the last passed
+    /// direction. The caller (`mouse_proc`) checks the master switch
+    /// (`bFilterWheel`) before calling.
+    pub fn decide_wheel(&mut self, delta: i32, now: Duration, axis: WheelAxis) -> bool {
+        if delta == 0 {
+            return true;
+        }
+        let dir: i8 = if delta > 0 { 1 } else { -1 };
+        self.total_presses += 1;
+        self.per_key_presses[WHEEL_VK] += 1;
+        self.day_presses[WHEEL_VK] += 1;
+        let prev = match axis {
+            WheelAxis::Vertical => self.last_wheel_v,
+            WheelAxis::Horizontal => self.last_wheel_h,
+        };
+        if let Some((last_dir, last_time)) = prev {
+            if dir == last_dir {
+                self.set_last_wheel(axis, Some((dir, now)));
+                self.log_passed(WHEEL_VK, now, None);
+                return true;
+            }
+            let gap = now.saturating_sub(last_time);
+            self.record_gap(WHEEL_VK, gap);
+            // Same window the Keys tab shows: per-key override, else the
+            // front app's profile, else the fixed 80 ms reversal window.
+            let window = self.effective_threshold(WHEEL_VK);
+            if !window.is_zero() && gap < window {
+                self.note_block(WHEEL_VK, now, gap);
+                return false;
+            }
+            self.set_last_wheel(axis, Some((dir, now)));
+            self.log_passed(WHEEL_VK, now, Some(gap));
+            return true;
+        }
+        self.set_last_wheel(axis, Some((dir, now)));
+        self.log_passed(WHEEL_VK, now, None);
+        true
+    }
+
+    fn set_last_wheel(&mut self, axis: WheelAxis, value: Option<(i8, Duration)>) {
+        match axis {
+            WheelAxis::Vertical => self.last_wheel_v = value,
+            WheelAxis::Horizontal => self.last_wheel_h = value,
+        }
     }
 
     /// Classify one key or mouse-button event.
@@ -168,6 +244,7 @@ impl Debouncer {
                         // down for applications.
                         self.total_presses += 1;
                         self.per_key_presses[vk] += 1;
+                        self.day_presses[vk] += 1;
                         self.record_gap(vk, gap);
                         self.note_block(vk, now, gap);
                         return Decision::Block;
@@ -192,6 +269,7 @@ impl Debouncer {
     fn judge_down(&mut self, slot: usize, vk: usize, epoch: u32, now: Duration) -> bool {
         self.total_presses += 1;
         self.per_key_presses[vk] += 1;
+        self.day_presses[vk] += 1;
         let mods_changed = self.release_epoch[slot] != epoch;
 
         // No release in between: genuine auto-repeat, never chatter.

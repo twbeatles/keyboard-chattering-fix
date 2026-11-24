@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, WPARAM},
     Graphics::Gdi::*,
-    UI::WindowsAndMessaging::*,
+    UI::{Shell::NIN_BALLOONUSERCLICK, WindowsAndMessaging::*},
 };
 
 use super::super::{
@@ -17,8 +17,10 @@ use super::super::{
     state::SAVED,
     stats::update_stats,
     tray::{add_tray, remove_tray, show_tray_menu},
+    update,
     widgets::draw_item,
 };
+use windows::Win32::System::DataExchange::COPYDATASTRUCT;
 
 use super::create::switch_page;
 use super::dark_menu;
@@ -112,6 +114,8 @@ pub(super) unsafe extern "system" fn wndproc(
             WM_TIMER => {
                 commands::cleaning_tick(hwnd);
                 commands::pause_tick(hwnd);
+                update::auto_tick(hwnd);
+                commands::trends_tick(hwnd);
                 if foreground::tick(hwnd) {
                     super::super::stats::invalidate();
                 }
@@ -152,6 +156,22 @@ pub(super) unsafe extern "system" fn wndproc(
                 on_destroy(hwnd);
                 LRESULT(0)
             }
+            WM_COPYDATA => {
+                // A second invocation forwards `--toggle` and friends here.
+                // Only the allow-listed protection/cleaning commands run;
+                // anything else falls through to the default handler.
+                let accepted = {
+                    let cds = &*(lparam.0 as *const COPYDATASTRUCT);
+                    crate::app::instance::copydata_command(cds.dwData)
+                };
+                match accepted {
+                    Some(cmd) => {
+                        commands::run(hwnd, cmd);
+                        LRESULT(1)
+                    }
+                    None => DefWindowProcW(hwnd, msg, wparam, lparam),
+                }
+            }
             _ if msg == WM_UPDATE_EXIT => {
                 // Anyone in the session can post the constant id: only the
                 // holder of this process's nonce exits it (SEC-001).
@@ -175,6 +195,14 @@ pub(super) unsafe extern "system" fn wndproc(
                 }
                 WM_RBUTTONUP => {
                     show_tray_menu(hwnd);
+                    LRESULT(0)
+                }
+                x if x == NIN_BALLOONUSERCLICK => {
+                    // The update balloon was clicked: open the manual flow,
+                    // which explains the route (package manager/elevated).
+                    if update::take_update_balloon() {
+                        commands::run(hwnd, MENU_UPDATE);
+                    }
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),

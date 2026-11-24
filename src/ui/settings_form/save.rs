@@ -96,14 +96,17 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
         new_settings.sound_file = sound_file.clone();
         new_settings.minimize_on_launch = minimize;
         new_settings.close_to_tray = close_to_tray;
+        new_settings.auto_check_update = get_toggle(ID_TOGGLE_AUTO_UPDATE);
         new_settings.record_all_keys = record_all;
         new_settings.measure_from = measure;
         new_settings.language = LanguagePref::from_combo_index(combo_sel(hwnd, ID_COMBO_LANG));
         new_settings.min_chatter_ms = min_chatter;
         new_settings.exclude_injected = exclude_injected;
         new_settings.filter_mouse = get_toggle(ID_TOGGLE_MOUSE);
+        new_settings.filter_wheel = get_toggle(ID_TOGGLE_WHEEL);
         new_settings.release_defer_ms = release_defer;
         new_settings.auto_disable_apps = auto_apps.clone();
+        new_settings.app_profiles = get_text(hwnd, ID_EDIT_APP_PROFILES);
         new_settings.auto_disable_fullscreen = auto_fullscreen;
         new_settings.hotkey_toggle = hotkey_toggle.clone();
         new_settings.hotkey_cleaning = hotkey_cleaning.clone();
@@ -129,7 +132,13 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
             g.enabled = enabled;
             g.play_sound = sound;
             g.exclude_injected = exclude_injected;
-            new_settings.take_live_stats(&g.debouncer);
+            g.filter_mouse = new_settings.filter_mouse;
+            g.filter_wheel = new_settings.filter_wheel;
+            if !new_settings.filter_wheel {
+                g.debouncer.last_wheel_v = None;
+                g.debouncer.last_wheel_h = None;
+            }
+            new_settings.take_live_stats(&mut g.debouncer);
             LiveFingerprint {
                 total: g.debouncer.total_presses,
                 blocked: g.debouncer.blocked_presses,
@@ -140,13 +149,18 @@ pub(crate) unsafe fn on_save(hwnd: HWND) {
         // swapped in under the lock.
         apply_sound_async(sound_file.clone());
         crate::input::hook::set_mouse_filter(new_settings.filter_mouse);
+        crate::input::hook::set_wheel_filter(new_settings.filter_wheel);
         // A value edited in the file is applied by Save, like `key.XX`.
         set_field(
             hwnd,
             ID_MOUSE_MS_EDIT,
             &new_settings.mouse_threshold_ms.to_string(),
         );
-        super::super::foreground::configure(&auto_apps, auto_fullscreen);
+        super::super::foreground::configure(
+            &auto_apps,
+            &new_settings.app_profiles,
+            auto_fullscreen,
+        );
         let hotkey_problems = super::super::hotkeys::apply(hwnd, &hotkey_toggle, &hotkey_cleaning);
         super::super::menu::install(hwnd);
         let written = config::save(&new_settings);

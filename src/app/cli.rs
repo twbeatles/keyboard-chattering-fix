@@ -67,5 +67,34 @@ pub(crate) fn handle_cli() -> bool {
         }
         return true;
     }
+    // Control the running instance (P2-4): `--toggle`, `--pause-15`,
+    // `--pause-60`, `--resume`, `--cleaning` are forwarded to it with
+    // `WM_COPYDATA` instead of starting a second copy. Only protection and
+    // cleaning commands are accepted; exit/update are never forwarded.
+    #[cfg(windows)]
+    if let Some(flag) = args
+        .iter()
+        .find(|a| super::instance::control_command(a).is_some())
+    {
+        attach_parent_console();
+        let cmd = super::instance::control_command(flag).expect("matched above");
+        match super::instance::forward_control(cmd) {
+            super::instance::ForwardOutcome::Sent => {
+                println!("sent {flag} to the running instance");
+            }
+            super::instance::ForwardOutcome::NotRunning => {
+                eprintln!("no running instance of KeyboardChatteringFix was found");
+                std::process::exit(1);
+            }
+            super::instance::ForwardOutcome::Failed => {
+                eprintln!(
+                    "the running instance did not take the command \
+                     (administrator window? run this command with the same elevation)"
+                );
+                std::process::exit(1);
+            }
+        }
+        return true;
+    }
     false
 }

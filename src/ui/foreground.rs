@@ -56,6 +56,40 @@ pub(crate) fn app_listed(list: &[String], exe_file: &str) -> bool {
     !name.is_empty() && list.contains(&name)
 }
 
+/// Per-app block windows (`game.exe=80; editor.exe=25`), latest entry wins.
+/// `0` never filters that app (but still counts presses), like `key.XX=0`.
+pub(crate) fn parse_app_profiles(text: &str) -> Vec<(String, u64)> {
+    let mut out: Vec<(String, u64)> = Vec::new();
+    for item in text.split([';', ',', '/', '\n', '\r']) {
+        let Some((name, ms)) = item.split_once('=') else {
+            continue;
+        };
+        let name = normalize(name);
+        let Ok(ms) = ms.trim().parse::<u64>() else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+        // Later entries replace earlier ones for the same app.
+        if let Some(slot) = out.iter_mut().find(|(n, _)| *n == name) {
+            slot.1 = ms.min(1000);
+        } else {
+            out.push((name, ms.min(1000)));
+        }
+    }
+    out
+}
+
+/// Block window for `exe_file` from the parsed profiles, if it has one.
+pub(crate) fn active_profile(profiles: &[(String, u64)], exe_file: &str) -> Option<u64> {
+    let name = normalize(exe_file);
+    if name.is_empty() {
+        return None;
+    }
+    profiles.iter().find(|(n, _)| *n == name).map(|(_, ms)| *ms)
+}
+
 /// A window covering its whole monitor is full screen.
 pub(crate) fn covers_monitor(win: RECT, monitor: RECT) -> bool {
     win.left <= monitor.left
@@ -100,6 +134,7 @@ pub(crate) fn pause_reason(
 
 struct Config {
     apps: Vec<String>,
+    profiles: Vec<(String, u64)>,
     fullscreen: bool,
 }
 
@@ -111,6 +146,7 @@ struct Cache {
 
 static CONFIG: Mutex<Config> = Mutex::new(Config {
     apps: Vec::new(),
+    profiles: Vec::new(),
     fullscreen: false,
 });
 static CACHE: Mutex<Cache> = Mutex::new(Cache {
@@ -144,9 +180,10 @@ pub(crate) fn end_expired_pause(now: Instant) -> bool {
 }
 
 /// Apply the saved choices (startup and every save).
-pub(crate) fn configure(apps: &str, fullscreen: bool) {
+pub(crate) fn configure(apps: &str, profiles: &str, fullscreen: bool) {
     let mut c = CONFIG.lock().unwrap();
     c.apps = parse_app_list(apps);
+    c.profiles = parse_app_profiles(profiles);
     c.fullscreen = fullscreen;
     // Re-evaluate the current window on the next tick.
     CACHE.lock().unwrap().hwnd = 0;
@@ -246,11 +283,16 @@ unsafe fn is_fullscreen(hwnd: HWND) -> bool {
 pub(crate) unsafe fn tick(own: HWND) -> bool {
     unsafe {
         let fg = GetForegroundWindow();
-        let (apps, pause_fullscreen) = {
+        let (apps, profiles, pause_fullscreen) = {
             let c = CONFIG.lock().unwrap();
-            (c.apps.clone(), c.fullscreen)
+            (c.apps.clone(), c.profiles.clone(), c.fullscreen)
         };
         let timed = TIMED.lock().unwrap().as_ref().map(|(_, at)| at.clone());
+        // Block window for the front app, if it has its own profile
+        // (`None` = global window). Updated even when the pause reason did
+        // not change: switching between two unlisted profiled apps leaves
+        // the pause state alone but must still swap the threshold.
+        let mut want_app: Option<u64> = None;
         let mut next = if fg.is_invalid() || fg == own {
             (None, false)
         } else {
@@ -268,6 +310,7 @@ pub(crate) unsafe fn tick(own: HWND) -> bool {
                 }
                 (cache.exe.clone(), cache.elevated)
             };
+            want_app = active_profile(&profiles, &exe);
             let listed = app_listed(&apps, &exe);
             let fullscreen = pause_fullscreen && !listed && is_fullscreen(fg);
             let reason = pause_reason(listed, fullscreen, pause_fullscreen, &exe);
@@ -280,8 +323,14 @@ pub(crate) unsafe fn tick(own: HWND) -> bool {
             *st = next.clone();
             changed
         };
-        if changed && let Some(shared) = SHARED.get() {
-            shared.lock().unwrap().suspended = next.0.is_some();
+        if let Some(shared) = SHARED.get() {
+            let mut g = shared.lock().unwrap();
+            if changed {
+                g.suspended = next.0.is_some();
+            }
+            if g.debouncer.app_threshold_ms() != want_app {
+                g.debouncer.set_app_threshold(want_app);
+            }
         }
         changed
     }
@@ -324,6 +373,36 @@ mod tests {
             ..mon
         };
         assert!(!covers_monitor(maximized_with_taskbar, mon));
+    }
+
+    #[test]
+    fn app_profiles_parse_name_equals_ms_and_dedupe() {
+        assert_eq!(
+            parse_app_profiles("game.exe=80; editor.exe=25"),
+            [("game".to_string(), 80), ("editor".to_string(), 25)]
+        );
+        // Case, `.exe`, separators, and clamping match the pause list.
+        assert_eq!(
+            parse_app_profiles("  GAME.EXE = 2000 ,, noexe\n; bad=\n; =50\n; plain\n"),
+            [("game".to_string(), 1000)]
+        );
+        // Later entries win; 0 survives (never filter that app).
+        assert_eq!(
+            parse_app_profiles("g.exe=30; G.EXE=0"),
+            [("g".to_string(), 0)]
+        );
+        assert!(parse_app_profiles("").is_empty());
+    }
+
+    #[test]
+    fn active_profile_matches_by_normalized_exe_name() {
+        let profiles = parse_app_profiles("game.exe=80; editor.exe=0");
+        assert_eq!(active_profile(&profiles, "GAME.EXE"), Some(80));
+        assert_eq!(active_profile(&profiles, "game"), Some(80));
+        assert_eq!(active_profile(&profiles, "editor.exe"), Some(0));
+        assert_eq!(active_profile(&profiles, "other.exe"), None);
+        assert_eq!(active_profile(&profiles, ""), None);
+        assert_eq!(active_profile(&[], "game.exe"), None);
     }
 
     #[test]

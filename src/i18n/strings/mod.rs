@@ -1,6 +1,7 @@
 //! Localizable UI strings (Korean / English).
 mod api;
 mod en;
+mod ja;
 mod ko;
 mod schema;
 #[cfg(test)]

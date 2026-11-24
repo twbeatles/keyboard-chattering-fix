@@ -23,7 +23,7 @@ Windows 저수준 키보드 훅(`WH_KEYBOARD_LL`) 기반 채터링 방지 상주
 - 기록 탭은 기록 탭이 보일 때만, `log_seq`가 바뀐 틱에만 다시 렌더. 리스트는 `LVS_OWNERDATA`라 행 문자열은 `LVN_GETDISPINFOW`에서 꺼내 씀.
 - 로그 버퍼 용량은 `Debouncer::set_log_limit`(UI 스레드)에서 미리 예약 → 훅의 `push_log`는 재할당하지 않음. `log_limit` 필드를 직접 쓰지 말 것.
 - 사운드 경로 검증(`resolve_sound_file`, 디스크 I/O)은 `SHARED` 락 밖, 워커 스레드에서(`apply_sound_async`, 세대 번호로 늦게 끝난 검증 무시). `ShellExecuteW`도 워커 스레드(COM 초기화 포함).
-- 설정 쓰기는 `persist_with` 계열(`persist_live`: 종료·세션 종료·5분 자동 저장·통계 초기화·키별 통계 지우기·언어 변경·설정 내보내기 / `set_key_override(s)`·`set_mouse_filter`·`set_mouse_threshold`: 키·마우스 탭)과 `on_save`뿐. 라이브 카운터·간격 히스토그램은 `Settings::take_live_stats`(저장)·`restore_live_stats`(기동) 한 쌍으로만 옮김 — 새 카운터는 여기에만 추가. 측정 기준이 다른 히스토그램은 옮기지 않으며, `on_save`가 기준 변경 시 `clear_gap_histograms`. 모두 디스크의 파일 전용 필드(`key.XX`)를 `config::try_load()`로 다시 읽어 병합하므로 실행 중 파일 편집이 보존되고, 파일을 읽을 수 없으면 메모리(`SAVED`) 값을 유지(`on_save`는 `save_base`). `config::load()`(실패 시 기본값)로 병합 기준을 잡지 말 것. 예외: 가져오기(`files::import_settings`)는 직접 저장 1회 후 `on_save`로 확정한다.
+- 설정 쓰기는 `persist_with` 계열(`persist_live`: 종료·세션 종료·5분 자동 저장·통계 초기화·키별 통계 지우기·언어 변경·설정 내보내기 / `set_key_override(s)`·`set_mouse_filter`·`set_mouse_threshold`·`set_wheel_filter`: 키·마우스 탭 / `note_update_checked`: 업데이트 워커의 확인 시각 기록)과 `on_save`뿐. 라이브 카운터·간격 히스토그램은 `Settings::take_live_stats`(저장)·`restore_live_stats`(기동) 한 쌍으로만 옮김 — 새 카운터는 여기에만 추가. 측정 기준이 다른 히스토그램은 옮기지 않으며, `on_save`가 기준 변경 시 `clear_gap_histograms`. 모두 디스크의 파일 전용 필드(`key.XX`)를 `config::try_load()`로 다시 읽어 병합하므로 실행 중 파일 편집이 보존되고, 파일을 읽을 수 없으면 메모리(`SAVED`) 값을 유지(`on_save`는 `save_base`). `config::load()`(실패 시 기본값)로 병합 기준을 잡지 말 것. 예외: 가져오기(`files::import_settings`)는 직접 저장 1회 후 `on_save`로 확정한다.
 - 새 컨트롤 추가 = `layout::SPECS` 한 줄 + (필요 시) `ids.rs`. `layout` 테스트가 ID 중복·겹침·카드 이탈·빈 문구를 잡음.
 
 ## 게이트 (푸시 전 자동 실행됨: `.githooks/pre-push`)
@@ -59,4 +59,4 @@ cargo check --workspace --all-targets
 - **Raw input(`RegisterRawInputDevices`) 등록 금지**: 키보드 raw input을 등록하면 앱 창이 전경일 때 LL 훅이 입력을 받지 못함(v0.3.0 개발 중 실측, `features_e2e`/창 표시 상태 프로브로 발견). 워치독이 raw input 대신 프로브를 쓰는 이유.
 - 단일 인스턴스 뮤텍스를 관리자 인스턴스가 쥐고 있으면 일반 권한의 `CreateMutexW`/`OpenMutexW`는 `ACCESS_DENIED` → "이미 실행 중"으로 취급해야 함(fail open 금지). 로그인 시 일반 `--autostart` 인스턴스는 표식이 있으면 관리자 인스턴스를 `ELEVATED_START_GRACE`(20초)까지 기다린 뒤 대체 실행하고 표식을 지움(관리자 작업이 늦게 떠서 조용히 종료할 때 표식을 다시 세움). `--autostart`는 항상 트레이로 시작, `--after-pid` 대기는 30초(`app::bootstrap`).
 - 떼기 확인 재주입은 injector 스레드의 `send_retrying`이 `SendInput` 거부(보안 데스크톱) 시 100ms 간격 최대 30회 재시도. 종료 시 훅 스레드의 `send`는 1회만(대기 금지).
-- 창 높이 690(논리). 설정·고급·키 탭 하단 카드는 저장 버튼(614)과 겹치지 않게 602 이하로.
+- 창 높이 742(논리). 설정·고급·키 탭 하단 카드는 저장 버튼(666)과 겹치지 않게 654 이하로(자동 일시 중지 카드 하단 648).

@@ -11,6 +11,16 @@ use crate::{
     i18n::{Language, LanguagePref, system_language},
 };
 
+use windows::Win32::System::SystemInformation::GetLocalTime;
+
+/// Keep the newest daily entries; the trend window only looks back weeks.
+fn prune_days(history: &mut Vec<DayEntry>) {
+    history.sort_by_key(|e| e.date);
+    if history.len() > HISTORY_DAYS_KEPT {
+        history.drain(..history.len() - HISTORY_DAYS_KEPT);
+    }
+}
+
 /// Every key's measured gaps, zeroed.
 pub fn empty_histograms() -> Box<[GapHistogram; 256]> {
     vec![[0; GAP_BUCKETS]; 256]
@@ -39,11 +49,25 @@ pub struct Settings {
     pub exclude_injected: bool,
     /// Also filter mouse button chatter (a click registering twice).
     pub filter_mouse: bool,
+    /// Also filter mouse-wheel reversals (a worn encoder briefly scrolling
+    /// the opposite way). Same-direction scrolling always passes.
+    pub filter_wheel: bool,
+    /// Check for updates automatically, about once a week (tray balloon
+    /// only, never a dialog). Turn it off with `bAutoCheckUpdate=0`.
+    pub auto_check_update: bool,
+    /// Unix time of the last finished update check (manual or automatic),
+    /// 0 when never checked. The next automatic check runs a week after it.
+    pub last_update_check_unix: u64,
     /// Hold each release of a held key back this long, 0 = off.
     pub release_defer_ms: u64,
     /// Executables that pause protection while in front, as typed
     /// (`game.exe; other`); see `ui::foreground::parse_app_list`.
     pub auto_disable_apps: String,
+    /// Per-app block windows, as typed (`game.exe=80; editor.exe=25`); see
+    /// `ui::foreground::parse_app_profiles`. Empty = no profiles: every app
+    /// uses the global window. A value of 0 never filters that app (but
+    /// still counts presses), like `key.XX=0`.
+    pub app_profiles: String,
     /// Pause protection while a full-screen app is in front.
     pub auto_disable_fullscreen: bool,
     /// Global hotkeys as typed (`Ctrl+Alt+F12`); empty = none.
@@ -63,6 +87,31 @@ pub struct Settings {
     /// suggestion. Measured from `measure_from`; kept across restarts so
     /// rare chatter adds up instead of starting over every sign-in.
     pub gap_hist: Box<[GapHistogram; 256]>,
+    /// Per-day per-key (presses, blocked) (`day.YYYYMMDD`), newest last.
+    /// The trend diagnosis ("recently worse?") reads this, not the
+    /// cumulative counters.
+    pub day_history: Vec<DayEntry>,
+    /// Keys already warned about, per day (`alert.YYYYMMDD`): one balloon
+    /// per key per day, even across restarts.
+    pub alerted: Vec<(u32, Vec<u8>)>,
+}
+
+/// One day of per-key totals, indexed by virtual-key code.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DayEntry {
+    /// Local calendar day as YYYYMMDD.
+    pub date: u32,
+    pub presses: [u64; 256],
+    pub blocked: [u64; 256],
+}
+
+/// How many daily entries are kept on disk.
+pub(crate) const HISTORY_DAYS_KEPT: usize = 30;
+
+/// Local calendar day as YYYYMMDD (the day-history key).
+pub fn today_yyyymmdd() -> u32 {
+    let t = unsafe { GetLocalTime() };
+    (u32::from(t.wYear) * 100 + u32::from(t.wMonth)) * 100 + u32::from(t.wDay)
 }
 
 impl Settings {
@@ -86,7 +135,19 @@ impl Settings {
     /// owned by it, not by the file). Gaps measured from another baseline
     /// than `self.measure_from` are not taken: they would mean something
     /// else once read back.
-    pub fn take_live_stats(&mut self, d: &Debouncer) {
+    ///
+    /// Day totals are consume-on-take: each event is folded into the day it
+    /// was measured on exactly once, so a midnight crossing attributes its
+    /// tail correctly and nothing is ever double-counted. `today` is a
+    /// parameter (rather than read here) so tests can drive any date.
+    pub fn take_live_stats(&mut self, d: &mut Debouncer) {
+        let today = today_yyyymmdd();
+        self.take_live_stats_at(d, today);
+    }
+
+    /// [`take_live_stats`] with the date given explicitly, so tests can
+    /// drive any date (midnight rollover included) without waiting for one.
+    pub(crate) fn take_live_stats_at(&mut self, d: &mut Debouncer, today: u32) {
         self.total_presses = d.total_presses;
         self.blocked_presses = d.blocked_presses;
         self.per_key_presses = d.per_key_presses;
@@ -96,6 +157,29 @@ impl Settings {
         } else {
             self.gap_hist.iter_mut().for_each(|h| *h = [0; GAP_BUCKETS]);
         }
+        let target = if d.day_date == 0 { today } else { d.day_date };
+        let active = d.day_presses.iter().any(|&n| n > 0) || d.day_blocked.iter().any(|&n| n > 0);
+        if active {
+            match self.day_history.iter_mut().find(|e| e.date == target) {
+                Some(e) => {
+                    for vk in 0..256 {
+                        e.presses[vk] = e.presses[vk].saturating_add(d.day_presses[vk]);
+                        e.blocked[vk] = e.blocked[vk].saturating_add(d.day_blocked[vk]);
+                    }
+                }
+                None => self.day_history.push(DayEntry {
+                    date: target,
+                    presses: d.day_presses,
+                    blocked: d.day_blocked,
+                }),
+            }
+        }
+        d.day_presses = [0; 256];
+        d.day_blocked = [0; 256];
+        d.day_date = today;
+        prune_days(&mut self.day_history);
+        let kept: Vec<u32> = self.day_history.iter().map(|e| e.date).collect();
+        self.alerted.retain(|(date, _)| kept.contains(date));
     }
 
     /// Hand the saved counters and measured gaps to a new filter (startup).
@@ -126,8 +210,12 @@ impl Default for Settings {
             min_chatter_ms: 0,
             exclude_injected: true,
             filter_mouse: false,
+            filter_wheel: false,
+            auto_check_update: true,
+            last_update_check_unix: 0,
             release_defer_ms: 0,
             auto_disable_apps: String::new(),
+            app_profiles: String::new(),
             auto_disable_fullscreen: false,
             hotkey_toggle: String::new(),
             hotkey_cleaning: String::new(),
@@ -139,6 +227,8 @@ impl Default for Settings {
             per_key_presses: [0; 256],
             per_key_blocked: [0; 256],
             gap_hist: empty_histograms(),
+            day_history: Vec::new(),
+            alerted: Vec::new(),
         }
     }
 }
@@ -162,9 +252,9 @@ mod tests {
 
     #[test]
     fn live_stats_round_trip_through_the_settings() {
-        let d = measured(MeasureFrom::Release);
+        let mut d = measured(MeasureFrom::Release);
         let mut s = Settings::default();
-        s.take_live_stats(&d);
+        s.take_live_stats(&mut d);
         assert_eq!((s.total_presses, s.blocked_presses), (2, 1));
         assert_eq!(s.gap_hist[0x41][1], 1);
 
@@ -175,12 +265,61 @@ mod tests {
     }
 
     /// Gaps never cross baselines, in either direction: counters do.
+    /// Day totals consume each event exactly once: a second take without
+    /// new input adds nothing, and a midnight crossing attributes its tail
+    /// to the day it was measured on.
+    #[test]
+    fn day_history_consumes_each_event_once() {
+        use crate::debounce::KeyEventKind;
+        let ms = Duration::from_millis;
+        let mut d = Debouncer::new(50);
+        let mut s = Settings::default();
+        d.decide_event(0x41, false, KeyEventKind::Down, ms(0));
+        d.decide_event(0x41, false, KeyEventKind::Up, ms(10));
+        s.take_live_stats_at(&mut d, 20261124);
+        // A second take with no new input changes nothing.
+        s.take_live_stats_at(&mut d, 20261124);
+        assert_eq!(s.day_history.len(), 1);
+        assert_eq!(s.day_history[0].date, 20261124);
+        assert_eq!(s.day_history[0].presses[0x41], 1);
+        // A take after midnight with no new input adds no empty day.
+        s.take_live_stats_at(&mut d, 20261125);
+        assert_eq!(s.day_history.len(), 1);
+        // Input on the new day lands on the new day.
+        d.decide_event(0x41, false, KeyEventKind::Down, ms(20));
+        d.decide_event(0x41, false, KeyEventKind::Up, ms(30));
+        s.take_live_stats_at(&mut d, 20261125);
+        assert_eq!(s.day_history.len(), 2);
+        let old = s.day_history.iter().find(|e| e.date == 20261124).unwrap();
+        let new = s.day_history.iter().find(|e| e.date == 20261125).unwrap();
+        assert_eq!(old.presses[0x41], 1);
+        assert_eq!(new.presses[0x41], 1);
+    }
+
+    /// Only the newest 30 days are kept; the trend window looks back weeks.
+    #[test]
+    fn day_history_prunes_to_thirty_days() {
+        let mut s = Settings::default();
+        for day in 1..=35u32 {
+            s.day_history.push(DayEntry {
+                date: 20261100 + day,
+                presses: [0; 256],
+                blocked: [0; 256],
+            });
+        }
+        let mut d = Debouncer::new(50);
+        s.take_live_stats_at(&mut d, 20261135);
+        assert_eq!(s.day_history.len(), 30);
+        assert_eq!(s.day_history[0].date, 20261106);
+        assert_eq!(s.day_history[29].date, 20261135);
+    }
+
     #[test]
     fn gaps_from_another_baseline_are_neither_saved_nor_restored() {
-        let d = measured(MeasureFrom::Press);
+        let mut d = measured(MeasureFrom::Press);
         let mut s = Settings::default();
         s.gap_hist[0x42][3] = 5;
-        s.take_live_stats(&d);
+        s.take_live_stats(&mut d);
         assert_eq!(s.total_presses, 2);
         assert_eq!(s.gap_hist.iter().flatten().sum::<u32>(), 0);
 

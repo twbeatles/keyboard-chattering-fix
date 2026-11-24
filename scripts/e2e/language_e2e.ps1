@@ -5,11 +5,13 @@
 .DESCRIPTION
     Starts the app once per `sLanguage` value (throw-away APPDATA) and reads
     the header subtitle the window actually shows. Korean text contains
-    Hangul, English does not, so the check does not depend on wording.
-      - sLanguage=ko / en           -> that language, whatever Windows uses
+    Hangul and Japanese text contains kana, so the check does not depend
+    on wording.
+      - sLanguage=ko / en / ja      -> that language, whatever Windows uses
       - sLanguage=auto, key missing,
         unknown value ("klingon")    -> Korean on a Korean Windows display
-                                       language, otherwise English
+                                       language, Japanese on a Japanese one,
+                                       otherwise English
     The automatic language is read from `--check-language`.
     Finally, a session-end save must write `sLanguage=auto` for a settings
     file that had no language key (a fresh install keeps following Windows).
@@ -27,10 +29,18 @@ $ID_HEADER_SUB = 101
 # What the app says "Auto" resolves to here (its detection is unit-tested
 # against locale names; this script verifies the wiring to the window).
 $cli = Invoke-AppCli -Exe $bins.App -Arguments @("--check-language")
-if ($cli.ExitCode -ne 0 -or $cli.Output -notmatch '-> (ko|en)\s*$') { throw "--check-language failed: $($cli.Output)" }
-[void]($cli.Output -match '-> (ko|en)\s*$')
+if ($cli.ExitCode -ne 0 -or $cli.Output -notmatch '-> (ko|en|ja)\s*$') { throw "--check-language failed: $($cli.Output)" }
+[void]($cli.Output -match '-> (ko|en|ja)\s*$')
 $expectedAuto = $Matches[1]
 Write-Host $cli.Output
+
+function Get-ScriptOf([string]$Text) {
+    $chars = @($Text.ToCharArray() | ForEach-Object { [int]$_ })
+    if (($chars | Where-Object { $_ -ge 0xAC00 -and $_ -le 0xD7A3 }).Count -gt 0) { return "ko" }
+    # Hiragana + Katakana (full width); Japanese UI text always has kana.
+    if (($chars | Where-Object { ($_ -ge 0x3041 -and $_ -le 0x3096) -or ($_ -ge 0x30A1 -and $_ -le 0x30FF) }).Count -gt 0) { return "ja" }
+    return "en"
+}
 
 function Get-ShownLanguage([string[]]$Lines) {
     $appData = New-TempAppData $Lines
@@ -40,8 +50,7 @@ function Get-ShownLanguage([string[]]$Lines) {
         $win = Wait-MainWindow -ProcessId $proc.Id
         Start-Sleep -Milliseconds 600
         $text = Get-ControlText -Hwnd $win.Hwnd -Id $ID_HEADER_SUB
-        $hangul = @($text.ToCharArray() | Where-Object { [int]$_ -ge 0xAC00 -and [int]$_ -le 0xD7A3 }).Count
-        $shown = if ($hangul -gt 0) { "ko" } else { "en" }
+        $shown = Get-ScriptOf $text
         [PSCustomObject]@{ Language = $shown; Text = $text; Win = $win; Proc = $proc; AppData = $appData }
     } catch {
         Stop-AppProcess $proc
@@ -53,6 +62,7 @@ function Get-ShownLanguage([string[]]$Lines) {
 $cases = @(
     @{ Name = "sLanguage=ko";       Lines = @("sLanguage=ko");      Want = "ko" },
     @{ Name = "sLanguage=en";       Lines = @("sLanguage=en");      Want = "en" },
+    @{ Name = "sLanguage=ja";       Lines = @("sLanguage=ja");      Want = "ja" },
     @{ Name = "sLanguage=KO (legacy case)"; Lines = @("sLanguage=KO"); Want = "ko" },
     @{ Name = "sLanguage=auto";     Lines = @("sLanguage=auto");    Want = $expectedAuto },
     @{ Name = "no language key";    Lines = @("iThreshold=50");     Want = $expectedAuto },
@@ -70,7 +80,7 @@ foreach ($case in $cases) {
 
 # Non-Korean systems get English. This PC cannot change its Windows language
 # for a test, so KCFIX_LOCALE (documented diagnostic override) stands in.
-foreach ($pair in @(@("en-US", "en"), @("de-DE", "en"), @("ja-JP", "en"), @("zh-Hans-CN", "en"), @("ko-KR", "ko"), @("ko", "ko"))) {
+foreach ($pair in @(@("en-US", "en"), @("de-DE", "en"), @("ja-JP", "ja"), @("zh-Hans-CN", "en"), @("ko-KR", "ko"), @("ko", "ko"))) {
     $cli = Invoke-AppCli -Exe $bins.App -Arguments @("--check-language") -Environment @{ KCFIX_LOCALE = $pair[0] }
     Assert-Check ($cli.Output -eq "system language: $($pair[0]) -> $($pair[1])") "--check-language with KCFIX_LOCALE=$($pair[0]) reports $($pair[1]) ($($cli.Output))"
 
@@ -81,8 +91,7 @@ foreach ($pair in @(@("en-US", "en"), @("de-DE", "en"), @("ja-JP", "en"), @("zh-
         $win = Wait-MainWindow -ProcessId $proc.Id
         Start-Sleep -Milliseconds 500
         $text = Get-ControlText -Hwnd $win.Hwnd -Id $ID_HEADER_SUB
-        $hangul = @($text.ToCharArray() | Where-Object { [int]$_ -ge 0xAC00 -and [int]$_ -le 0xD7A3 }).Count
-        $shown = if ($hangul -gt 0) { "ko" } else { "en" }
+        $shown = Get-ScriptOf $text
         Assert-Check ($shown -eq $pair[1]) "auto + system $($pair[0]): window shows $($pair[1]) (got $shown)"
     } finally {
         Stop-AppProcess $proc
@@ -91,7 +100,8 @@ foreach ($pair in @(@("en-US", "en"), @("de-DE", "en"), @("ja-JP", "en"), @("zh-
 }
 
 # Changing the picker retranslates at once and is remembered. Rows: 0 =
-# Auto, 1 = Korean, 2 = English (CB_SETCURSEL + CBN_SELCHANGE, as a click does).
+# Auto, 1 = Korean, 2 = English, 3 = Japanese
+# (CB_SETCURSEL + CBN_SELCHANGE, as a click does).
 function Set-LanguageRow($Win, [int]$Row) {
     $combo = [KcfixE2E.Native]::GetDlgItem($Win.Hwnd, 415)   # ID_COMBO_LANG
     [void](Send-WindowMessage -Hwnd $combo -Msg 0x014E -WParam $Row -LParam 0)          # CB_SETCURSEL
@@ -100,7 +110,7 @@ function Set-LanguageRow($Win, [int]$Row) {
 }
 function Get-ShownFromWindow($Win) {
     $text = Get-ControlText -Hwnd $Win.Hwnd -Id $ID_HEADER_SUB
-    if (@($text.ToCharArray() | Where-Object { [int]$_ -ge 0xAC00 -and [int]$_ -le 0xD7A3 }).Count -gt 0) { "ko" } else { "en" }
+    Get-ScriptOf $text
 }
 $appData = New-TempAppData @("sLanguage=auto")
 $proc = $null
@@ -117,6 +127,9 @@ try {
     Assert-Check ((Get-IniValue $appData.Ini "sLanguage") -eq "auto") "picking Auto is saved as sLanguage=auto"
     Set-LanguageRow $win 1
     Assert-Check ((Get-IniValue $appData.Ini "sLanguage") -eq "ko") "picking Korean is saved as sLanguage=ko"
+    Set-LanguageRow $win 3
+    Assert-Check ((Get-ShownFromWindow $win) -eq "ja") "picking Japanese retranslates immediately"
+    Assert-Check ((Get-IniValue $appData.Ini "sLanguage") -eq "ja") "picking Japanese is saved as sLanguage=ja"
 } finally {
     Stop-AppProcess $proc
     Remove-Item -Recurse -Force $appData.Root -ErrorAction SilentlyContinue

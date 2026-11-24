@@ -59,6 +59,25 @@ pub(super) fn event_rows(
         .collect()
 }
 
+/// Blocked presses in the trailing 7-day window, per virtual key, from the
+/// persisted day history. Reads `SAVED` first and never nests it under the
+/// hook lock: the lock order is SAVED before SHARED everywhere.
+pub(super) fn week_blocked_now() -> [u64; 256] {
+    let Some(saved) = super::super::state::SAVED.get() else {
+        return [0; 256];
+    };
+    let saved = saved.lock().unwrap();
+    let today = crate::config::today_yyyymmdd();
+    let end = crate::recommend::ymd_to_days(today).unwrap_or(0);
+    let sums =
+        crate::recommend::window_sums(&saved.day_history, end, crate::recommend::TREND_WINDOW_DAYS);
+    let mut week = [0u64; 256];
+    for (i, s) in sums.iter().enumerate() {
+        week[i] = s.1;
+    }
+    week
+}
+
 /// A key's block window as shown in the lists: `50 ms`, `80 ms (custom)`,
 /// or "Not filtered" for a per-key 0 and for Shift/Ctrl by default.
 pub(crate) fn threshold_cell(s: &Strings, ms: u64, custom: bool) -> String {
@@ -73,6 +92,8 @@ pub(crate) fn threshold_cell(s: &Strings, ms: u64, custom: bool) -> String {
 pub(crate) struct KeyTotals {
     pub presses: [u64; 256],
     pub blocked: [u64; 256],
+    /// Blocked presses in the trailing 7-day window, per key.
+    pub week_blocked: [u64; 256],
     /// (ms, is a per-key override)
     pub thresholds: [(u64, bool); 256],
 }
@@ -106,6 +127,7 @@ pub(crate) fn render_keys(s: &Strings, t: &KeyTotals, query: &str) -> Vec<Row> {
                     t.blocked[i].to_string(),
                     format!("{rate:.1}%"),
                     threshold_cell(s, ms, custom),
+                    t.week_blocked[i].to_string(),
                 ],
                 highlight: t.blocked[i] > 0,
                 vk: Some(vk),

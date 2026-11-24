@@ -20,5 +20,5 @@ pub use stats::{LOG_LIMIT_MAX, LOG_LIMIT_MIN};
 pub use types::{
     Decision, GAP_BUCKET_MS, GAP_BUCKETS, GapHistogram, KeyEventKind, LogEvent,
     MOUSE_THRESHOLD_DEFAULT_MS, MeasureFrom, RELEASE_DEFER_MAX_MS, SLOTS, THRESHOLD_DEFAULT_MS,
-    slot_of,
+    WHEEL_VK, WheelAxis, slot_of,
 };

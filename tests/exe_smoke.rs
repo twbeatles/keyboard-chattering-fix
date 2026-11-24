@@ -113,5 +113,5 @@ fn check_language_reports_the_automatic_language() {
         .find(|l| l.starts_with("system language: "))
         .unwrap_or_else(|| panic!("unexpected output: {stdout:?}"));
     let code = line.rsplit("-> ").next().unwrap().trim();
-    assert!(code == "ko" || code == "en", "{line}");
+    assert!(code == "ko" || code == "en" || code == "ja", "{line}");
 }

@@ -53,7 +53,11 @@ pub(super) unsafe fn on_create(hwnd: HWND, lparam: LPARAM) -> LRESULT {
         settings_form::load_into_form(hwnd, init);
         apply_visibility(hwnd);
         add_tray(hwnd);
-        foreground::configure(&init.auto_disable_apps, init.auto_disable_fullscreen);
+        foreground::configure(
+            &init.auto_disable_apps,
+            &init.app_profiles,
+            init.auto_disable_fullscreen,
+        );
         for problem in hotkeys::apply(hwnd, &init.hotkey_toggle, &init.hotkey_cleaning) {
             tracing::warn!("{problem}");
         }
@@ -186,6 +190,8 @@ pub(super) unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
                 commands::set_protection(hwnd, on);
             } else if id == ID_TOGGLE_MOUSE {
                 keys_page::on_mouse_toggled(hwnd, on);
+            } else if id == ID_TOGGLE_WHEEL {
+                keys_page::on_wheel_toggled(hwnd, on);
             } else {
                 settings_form::mark_dirty(hwnd);
             }
@@ -209,6 +215,7 @@ pub(super) unsafe fn on_command(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
                 | ID_EDIT_LOG_LIMIT
                 | ID_EDIT_DEFER
                 | ID_EDIT_AUTO_APPS
+                | ID_EDIT_APP_PROFILES
                 | ID_EDIT_HOTKEY_TOGGLE
                 | ID_EDIT_HOTKEY_CLEAN,
                 EN_CHANGE,

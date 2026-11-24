@@ -51,6 +51,8 @@ fn init_shared(settings: &config::Settings) {
     let _ = SHARED.set(Mutex::new(super::state::Shared {
         debouncer,
         enabled: settings.enabled,
+        filter_mouse: settings.filter_mouse,
+        filter_wheel: settings.filter_wheel,
         play_sound: settings.play_sound,
         sound_file: config::resolve_sound_file(settings.sound_file.as_deref()),
         exclude_injected: settings.exclude_injected,
@@ -148,6 +150,7 @@ pub(crate) fn run(settings: config::Settings) {
         // UI. Installed before the window so the first frame shows the
         // real protection state.
         input::hook::set_mouse_filter(settings.filter_mouse);
+        input::hook::set_wheel_filter(settings.filter_wheel);
         let hooked = input::hook::start();
         let hwnd: HWND = crate::ui::create_window(hinstance, &settings);
         if hwnd.is_invalid() {

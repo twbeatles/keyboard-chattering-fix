@@ -18,8 +18,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\e2e\update_swap_e2e.ps1 -Help
 | Script | Verifies |
 |---|---|
 | `hook_session_e2e.ps1` | Synthesized F24 chatter is blocked by the real hook; filtering keeps working while the UI thread is **suspended** (hook on its own thread); `WM_ENDSESSION` persists counters before a no-`WM_DESTROY` kill; an external `key.41` edit survives that save. `-AppExe` runs it against another build (an older commit fails the stall and persistence checks). |
-| `features_e2e.ps1` | Release delay: a bounce while F24 is held never shows it released, and the held-back release is sent afterwards; mouse X2 chatter over the app window is blocked; `Ctrl+Alt+F23` toggles protection; a listed app in front (Character Map, skipped when absent) pauses protection with a Home note and resumes after; counters persisted on session end. Moves the mouse over the app window for a moment. |
-| `language_e2e.ps1` | `sLanguage` ko/en/auto/legacy/unknown values show the right language in the real window; automatic follows Windows (Korean on a Korean system, English otherwise — non-Korean systems simulated with `KCFIX_LOCALE`); picker changes retranslate at once and are saved; a save without a stored choice writes `sLanguage=auto`. |
+| `features_e2e.ps1` | Release delay: a bounce while F24 is held never shows it released, and the held-back release is sent afterwards; mouse X2 chatter over the app window is blocked; wheel reversal chatter (vertical + horizontal, `stat.0A` 6/2) is blocked while same-direction scrolling passes; `Ctrl+Alt+F23` toggles protection; `--toggle` / `--pause-15` / `--resume` drive the running instance with no second copy; a listed app in front (Character Map, skipped when absent) pauses protection with a Home note and resumes after; counters persisted on session end; a second isolated run proves the per-app window (`charmap.exe=100` over a 20 ms global, `stat.87` 3/2). Moves the mouse over the app window for a moment; sends wheel ticks. |
+| `language_e2e.ps1` | `sLanguage` ko/en/ja/auto/legacy/unknown values show the right language in the real window; automatic follows Windows (Korean on a Korean system, Japanese on a Japanese one, English otherwise — other systems simulated with `KCFIX_LOCALE`); picker changes retranslate at once and are saved; a save without a stored choice writes `sLanguage=auto`. |
 | `update_swap_e2e.ps1` | Two consecutive swaps with the real helper: hash re-check, rename, relaunch + readiness handshake, no `.exe.old`/staging leftovers, and `--check-helper` still accepting the helper that stays in place. `-HelperExe` tests a published helper. |
 
 CI에서는 Actions → **e2e** → Run workflow(수동 전용, `.github/workflows/e2e.yml`)가
@@ -48,6 +48,26 @@ are shared with the real install, so turn both off again afterwards.
 6. **No in-app update while elevated.** In the elevated copy, choose Help > Check
    for Updates with a newer release published. Expected: the notice to update from a
    normal start, and no `kcfix-updater_helper_*.exe` in `%TEMP%`.
+
+## Manual checklist: automatic update check and cross-elevation CLI
+
+These need wall-clock waiting, a mouse click on a balloon, or a UAC prompt,
+so no script covers them. Use a test build under a throw-away `APPDATA`.
+
+1. **Automatic check records its run.** Write `iLastUpdateCheck=0` and
+   `bAutoCheckUpdate=1` into the throw-away `settings.ini`, start the app,
+   and wait 70 s. Expected: `iLastUpdateCheck` in the file advanced (to
+   "now" when the network works, to "a day ago" when it fails) with no
+   dialog shown.
+2. **Update balloon opens the manual flow.** With a newer release published,
+   wait for the balloon and click it. Expected: the update confirmation
+   dialog (or the package-manager / elevated notice for those installs).
+3. **Stale balloon clicks do nothing.** After dismissing the balloon, click
+   another tray balloon (e.g. pause for 15 minutes, wait for it to end, click
+   its balloon). Expected: no update dialog.
+4. **CLI across elevations.** With an elevated instance running, run
+   `KeyboardChatteringFix.exe --toggle` without elevation. Expected: exit
+   code 1 with the "same elevation" hint, and protection unchanged.
 
 Safety: every run uses a throw-away `APPDATA`, the only injected key is F24,
 and a running real instance aborts the run. Do not type during

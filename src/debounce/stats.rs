@@ -68,7 +68,12 @@ impl Debouncer {
         self.blocked_presses = 0;
         self.per_key_presses = [0; 256];
         self.per_key_blocked = [0; 256];
+        self.day_presses = [0; 256];
+        self.day_blocked = [0; 256];
+        self.day_date = 0;
         self.last_blocked = None;
+        self.last_wheel_v = None;
+        self.last_wheel_h = None;
         for h in self.gap_hist.iter_mut() {
             *h = [0; GAP_BUCKETS];
         }
@@ -77,14 +82,22 @@ impl Debouncer {
 
     /// Forget one key's counters, measured gaps, and log rows (per-key
     /// statistics reset, e.g. after replacing a switch). Global totals are
-    /// decremented to match, saturating at zero. Thresholds are kept.
+    /// decremented to match, saturating at zero. Thresholds are kept. The
+    /// not-yet-saved day slice (at most one autosave interval) is dropped
+    /// with them.
     pub fn clear_key_stats(&mut self, vk: u8) {
         let i = vk as usize;
         self.total_presses = self.total_presses.saturating_sub(self.per_key_presses[i]);
         self.blocked_presses = self.blocked_presses.saturating_sub(self.per_key_blocked[i]);
         self.per_key_presses[i] = 0;
         self.per_key_blocked[i] = 0;
+        self.day_presses[i] = 0;
+        self.day_blocked[i] = 0;
         self.gap_hist[i] = [0; GAP_BUCKETS];
+        if vk as usize == crate::debounce::WHEEL_VK {
+            self.last_wheel_v = None;
+            self.last_wheel_h = None;
+        }
         if self.last_blocked.is_some_and(|(b, _)| b == vk) {
             self.last_blocked = None;
         }
@@ -114,6 +127,7 @@ impl Debouncer {
     pub(crate) fn note_block(&mut self, vk: usize, now: Duration, gap: Duration) {
         self.blocked_presses += 1;
         self.per_key_blocked[vk] += 1;
+        self.day_blocked[vk] += 1;
         self.last_blocked = Some((vk as u8, gap));
         self.push_log(LogEvent {
             time: now,

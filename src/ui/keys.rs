@@ -9,6 +9,8 @@ pub(crate) fn vk_name(vk: u8) -> String {
         0x04 => "Mouse Middle".to_string(),
         0x05 => "Mouse Back".to_string(),
         0x06 => "Mouse Forward".to_string(),
+        // Wheel ticks (only with the wheel filter on; `key.0A` tunes it).
+        0x0A => "Mouse Wheel".to_string(),
         0x08 => "Backspace".to_string(),
         0x09 => "Tab".to_string(),
         0x0D => "Enter".to_string(),
@@ -140,6 +142,8 @@ mod tests {
         for wanted in [0x20, 0x41, 0x5A, 0xA0, 0xA5, 0x87] {
             assert!(vks.contains(&wanted), "0x{wanted:02X}");
         }
+        assert_eq!(vk_name(0x0A), "Mouse Wheel");
+        assert!(vks.contains(&0x0A));
         assert!(vks.windows(2).all(|w| w[0] < w[1]));
     }
 

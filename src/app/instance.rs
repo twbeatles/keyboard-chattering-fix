@@ -110,6 +110,99 @@ pub(crate) fn wait_for_other_instance(limit: std::time::Duration) -> bool {
     }
 }
 
+/// CLI flags that control the running instance instead of starting a new
+/// one. Only protection/cleaning commands are exposed: destructive ones
+/// (exit, update) are never accepted over `WM_COPYDATA`, like the
+/// `WM_UPDATE_EXIT` nonce rule (SEC-001).
+#[cfg(windows)]
+pub(crate) fn control_command(arg: &str) -> Option<usize> {
+    use crate::ui::ids::{MENU_CLEANING, MENU_PAUSE_15, MENU_PAUSE_60, MENU_RESUME, MENU_TOGGLE};
+    match arg {
+        "--toggle" => Some(MENU_TOGGLE),
+        "--pause-15" => Some(MENU_PAUSE_15),
+        "--pause-60" => Some(MENU_PAUSE_60),
+        "--resume" => Some(MENU_RESUME),
+        "--cleaning" => Some(MENU_CLEANING),
+        _ => None,
+    }
+}
+
+/// Whether `dwData` of a `WM_COPYDATA` message is a command this process
+/// accepts from a second invocation. Anything else (exit, update, window
+/// messages with side effects) is ignored.
+#[cfg(windows)]
+pub(crate) fn copydata_command(dw_data: usize) -> Option<usize> {
+    use crate::ui::ids::{MENU_CLEANING, MENU_PAUSE_15, MENU_PAUSE_60, MENU_RESUME, MENU_TOGGLE};
+    match dw_data {
+        MENU_TOGGLE | MENU_PAUSE_15 | MENU_PAUSE_60 | MENU_RESUME | MENU_CLEANING => Some(dw_data),
+        _ => None,
+    }
+}
+
+/// Outcome of forwarding one control command to the running instance.
+#[cfg(windows)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ForwardOutcome {
+    /// The running instance acknowledged the command.
+    Sent,
+    /// No window of this program is running under this account's session.
+    NotRunning,
+    /// The window exists but did not take the command (another elevation,
+    /// or its message loop is stuck).
+    Failed,
+}
+
+/// Forward `cmd` (a `MENU_*` id from [`control_command`]) to the running
+/// instance's window. `class` is the main window class; tests pass a bogus
+/// name so they never touch a real tray app (a `--toggle` probe would flip
+/// a user's protection).
+#[cfg(windows)]
+pub(crate) fn forward_control_to(class: &str, cmd: usize) -> ForwardOutcome {
+    use windows::Win32::System::DataExchange::COPYDATASTRUCT;
+    use windows::{
+        Win32::{
+            Foundation::{LPARAM, WPARAM},
+            UI::WindowsAndMessaging::*,
+        },
+        core::HSTRING,
+    };
+    unsafe {
+        let Ok(hwnd) = FindWindowW(&HSTRING::from(class), None) else {
+            return ForwardOutcome::NotRunning;
+        };
+        if hwnd.is_invalid() {
+            return ForwardOutcome::NotRunning;
+        }
+        let data = COPYDATASTRUCT {
+            dwData: cmd,
+            cbData: 0,
+            lpData: std::ptr::null_mut(),
+        };
+        let mut received = 0usize;
+        let rc = SendMessageTimeoutW(
+            hwnd,
+            WM_COPYDATA,
+            WPARAM(0),
+            LPARAM(&data as *const _ as isize),
+            SMTO_NORMAL,
+            5000,
+            Some(&mut received),
+        );
+        if rc.0 != 0 && received == 1 {
+            ForwardOutcome::Sent
+        } else {
+            ForwardOutcome::Failed
+        }
+    }
+}
+
+/// Forward `cmd` to the running instance of this program.
+#[cfg(windows)]
+pub(crate) fn forward_control(cmd: usize) -> ForwardOutcome {
+    // Must match the class registered in `ui::create_window`.
+    forward_control_to("KeyboardChatteringFixMain", cmd)
+}
+
 /// Bring the already-running instance's window to the front (best effort).
 #[cfg(windows)]
 pub(crate) fn bring_existing_to_front() {
@@ -175,5 +268,72 @@ mod tests {
         let missing = windows::core::Error::from_hresult(ERROR_FILE_NOT_FOUND.to_hresult());
         assert!(super::held_by_elevated(&denied));
         assert!(!super::held_by_elevated(&missing));
+    }
+
+    /// Every control flag maps to its menu command; anything else starts
+    /// the GUI as usual instead of controlling a running copy.
+    #[test]
+    #[cfg(windows)]
+    fn control_flags_map_to_their_commands() {
+        use crate::ui::ids::{
+            MENU_CLEANING, MENU_PAUSE_15, MENU_PAUSE_60, MENU_RESUME, MENU_TOGGLE,
+        };
+        assert_eq!(super::control_command("--toggle"), Some(MENU_TOGGLE));
+        assert_eq!(super::control_command("--pause-15"), Some(MENU_PAUSE_15));
+        assert_eq!(super::control_command("--pause-60"), Some(MENU_PAUSE_60));
+        assert_eq!(super::control_command("--resume"), Some(MENU_RESUME));
+        assert_eq!(super::control_command("--cleaning"), Some(MENU_CLEANING));
+        for other in [
+            "--toggleX",
+            "--pause",
+            "--exit",
+            "--update",
+            "",
+            "--version",
+        ] {
+            assert_eq!(super::control_command(other), None, "{other}");
+        }
+    }
+
+    /// The receiver only runs the allow-listed commands: exit, update and
+    /// made-up ids are ignored, like the `WM_UPDATE_EXIT` nonce rule.
+    #[test]
+    #[cfg(windows)]
+    fn copydata_accepts_only_control_commands() {
+        use crate::ui::ids::*;
+        for cmd in [
+            MENU_TOGGLE,
+            MENU_PAUSE_15,
+            MENU_PAUSE_60,
+            MENU_RESUME,
+            MENU_CLEANING,
+        ] {
+            assert_eq!(super::copydata_command(cmd), Some(cmd));
+        }
+        for denied in [
+            MENU_SHOW,
+            MENU_EXIT,
+            MENU_UPDATE,
+            MENU_HIDE,
+            MENU_RESET_STATS,
+            MENU_RUN_ELEVATED,
+            0,
+            999_999,
+        ] {
+            assert_eq!(super::copydata_command(denied), None);
+        }
+    }
+
+    /// Forwarding to a window class that cannot exist reports "not
+    /// running" without touching a real tray app (a `--toggle` probe would
+    /// flip a user's protection).
+    #[test]
+    #[cfg(windows)]
+    fn forward_to_a_missing_window_is_not_running() {
+        let bogus = format!("kcfix_no_such_window_{}", std::process::id());
+        assert_eq!(
+            super::forward_control_to(&bogus, super::control_command("--toggle").unwrap()),
+            super::ForwardOutcome::NotRunning
+        );
     }
 }

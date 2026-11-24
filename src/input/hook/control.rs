@@ -130,19 +130,41 @@ pub(super) static HOOK_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 pub(super) static HOOK_GEN: AtomicU64 = AtomicU64::new(0);
 /// What the user chose, so a restarted hook thread gets it back.
 pub(super) static MOUSE_WANTED: AtomicBool = AtomicBool::new(false);
+pub(super) static WHEEL_WANTED: AtomicBool = AtomicBool::new(false);
+
+fn mouse_hook_wanted() -> bool {
+    MOUSE_WANTED.load(Ordering::Relaxed) || WHEEL_WANTED.load(Ordering::Relaxed)
+}
+
+fn post_mouse_hook_want() {
+    let id = HOOK_THREAD_ID.load(Ordering::Acquire);
+    if id != 0 {
+        unsafe {
+            let _ = PostThreadMessageW(
+                id,
+                WM_KCFIX_MOUSE,
+                WPARAM(usize::from(mouse_hook_wanted())),
+                LPARAM(0),
+            );
+        }
+    }
+}
 /// The hook thread of this process (see [`start`]).
 pub(super) static HOOK: Mutex<Option<HookThread>> = Mutex::new(None);
 
 /// Turn mouse-button filtering on or off. The hook thread installs or
 /// removes its `WH_MOUSE_LL` hook; remembered for a restarted thread.
+/// The hook stays installed while either buttons or the wheel want it.
 pub(crate) fn set_mouse_filter(on: bool) {
     MOUSE_WANTED.store(on, Ordering::Relaxed);
-    let id = HOOK_THREAD_ID.load(Ordering::Acquire);
-    if id != 0 {
-        unsafe {
-            let _ = PostThreadMessageW(id, WM_KCFIX_MOUSE, WPARAM(on as usize), LPARAM(0));
-        }
-    }
+    post_mouse_hook_want();
+}
+
+/// Turn mouse-wheel reversal filtering on or off. Shares the `WH_MOUSE_LL`
+/// hook with the button filter.
+pub(crate) fn set_wheel_filter(on: bool) {
+    WHEEL_WANTED.store(on, Ordering::Relaxed);
+    post_mouse_hook_want();
 }
 
 /// Start the hook thread for the app. Publishes `HOOK_ACTIVE`.
@@ -151,8 +173,8 @@ pub(crate) fn start() -> bool {
     let ok = thread.is_some();
     *HOOK.lock().unwrap_or_else(PoisonError::into_inner) = thread;
     HOOK_ACTIVE.store(ok, Ordering::Relaxed);
-    if ok && MOUSE_WANTED.load(Ordering::Relaxed) {
-        set_mouse_filter(true);
+    if ok && mouse_hook_wanted() {
+        post_mouse_hook_want();
     }
     if ok {
         // Adopt deferred releases across a restart: the new thread owns no

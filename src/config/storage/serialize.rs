@@ -36,3 +36,36 @@ pub(super) fn histogram_lines(s: &Settings) -> String {
     }
     text
 }
+
+/// `day.YYYYMMDD` lines for days with input (`vk:presses:blocked`, only
+/// keys with activity; empty when the filter never ran that long).
+pub(super) fn day_lines(s: &Settings) -> String {
+    let mut text = String::new();
+    for entry in &s.day_history {
+        let pairs: Vec<String> = entry
+            .presses
+            .iter()
+            .zip(entry.blocked.iter())
+            .enumerate()
+            .filter(|&(_, (&p, &b))| p > 0 || b > 0)
+            .map(|(vk, (&p, &b))| format!("{vk:02X}:{p}:{b}"))
+            .collect();
+        if !pairs.is_empty() {
+            text.push_str(&format!("day.{:08}={}\n", entry.date, pairs.join(",")));
+        }
+    }
+    text
+}
+
+/// `alert.YYYYMMDD` lines: keys already warned about that day (empty when
+/// no deterioration was ever seen).
+pub(super) fn alert_lines(s: &Settings) -> String {
+    let mut text = String::new();
+    for (date, vks) in &s.alerted {
+        if !vks.is_empty() {
+            let list: Vec<String> = vks.iter().map(|vk| format!("{vk:02X}")).collect();
+            text.push_str(&format!("alert.{date:08}={}\n", list.join(",")));
+        }
+    }
+    text
+}

@@ -5,6 +5,7 @@
 
 use super::super::language::Language;
 use super::en::EN;
+use super::ja::JA;
 use super::ko::KO;
 use super::schema::Strings;
 
@@ -12,6 +13,7 @@ pub fn strings(lang: Language) -> &'static Strings {
     match lang {
         Language::Ko => &KO,
         Language::En => &EN,
+        Language::Ja => &JA,
     }
 }
 

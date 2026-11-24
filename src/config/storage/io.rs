@@ -11,7 +11,7 @@ use super::super::model::Settings;
 use super::guard::read_settings;
 use super::parse::parse;
 use super::paths::{backup_path, config_path};
-use super::serialize::{histogram_lines, measure_from_value, one_line};
+use super::serialize::{alert_lines, day_lines, histogram_lines, measure_from_value, one_line};
 
 pub fn load() -> Settings {
     try_load().unwrap_or_default()
@@ -51,7 +51,7 @@ pub fn save(s: &Settings) -> bool {
         let _ = fs::create_dir_all(dir);
     }
     let mut text = format!(
-        "[KeyboardChatteringFix]\niThreshold={}\nbFilterEnabled={}\nbPlaySound={}\nlpSoundFile={}\nbMinimizeOnLaunch={}\nbCloseToTray={}\nbRecordAllKeypress={}\niLogLimit={}\nsLanguage={}\nsMeasureFrom={}\niMinChatterMs={}\nbExcludeInjected={}\nbFilterMouse={}\niMouseThreshold={}\niReleaseDeferMs={}\nsAutoDisableApps={}\nbAutoDisableFullscreen={}\nsHotkeyToggle={}\nsHotkeyCleaning={}\niCleaningTimeoutMin={}\niTotalPresses={}\niBlockedPresses={}\n",
+        "[KeyboardChatteringFix]\niThreshold={}\nbFilterEnabled={}\nbPlaySound={}\nlpSoundFile={}\nbMinimizeOnLaunch={}\nbCloseToTray={}\nbRecordAllKeypress={}\niLogLimit={}\nsLanguage={}\nsMeasureFrom={}\niMinChatterMs={}\nbExcludeInjected={}\nbFilterMouse={}\nbFilterWheel={}\nbAutoCheckUpdate={}\niLastUpdateCheck={}\niMouseThreshold={}\niReleaseDeferMs={}\nsAutoDisableApps={}\nsAppProfiles={}\nbAutoDisableFullscreen={}\nsHotkeyToggle={}\nsHotkeyCleaning={}\niCleaningTimeoutMin={}\niTotalPresses={}\niBlockedPresses={}\n",
         s.threshold_ms,
         if s.enabled { 1 } else { 0 },
         if s.play_sound { 1 } else { 0 },
@@ -65,9 +65,13 @@ pub fn save(s: &Settings) -> bool {
         s.min_chatter_ms,
         if s.exclude_injected { 1 } else { 0 },
         if s.filter_mouse { 1 } else { 0 },
+        if s.filter_wheel { 1 } else { 0 },
+        if s.auto_check_update { 1 } else { 0 },
+        s.last_update_check_unix,
         s.mouse_threshold_ms,
         s.release_defer_ms,
         one_line(&s.auto_disable_apps),
+        one_line(&s.app_profiles),
         if s.auto_disable_fullscreen { 1 } else { 0 },
         one_line(&s.hotkey_toggle),
         one_line(&s.hotkey_cleaning),
@@ -98,6 +102,15 @@ pub fn save(s: &Settings) -> bool {
             "; Measured key gaps for the threshold suggestion (written by the program)\nsHistMeasure={}\n{hist}",
             measure_from_value(s.measure_from)
         ));
+    }
+    let days = day_lines(s);
+    if !days.is_empty() {
+        text.push_str("; Daily per-key totals for the trend watch (written by the program)\n");
+        text.push_str(&days);
+    }
+    let alerts = alert_lines(s);
+    if !alerts.is_empty() {
+        text.push_str(&alerts);
     }
     // Atomic write: stage to a temp file in the same directory, keep the
     // previous generation as .bak, then rename over the main file, so a

@@ -5,7 +5,7 @@
 //! `settings.ini.bak`, and only then renamed over the main file. A missing
 //! or empty main file falls back to the backup (ISSUE-004).
 
-use super::super::model::Settings;
+use super::super::model::{DayEntry, Settings};
 use crate::{
     debounce::{GAP_BUCKETS, MeasureFrom, RELEASE_DEFER_MAX_MS},
     i18n::LanguagePref,
@@ -67,12 +67,18 @@ fn readme_sample_parses_to_what_it_documents() {
         assert!(!s.minimize_on_launch);
         assert!(s.close_to_tray);
         assert!(!s.filter_mouse, "bFilterMouse=0 with a comment is off");
+        assert!(!s.filter_wheel, "bFilterWheel=0 with a comment is off");
+        assert!(
+            s.auto_check_update,
+            "bAutoCheckUpdate is on unless turned off"
+        );
         assert!(!s.auto_disable_fullscreen);
         assert_eq!(s.language, LanguagePref::Auto);
         assert_eq!(s.measure_from, MeasureFrom::Release);
         assert_eq!(s.log_limit, d.log_limit);
         assert_eq!(s.cleaning_timeout_min, 5);
         assert_eq!(s.auto_disable_apps, "");
+        assert_eq!(s.app_profiles, "");
         assert_eq!(
             (s.hotkey_toggle.as_str(), s.hotkey_cleaning.as_str()),
             ("", "")
@@ -93,11 +99,13 @@ fn trailing_comments_need_whitespace_and_keep_paths_and_app_lists() {
              iThreshold=80 ; eighty\n\
              lpSoundFile=C:\\My #1\\blip.wav\n\
              sAutoDisableApps=a.exe ; b.exe # games\n\
+             sAppProfiles=g.exe=80 ; e.exe=25 # per-app\n\
              sHotkeyToggle=Ctrl+Alt+F12\t# toggle\n",
     );
     assert_eq!(s.threshold_ms, 80);
     assert_eq!(s.sound_file.as_deref(), Some(r"C:\My #1\blip.wav"));
     assert_eq!(s.auto_disable_apps, "a.exe ; b.exe");
+    assert_eq!(s.app_profiles, "g.exe=80 ; e.exe=25");
     assert_eq!(s.hotkey_toggle, "Ctrl+Alt+F12");
 }
 
@@ -295,8 +303,12 @@ fn save_load_round_trip_preserves_everything() {
             min_chatter_ms: 9,
             exclude_injected: false,
             filter_mouse: true,
+            filter_wheel: true,
+            auto_check_update: false,
+            last_update_check_unix: 1_800_000_000,
             release_defer_ms: 30,
             auto_disable_apps: "game.exe; other".to_string(),
+            app_profiles: "game.exe=80; editor.exe=25".to_string(),
             auto_disable_fullscreen: true,
             hotkey_toggle: "Ctrl+Alt+F12".to_string(),
             hotkey_cleaning: "Ctrl+Alt+F11".to_string(),
@@ -320,6 +332,32 @@ fn save_load_round_trip_preserves_everything() {
                 hist[0x20][2] = 9;
                 hist
             },
+            day_history: vec![
+                DayEntry {
+                    date: 20261120,
+                    presses: {
+                        let mut counts = [0u64; 256];
+                        counts[0x20] = 100;
+                        counts[0x41] = 5;
+                        counts
+                    },
+                    blocked: {
+                        let mut counts = [0u64; 256];
+                        counts[0x20] = 40;
+                        counts
+                    },
+                },
+                DayEntry {
+                    date: 20261121,
+                    presses: {
+                        let mut counts = [0u64; 256];
+                        counts[0x20] = 10;
+                        counts
+                    },
+                    blocked: [0; 256],
+                },
+            ],
+            alerted: vec![(20261120, vec![0x20])],
         };
         assert!(save(&s));
         // No staging file may be left behind by the atomic write.
@@ -341,10 +379,14 @@ fn save_load_round_trip_preserves_everything() {
         assert_eq!(back.min_chatter_ms, 9);
         assert!(!back.exclude_injected);
         assert!(back.filter_mouse);
+        assert!(back.filter_wheel);
+        assert!(!back.auto_check_update);
+        assert_eq!(back.last_update_check_unix, 1_800_000_000);
         assert_eq!(back.mouse_threshold_ms, 45);
         assert_eq!(back.gap_hist[0x20][2], 9);
         assert_eq!(back.release_defer_ms, 30);
         assert_eq!(back.auto_disable_apps, "game.exe; other");
+        assert_eq!(back.app_profiles, "game.exe=80; editor.exe=25");
         assert!(back.auto_disable_fullscreen);
         assert_eq!(back.hotkey_toggle, "Ctrl+Alt+F12");
         assert_eq!(back.hotkey_cleaning, "Ctrl+Alt+F11");
@@ -360,6 +402,60 @@ fn save_load_round_trip_preserves_everything() {
             (back.per_key_presses[0x41], back.per_key_blocked[0x41]),
             (0, 0)
         );
+        assert_eq!(back.day_history.len(), 2);
+        assert_eq!(back.day_history[0].date, 20261120);
+        assert_eq!(
+            (
+                back.day_history[0].presses[0x20],
+                back.day_history[0].blocked[0x20]
+            ),
+            (100, 40)
+        );
+        assert_eq!(back.day_history[0].presses[0x41], 5);
+        assert_eq!(back.day_history[1].date, 20261121);
+        assert_eq!(back.day_history[1].presses[0x20], 10);
+        assert_eq!(back.day_history[1].blocked[0x20], 0);
+        assert_eq!(back.alerted, vec![(20261120, vec![0x20])]);
+    });
+}
+
+#[test]
+fn day_and_alert_lines_round_trip_sparsely_and_skip_garbage() {
+    with_isolated_appdata(|dir| {
+        let ini = dir.join("KeyboardChatteringFix").join("settings.ini");
+        std::fs::create_dir_all(ini.parent().unwrap()).unwrap();
+        std::fs::write(
+            &ini,
+            "[KeyboardChatteringFix]\n\
+             day.20261124=41:100:3,20:5:1\n\
+             day.20261124=41:7:2\n\
+             day.20261125=ZZ:1:2,43:9:1\n\
+             day.notadate=41:1:1\n\
+             day.0=41:1:1\n\
+             day.20261126=ZZ,43\n\
+             alert.20261124=41,20\n\
+             alert.20261124=ZZ,42\n\
+             alert.nope=41\n",
+        )
+        .unwrap();
+        let s = load();
+        // A repeated date keeps its last line, like every other key.
+        let day = s.day_history.iter().find(|e| e.date == 20261124).unwrap();
+        assert_eq!((day.presses[0x41], day.blocked[0x41]), (7, 2));
+        assert_eq!(day.presses[0x20], 0);
+        // Malformed entries, the zero date, and lines with nothing
+        // readable never become entries.
+        assert_eq!(s.day_history.len(), 2);
+        let day25 = s.day_history.iter().find(|e| e.date == 20261125).unwrap();
+        assert_eq!((day25.presses[0x43], day25.blocked[0x43]), (9, 1));
+        let alerted: Vec<u8> = s
+            .alerted
+            .iter()
+            .find(|(d, _)| *d == 20261124)
+            .map(|(_, vks)| vks.clone())
+            .unwrap();
+        assert_eq!(alerted, vec![0x42]);
+        assert_eq!(s.alerted.len(), 1);
     });
 }
 

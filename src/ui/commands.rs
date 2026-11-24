@@ -15,14 +15,19 @@ use super::{
     dialog::{msg_box, show_about},
     elevation, files, foreground, history,
     ids::*,
+    keys,
     settings_form::persist_live,
-    state::current_lang,
+    state::{SAVED, current_lang},
     stats::update_stats,
     text::to_wide,
     tray,
     update::spawn_update_check,
 };
-use crate::{app::state::SHARED, config, i18n::strings};
+use crate::{
+    app::state::SHARED,
+    config,
+    i18n::{fill, strings},
+};
 use std::{
     sync::Mutex,
     time::{Duration, Instant},
@@ -132,6 +137,82 @@ pub(crate) fn cleaning_expired(elapsed: Duration, limit_min: u64) -> bool {
     limit_min > 0 && elapsed >= Duration::from_secs(limit_min * 60)
 }
 
+/// Trend watches run at most this often (the day history only changes on
+/// save, so checking every tick would be pure overhead).
+const TREND_CHECK_EVERY: Duration = Duration::from_secs(300);
+/// Last trend check (UI thread only).
+static LAST_TREND_CHECK: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// Whether a trend check is due: the first tick runs at once (a switch
+/// that already went bad is worth knowing about right away), later ticks
+/// at most every few minutes.
+pub(crate) fn trend_check_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.duration_since(at) >= TREND_CHECK_EVERY)
+}
+
+/// Timer tick: warn once per key per day when its blocked count jumped
+/// (see `recommend::worst_keys`). At most three keys per balloon; the rest
+/// surface on later ticks.
+pub(crate) unsafe fn trends_tick(hwnd: HWND) {
+    unsafe {
+        {
+            let mut last = LAST_TREND_CHECK.lock().unwrap();
+            if !trend_check_due(*last, Instant::now()) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let Some(saved) = SAVED.get() else {
+            return;
+        };
+        let today = crate::config::today_yyyymmdd();
+        let unalerted: Vec<(u8, u64, u64)> = {
+            let saved = saved.lock().unwrap();
+            crate::recommend::worst_keys(&saved.day_history, today, usize::MAX)
+                .into_iter()
+                .filter(|(vk, _, _)| {
+                    !saved
+                        .alerted
+                        .iter()
+                        .any(|(d, vks)| *d == today && vks.contains(vk))
+                })
+                .take(3)
+                .collect()
+        };
+        if unalerted.is_empty() {
+            return;
+        }
+        let s = strings(current_lang());
+        let lines: Vec<String> = unalerted
+            .iter()
+            .map(|(vk, recent, prev)| {
+                fill(
+                    s.trend_key_fmt,
+                    &[&keys::vk_name(*vk), &recent.to_string(), &prev.to_string()],
+                )
+            })
+            .collect();
+        let text = fill(
+            s.trend_alert_fmt,
+            &[&unalerted.len().to_string(), &lines.join("\n")],
+        );
+        tray::balloon(hwnd, &text);
+        if let Some(saved) = SAVED.get() {
+            let mut saved = saved.lock().unwrap();
+            let vks: Vec<u8> = unalerted.iter().map(|(vk, _, _)| *vk).collect();
+            match saved.alerted.iter_mut().find(|(d, _)| *d == today) {
+                Some((_, list)) => {
+                    list.extend(vks.iter().copied());
+                    list.sort_unstable();
+                    list.dedup();
+                }
+                None => saved.alerted.push((today, vks)),
+            }
+        }
+        persist_live();
+    }
+}
+
 /// Timer tick: end cleaning mode after its time limit, so a forgotten
 /// cleaning session never leaves the keyboard dead.
 pub(crate) unsafe fn cleaning_tick(hwnd: HWND) {
@@ -195,6 +276,9 @@ pub(crate) unsafe fn run(hwnd: HWND, cmd: usize) {
             }
             MENU_PAUSE_15 => pause_for(hwnd, 15),
             MENU_PAUSE_60 => pause_for(hwnd, 60),
+            // `--resume`: on again even if it was off (that is what
+            // "resume" means), and a timed pause ends with it.
+            MENU_RESUME => set_protection(hwnd, true),
             MENU_CLEANING => set_cleaning(hwnd, true),
             MENU_RESET_STATS => {
                 let answer = msg_box(
@@ -206,6 +290,13 @@ pub(crate) unsafe fn run(hwnd: HWND, cmd: usize) {
                 if answer == IDYES {
                     if let Some(g) = SHARED.get() {
                         g.lock().unwrap().debouncer.reset_stats();
+                    }
+                    // Day history is statistics too: a reset starts the
+                    // trend watch over instead of mixing eras.
+                    if let Some(saved) = SAVED.get() {
+                        let mut saved = saved.lock().unwrap();
+                        saved.day_history.clear();
+                        saved.alerted.clear();
                     }
                     persist_live();
                     update_stats(hwnd);
@@ -261,5 +352,14 @@ mod tests {
         assert!(!cleaning_expired(Duration::from_secs(299), 5));
         assert!(cleaning_expired(Duration::from_secs(300), 5));
         assert!(!cleaning_expired(Duration::from_secs(86_400), 0));
+    }
+
+    #[test]
+    fn trend_check_runs_once_then_at_most_every_five_minutes() {
+        let now = Instant::now();
+        assert!(trend_check_due(None, now));
+        assert!(!trend_check_due(Some(now), now));
+        assert!(!trend_check_due(Some(now), now + Duration::from_secs(299)));
+        assert!(trend_check_due(Some(now), now + Duration::from_secs(300)));
     }
 }

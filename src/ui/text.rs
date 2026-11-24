@@ -122,6 +122,7 @@ pub(crate) unsafe fn apply_language(hwnd: HWND) {
         fill_combo(hwnd, ID_COMBO_LANG, &options, lang);
         set_cue(hwnd, ID_EDIT_SOUND_FILE, s.sound_file_cue);
         set_cue(hwnd, ID_EDIT_AUTO_APPS, s.auto_apps_cue);
+        set_cue(hwnd, ID_EDIT_APP_PROFILES, s.auto_profiles_cue);
         set_cue(hwnd, ID_EDIT_HOTKEY_TOGGLE, s.hotkey_toggle_cue);
         set_cue(hwnd, ID_EDIT_HOTKEY_CLEAN, s.hotkey_clean_cue);
 

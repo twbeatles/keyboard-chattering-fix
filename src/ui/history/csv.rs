@@ -59,6 +59,7 @@ pub(crate) fn render_csv(
             s.col_blocked,
             s.col_rate,
             s.col_threshold,
+            s.col_week,
         ]),
     );
     for row in render_keys(s, totals, "") {
@@ -69,6 +70,9 @@ pub(crate) fn render_csv(
 
 /// CSV of what is recorded right now (File > Export history).
 pub(crate) fn csv_snapshot() -> Option<String> {
+    // SAVED first (7-day column), then SHARED: the lock order is SAVED
+    // before SHARED everywhere.
+    let week_blocked = super::rows::week_blocked_now();
     let shared = SHARED.get()?;
     let (events, totals) = {
         let g = shared.lock().unwrap();
@@ -83,6 +87,7 @@ pub(crate) fn csv_snapshot() -> Option<String> {
             Box::new(KeyTotals {
                 presses: d.per_key_presses,
                 blocked: d.per_key_blocked,
+                week_blocked,
                 thresholds,
             }),
         )

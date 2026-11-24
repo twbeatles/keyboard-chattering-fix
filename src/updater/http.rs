@@ -138,9 +138,20 @@ pub fn download_and_verify(
     Ok(())
 }
 
+/// Manifest source: the pinned GitHub URL, unless `KCFIX_MANIFEST_URL`
+/// points elsewhere (E2E / debugging against a local fixture server, like
+/// `KCFIX_LOCALE` does for languages). The manifest itself is still
+/// signature-checked, so a fixture must be signed with the dev key.
+fn manifest_url() -> String {
+    std::env::var("KCFIX_MANIFEST_URL")
+        .ok()
+        .filter(|u| !u.trim().is_empty())
+        .unwrap_or_else(|| MANIFEST_URL.to_string())
+}
+
 pub fn check_for_update() -> Result<UpdateManifest, UpdateError> {
     let body = http_agent()
-        .get(MANIFEST_URL)
+        .get(&manifest_url())
         .call()
         .map_err(|err| match &err {
             // No release published yet (e.g. before the first GitHub
@@ -157,6 +168,22 @@ pub fn check_for_update() -> Result<UpdateManifest, UpdateError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_url_override_points_at_a_fixture_server() {
+        // One test owns the variable start to finish: no other test touches
+        // it, so parallel runners cannot interleave.
+        unsafe { std::env::remove_var("KCFIX_MANIFEST_URL") };
+        assert_eq!(manifest_url(), MANIFEST_URL);
+        unsafe {
+            std::env::set_var("KCFIX_MANIFEST_URL", "http://127.0.0.1:9/update.json");
+        }
+        assert_eq!(manifest_url(), "http://127.0.0.1:9/update.json");
+        unsafe { std::env::set_var("KCFIX_MANIFEST_URL", "   ") };
+        assert_eq!(manifest_url(), MANIFEST_URL, "blank means pinned");
+        unsafe { std::env::remove_var("KCFIX_MANIFEST_URL") };
+        assert_eq!(manifest_url(), MANIFEST_URL);
+    }
 
     #[test]
     fn windows_proxy_setting_picks_the_https_route() {

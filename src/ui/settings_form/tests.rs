@@ -33,6 +33,26 @@ fn save_starts_from_the_file_but_never_from_an_unreadable_one() {
     );
 }
 
+/// `on_save` never assigns the check timestamp: whatever `save_base`
+/// yields is what gets saved, so a Save must not clobber the worker's
+/// newer stamp (or an older one on disk).
+#[test]
+fn save_base_preserves_the_update_check_timestamp() {
+    let saved = Settings {
+        last_update_check_unix: 1000,
+        ..Settings::default()
+    };
+    let disk = Settings {
+        last_update_check_unix: 2000,
+        ..Settings::default()
+    };
+    assert_eq!(
+        save_base(Some(disk), saved.clone()).last_update_check_unix,
+        2000
+    );
+    assert_eq!(save_base(None, saved).last_update_check_unix, 1000);
+}
+
 #[test]
 fn only_a_switched_baseline_voids_the_measured_gaps() {
     assert!(baseline_changed(MeasureFrom::Release, MeasureFrom::Press));

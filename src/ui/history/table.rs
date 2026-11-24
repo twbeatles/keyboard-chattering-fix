@@ -40,11 +40,12 @@ use crate::{
 pub(super) fn columns(s: &Strings, view: HistoryView) -> Vec<(&'static str, i32, bool)> {
     match view {
         HistoryView::Keys => vec![
-            (s.col_key, 110, false),
-            (s.col_presses, 76, true),
-            (s.col_blocked, 70, true),
-            (s.col_rate, 76, true),
-            (s.col_threshold, 94, true),
+            (s.col_key, 100, false),
+            (s.col_presses, 68, true),
+            (s.col_blocked, 62, true),
+            (s.col_rate, 68, true),
+            (s.col_threshold, 86, true),
+            (s.col_week, 62, true),
         ],
         _ => vec![
             (s.col_time, 136, false),
@@ -232,6 +233,13 @@ pub(crate) unsafe fn refresh(hwnd: HWND, force: bool) {
             let st = STATE.lock().unwrap();
             (st.view, st.query.clone(), st.last_key)
         };
+        // The 7-day column comes from the saved day history, read first so
+        // the lock order stays SAVED before SHARED everywhere.
+        let week_blocked = if view == HistoryView::Keys {
+            super::rows::week_blocked_now()
+        } else {
+            [0; 256]
+        };
         let Some(shared) = SHARED.get() else {
             return;
         };
@@ -259,6 +267,7 @@ pub(crate) unsafe fn refresh(hwnd: HWND, force: bool) {
                     Snapshot::Keys(Box::new(KeyTotals {
                         presses: d.per_key_presses,
                         blocked: d.per_key_blocked,
+                        week_blocked,
                         thresholds,
                     }))
                 }

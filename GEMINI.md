@@ -11,8 +11,8 @@ pipeline. Single binary + `kcfix-updater` helper (Cargo workspace). Reply in Kor
 | Startup | `src/app/`: `bootstrap`, `cli`, `instance`, `state` |
 | Hot input path | `src/input/`: `hook`, `sound` |
 | Settings | `src/config/`: `model`, `storage`, `autostart`, `sound` |
-| Filter core | `src/debounce.rs` |
-| Strings (KO+EN pairs) | `src/i18n/` |
+| Filter core | `src/debounce/` (`filter`/`thresholds`/`types`/`stats`) |
+| Strings (KO+EN+JA tables) | `src/i18n/` |
 | Window/tray/paint | `src/ui/`: `window`, `stats`, `text`, `settings_form`, `tray`, `update`, `paint`, `diag` (file log), … |
 | Update client/helper | `src/updater/`, `crates/kcfix-updater/` |
 
@@ -47,7 +47,7 @@ cargo check --workspace --all-targets
 - `config::VERSION` == `Cargo.toml` version == `v{VERSION}` tag (`version_sync.rs`).
 - No `KCFIX_DBG_*`/ad-hoc log code in commits; no GUI-opening tests
   (they freeze the runner — only `--version`/`-V` smoke tests).
-- Re-export only what is used; every visible string needs every shipped language (registry in `src/i18n/language.rs`; `sLanguage=auto` follows Windows: Korean on a Korean system, else English; `--check-language`, `KCFIX_LOCALE` for diagnostics).
+- Re-export only what is used; every visible string needs every shipped language (registry in `src/i18n/language.rs`; `sLanguage=auto` follows Windows: Korean on a Korean system, Japanese on a Japanese one, else English; `--check-language`, `KCFIX_LOCALE` for diagnostics).
 - Prefer tightening an existing assertion over adding a hollow test.
 
 ## Open risks
@@ -56,7 +56,9 @@ cargo check --workspace --all-targets
   `SetWindowTextW` path suspected). Recent changes shrink that surface
   (no Win32 under lock, diffed updates, tick re-entry guard, slow-tick logging) but the root cause is unconfirmed.
 - Manual pre-release E2E (real binaries, starts the GUI): `scripts/e2e/README.md`.
-- Per-key thresholds (`key.XX`) are config-file only; Save applies file
-  edits live, and every settings write re-reads them from disk first.
+- Per-key thresholds (`key.XX`) are edited live in the Keys tab (pick a key
+  or double-click a history row, Apply saves at once); `0` means never filter.
+  Save applies file edits live, and every settings write re-reads them from
+  disk first.
 - The update helper is never replaced by an in-app update: keep its CLI
   append-only and pass new data via environment variables (`docs/UPDATE.md`).

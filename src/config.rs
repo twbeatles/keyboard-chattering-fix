@@ -9,7 +9,7 @@
 /// Application version. Single source of truth for the update pipeline:
 /// must match `[package] version` in `Cargo.toml` and the `v{VERSION}`
 /// GitHub Release tag. `tests/version_sync.rs` enforces this.
-pub const VERSION: &str = "0.3.6";
+pub const VERSION: &str = "0.3.7";
 /// Project page opened from Help > Homepage.
 pub const HOMEPAGE_URL: &str = "https://github.com/twbeatles/keyboard-chattering-fix";
 /// Ed25519 public key (base64, 32 bytes) that verifies `update.json`.
@@ -27,6 +27,6 @@ pub use autostart::{
     elevated_start_expected, exe_in_protected_location, mark_elevated_start, refresh_elevated_task,
     set_elevated_task, sync_autostart, upgrade_autostart_entry,
 };
-pub use model::Settings;
+pub use model::{DayEntry, Settings, today_yyyymmdd};
 pub use sound::{ValidatedSound, resolve_sound_file};
 pub use storage::{config_path, load, load_from, save, try_load};
